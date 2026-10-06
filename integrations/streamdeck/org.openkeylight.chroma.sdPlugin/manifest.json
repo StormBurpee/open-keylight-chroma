@@ -31,7 +31,7 @@
     {
       "UUID": "org.openkeylight.chroma.power",
       "Name": "Power",
-      "Icon": "imgs/power",
+      "Icon": "imgs/power-list",
       "Tooltip": "Toggle power. Off remains available during recording lock.",
       "Controllers": [
         "Keypad"
@@ -49,13 +49,14 @@
     {
       "UUID": "org.openkeylight.chroma.brightness",
       "Name": "Brightness",
-      "Icon": "imgs/brightness",
+      "Icon": "imgs/brightness-list",
       "Tooltip": "Step brightness with a key or dial. Press the dial or touch strip to toggle power.",
       "Controllers": [
         "Keypad",
         "Encoder"
       ],
       "Encoder": {
+        "Icon": "imgs/brightness",
         "layout": "$B1",
         "TriggerDescription": {
           "Rotate": "Adjust brightness",
@@ -76,7 +77,7 @@
     {
       "UUID": "org.openkeylight.chroma.scene",
       "Name": "Scene",
-      "Icon": "imgs/scene",
+      "Icon": "imgs/scene-list",
       "Tooltip": "Recall one of the light's eight saved scenes.",
       "Controllers": [
         "Keypad"
@@ -94,7 +95,7 @@
     {
       "UUID": "org.openkeylight.chroma.lock",
       "Name": "Recording lock",
-      "Icon": "imgs/lock",
+      "Icon": "imgs/lock-list",
       "Tooltip": "Explicitly lock or unlock output changes. Off is always available.",
       "Controllers": [
         "Keypad"

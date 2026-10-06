@@ -1,0 +1,182 @@
+{
+  "tool": "sharp",
+  "version": "0.35.5",
+  "sources": {
+    "plugin": {
+      "path": "art/source/plugin.png",
+      "generated_filename": "exec-d9f0a28d-2f0a-4846-ab28-9eaeee8c39eb.png",
+      "width": 1254,
+      "height": 1254,
+      "sha256": "63ab4f5bc5be949c4cbaaa380631985c5b388d5bb1127d4157d8fe9cf0133b30"
+    },
+    "power": {
+      "path": "art/source/power.png",
+      "generated_filename": "exec-723ad4ba-1756-44b0-9b06-217540554133.png",
+      "width": 1254,
+      "height": 1254,
+      "sha256": "c940e6486b9633f2dce6d196edef8e1ed6216406d7680b039327e98f62ead649"
+    },
+    "brightness": {
+      "path": "art/source/brightness.png",
+      "generated_filename": "exec-7f6bd5c2-ecf5-4c63-8723-9da6d563b88f.png",
+      "width": 1254,
+      "height": 1254,
+      "sha256": "5287abee780e723e2581904af5ed987ea56e8fbdbb85f9b6fc31e3abe3a19bdc"
+    },
+    "scene": {
+      "path": "art/source/scene.png",
+      "generated_filename": "exec-0cf0437d-446c-42ac-857d-eca80bdae7c3.png",
+      "width": 1254,
+      "height": 1254,
+      "sha256": "30912ccd89ab90a1c88badc838c14740340c945ec488d26661756b2ab1b3959f"
+    },
+    "lock": {
+      "path": "art/source/lock.png",
+      "generated_filename": "exec-d1eda865-86c9-4462-9652-fb17b17043e3.png",
+      "width": 1254,
+      "height": 1254,
+      "sha256": "ddc67111fdef77ab337dddd28b53016a810b6d1b67b73207a9a1365f6ea0f03d"
+    },
+    "locked": {
+      "path": "art/source/locked.png",
+      "generated_filename": "exec-aabc31a4-9181-400b-939f-58f22f32ff70.png",
+      "width": 1254,
+      "height": 1254,
+      "sha256": "b124ed66de6179d68c523afc57319bb55498030649b45f1393e5902ff07df027"
+    }
+  },
+  "exports": [
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/plugin.png",
+      "width": 256,
+      "height": 256,
+      "sha256": "5872e934b14a18da89dbcfa850eb368dce891d5a813f3a643514326e60718627"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/plugin@2x.png",
+      "width": 512,
+      "height": 512,
+      "sha256": "98186f468ddb8825e0482a1569fd46e5a378a4a3b65e99e8ca11355e6fba2c42"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/power.png",
+      "width": 72,
+      "height": 72,
+      "sha256": "dac34727a65942bd8ee729f03877e17ca87ecc70265ef992b5de1c2257a45da4"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/power@2x.png",
+      "width": 144,
+      "height": 144,
+      "sha256": "b64b4c5c8a5ca38466185be9d3a598994356fa68b57d9664821834495b61462b"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/brightness.png",
+      "width": 72,
+      "height": 72,
+      "sha256": "3ca3027f662003b3c440d05e80e852db3d7aa5dd53ae6c60085a453d911f9b42"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/brightness@2x.png",
+      "width": 144,
+      "height": 144,
+      "sha256": "7bdd27eb7c9abd6946d421ceddcf68b2cf0578afe20a80c20c40904e519d4821"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/scene.png",
+      "width": 72,
+      "height": 72,
+      "sha256": "d1890d8f4bcfcf0598e7dfbfd417d5591f975b650cd7412684a5d0e607d3b38f"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/scene@2x.png",
+      "width": 144,
+      "height": 144,
+      "sha256": "2c98d6af0a67d360d894e51f445f2515d999ecb0393aff967c27f0eabf66ec2f"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/lock.png",
+      "width": 72,
+      "height": 72,
+      "sha256": "7a3be09cea010b0149f0ed3f53e4506b07f9e24c93b25a994ca916533f966a06"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/lock@2x.png",
+      "width": 144,
+      "height": 144,
+      "sha256": "73f2b27d7df7a0d1521776408e6440b18cf0216543db4e9f9ee4f596833c8fcd"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/locked.png",
+      "width": 72,
+      "height": 72,
+      "sha256": "a427d9fbdcf8a3c54f099a96b19993d133df654ec41983faa14cb11f1a469816"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/locked@2x.png",
+      "width": 144,
+      "height": 144,
+      "sha256": "aeae8181cf8f5a1f61b927c1b5868b5802ad16fbd2fcb484afa1851f690ad94d"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/power-list.png",
+      "width": 20,
+      "height": 20,
+      "sha256": "fdc75de2d7aac1756bf856bf61044a3f9f99865af06485ee2f90752e730cd162"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/power-list@2x.png",
+      "width": 40,
+      "height": 40,
+      "sha256": "d8bd3263999bdd2b10964a3a32b50a6ed61a4491626016d967236f9adf922d44"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/brightness-list.png",
+      "width": 20,
+      "height": 20,
+      "sha256": "fb0dcce7b37ff9496d8d0546b870089b156bbf2630f53bf15527446607248d3c"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/brightness-list@2x.png",
+      "width": 40,
+      "height": 40,
+      "sha256": "9c9233539dd90ad3138e4de56edf95510c4b0aa82367b849c206174ad5be9e2e"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/scene-list.png",
+      "width": 20,
+      "height": 20,
+      "sha256": "bb5df97dda5a5cb6c60a4584227b2350cf4224e2e7a9e8532bbb84393eb783ed"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/scene-list@2x.png",
+      "width": 40,
+      "height": 40,
+      "sha256": "69094e7c471b9fbe5bcf7165371e16553adc77d0368b00fe7dbc072a050b3daa"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/lock-list.png",
+      "width": 20,
+      "height": 20,
+      "sha256": "5a838c6afbc9f80677ef1b8783329e83e70b22e6568bf7f5f1aedb6b3b3f4b38"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/lock-list@2x.png",
+      "width": 40,
+      "height": 40,
+      "sha256": "71cae49b6ded6a703a0bf35f6a18a34976a5e7ce12ae3a99293fb543a6415ff7"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/category.png",
+      "width": 28,
+      "height": 28,
+      "sha256": "b36597bcfd08f3d644065c382e9927ad5b1c31bbd40de4640a45d0463ab51c65"
+    },
+    {
+      "path": "org.openkeylight.chroma.sdPlugin/imgs/category@2x.png",
+      "width": 56,
+      "height": 56,
+      "sha256": "b6b3d89f3c56d52efa40900ddec03dcba99c3340e512c48360d7010e3fc9880e"
+    }
+  ]
+}

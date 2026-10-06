@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { WifiSetup, ClientAccess } from "./SystemAccess";
 import {
   HttpTransport,
   StudioStore,
@@ -1072,6 +1073,9 @@ export function Studio({ store }: { store: StudioStore }) {
                     </Button>
                   </form>
                 )}
+                {supported.settings && (
+                  <WifiSetup store={store} disabled={!authorized || busy} />
+                )}
               </section>
               <section className="system-panel">
                 <div className="panel-heading">
@@ -1141,6 +1145,13 @@ export function Studio({ store }: { store: StudioStore }) {
                   )}
                 </div>
               </section>
+              <ClientAccess
+                store={store}
+                token={token}
+                disabled={busy}
+                onSelfRevoked={logout}
+                onPair={() => setAuthOpen(true)}
+              />
               <section className="system-panel firmware-panel">
                 <div className="panel-heading">
                   <Upload size={19} />
@@ -1338,8 +1349,8 @@ export function Studio({ store }: { store: StudioStore }) {
             </div>
             <DialogTitle>Make it your light.</DialogTitle>
             <DialogDescription>
-              Device access stays in this tab. Pairing requires the physical
-              pairing window.
+              Device access stays in this tab. Pairing requires an open pairing
+              window.
             </DialogDescription>
           </DialogHeader>
           {authError && (
@@ -1398,8 +1409,9 @@ export function Studio({ store }: { store: StudioStore }) {
               </Button>
               <div className="dialog-divider">OR PAIR AT THE LIGHT</div>
               <p className="panel-copy">
-                Hold the physical button to open pairing, then request access
-                below. If pairing is unavailable, the device will explain why.
+                Open pairing with the physical button or an already trusted
+                client, then request access below. The device will explain if
+                pairing is unavailable.
               </p>
               <Label htmlFor="pair-label">Name this connection</Label>
               <Input

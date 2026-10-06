@@ -40,6 +40,7 @@ export type Device = {
   };
 };
 export type Scene = { id: number; name: string; state: Output };
+export type PairedClient = { id: string; label: string };
 export type HistoryEntry = {
   sequence: number;
   uptime_ms: number;
@@ -109,7 +110,10 @@ export class HttpTransport implements Transport {
     body?: unknown,
     extra: Record<string, string> = {},
   ): Promise<T> {
-    if (!/^\/[a-z]+(?:\/[1-8](?:\/activate)?)?$/.test(path))
+    if (
+      !/^\/[a-z]+(?:\/[1-8](?:\/activate)?)?$/.test(path) &&
+      !/^\/clients\/[0-9a-f]{16}$/.test(path)
+    )
       throw new ApiError("Invalid API path");
     const controller = new AbortController(),
       timeout = setTimeout(

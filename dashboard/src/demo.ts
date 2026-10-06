@@ -7,6 +7,7 @@ import {
   type Scene,
   type Settings,
   type HistoryEntry,
+  type PairedClient,
 } from "./api";
 /** Deliberate preview sandbox. No fetch, device connection, or persistent writes. */
 export class DemoTransport implements Transport {
@@ -56,6 +57,9 @@ export class DemoTransport implements Transport {
     last_actor: "dashboard",
   };
   scenes: Scene[] = [];
+  clients: PairedClient[] = [
+    { id: "aaaaaaaaaaaaaaaa", label: "Preview browser" },
+  ];
   settings: Settings = {
     name: "Studio key",
     role: "key",
@@ -84,9 +88,11 @@ export class DemoTransport implements Transport {
               ? { entries: this.history }
               : path === "/scenes"
                 ? { scenes: this.scenes }
-                : path === "/settings"
-                  ? this.settings
-                  : null;
+                : path === "/clients"
+                  ? { clients: this.clients }
+                  : path === "/settings"
+                    ? this.settings
+                    : null;
     else if (path === "/state" && method === "PATCH") {
       const patch = body as Partial<Output> & { expected_revision?: number };
       if (
@@ -139,9 +145,24 @@ export class DemoTransport implements Transport {
       value = { confirmed: true };
     } else if (path === "/pair") {
       value = { token: "preview-token-not-valid-on-a-device" };
+    } else if (path === "/pairing" && method === "POST") {
+      value = { pairing_open: true, duration_ms: 180000 };
     } else if (path === "/settings" && method === "PATCH") {
-      this.settings = { ...this.settings, ...(body as Partial<Settings>) };
+      const {
+        ssid: _ssid,
+        password: _password,
+        ...publicSettings
+      } = body as Partial<Settings> & { ssid?: string; password?: string };
+      void _ssid;
+      void _password;
+      this.settings = { ...this.settings, ...publicSettings };
       value = this.settings;
+    } else if (/^\/clients\/[0-9a-f]{16}$/.test(path) && method === "DELETE") {
+      const id = path.split("/")[2];
+      if (!this.clients.some((c) => c.id === id))
+        throw new ApiError("Client not found", 404);
+      this.clients = this.clients.filter((c) => c.id !== id);
+      value = { revoked: true };
     } else if (/^\/scenes\/[1-8]$/.test(path) && method === "PUT") {
       const scene = { ...(body as Omit<Scene, "id">), id: Number(path.at(-1)) };
       this.scenes = this.scenes.filter((s) => s.id !== scene.id).concat(scene);

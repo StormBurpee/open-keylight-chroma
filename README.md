@@ -1,3 +1,5 @@
+![Open Keylight Chroma — Your light. Your firmware.](assets/brand/readme-hero.png)
+
 <div align="center">
 
 # Open Keylight Chroma
