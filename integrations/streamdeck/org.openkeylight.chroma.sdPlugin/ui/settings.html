@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src ws://127.0.0.1:*; img-src 'self'"
+    />
+    <title>Open Keylight settings</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <header>
+      <div class="mark" aria-hidden="true">◒</div>
+      <div>
+        <h1>Open Keylight</h1>
+        <p>CHROMA · LOCAL CONTROL</p>
+      </div>
+    </header>
+    <form id="settings">
+      <label for="url">Light address</label
+      ><input
+        id="url"
+        type="url"
+        required
+        placeholder="http://open-keylight.local"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <p class="hint">
+        Use the address of this light, without a path. No cloud account or
+        discovery service.
+      </p>
+      <label for="token">Device token</label
+      ><input
+        id="token"
+        type="password"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="Paste token from System → Pair"
+      />
+      <p class="hint">
+        Stored in this Stream Deck action. Exported profiles may include it.
+        Treat profile files as credentials.
+      </p>
+      <div id="step-field" hidden>
+        <label for="step">Brightness step</label
+        ><select id="step">
+          <option value="1">+1%</option>
+          <option value="5" selected>+5%</option>
+          <option value="10">+10%</option>
+          <option value="25">+25%</option>
+          <option value="-1">−1%</option>
+          <option value="-5">−5%</option>
+          <option value="-10">−10%</option>
+          <option value="-25">−25%</option>
+        </select>
+        <p class="hint">
+          Keys use the signed step. Dials use its magnitude; turn left to dim.
+          Press the dial to toggle power.
+        </p>
+      </div>
+      <div id="scene-field" hidden>
+        <label for="scene">Saved scene</label
+        ><select id="scene">
+          <option value="1">Scene 1</option>
+          <option value="2">Scene 2</option>
+          <option value="3">Scene 3</option>
+          <option value="4">Scene 4</option>
+          <option value="5">Scene 5</option>
+          <option value="6">Scene 6</option>
+          <option value="7">Scene 7</option>
+          <option value="8">Scene 8</option>
+        </select>
+        <p class="hint">
+          Save scenes in the light’s dashboard first. An empty scene returns a
+          real device error.
+        </p>
+      </div>
+      <div class="buttons">
+        <button id="save" type="submit" disabled>Save settings</button
+        ><button id="check" type="button" disabled>Check connection</button>
+      </div>
+    </form>
+    <p id="status" role="status" aria-live="polite">
+      Open this panel inside Stream Deck to configure an action.
+    </p>
+    <footer>
+      A value marked <b>*</b> is requested or awaiting readback. Connection
+      checks only read device information. Recording lock blocks changes until
+      separately unlocked; Off stays available.
+    </footer>
+    <script src="settings.js"></script>
+  </body>
+</html>

@@ -1,0 +1,118 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "Name": "Open Keylight Chroma",
+  "Version": "0.1.0.0",
+  "Author": "Open Keylight contributors",
+  "Description": "Local controls for Open Keylight Chroma: power, brightness, scenes and recording lock.",
+  "Icon": "imgs/plugin",
+  "Category": "Open Keylight Chroma",
+  "CategoryIcon": "imgs/category",
+  "CodePath": "bin/plugin.js",
+  "UUID": "org.openkeylight.chroma",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "7.1"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    },
+    {
+      "Platform": "mac",
+      "MinimumVersion": "12"
+    }
+  ],
+  "Nodejs": {
+    "Version": "24"
+  },
+  "PropertyInspectorPath": "ui/settings.html",
+  "Actions": [
+    {
+      "UUID": "org.openkeylight.chroma.power",
+      "Name": "Power",
+      "Icon": "imgs/power",
+      "Tooltip": "Toggle power. Off remains available during recording lock.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/power",
+          "TitleAlignment": "bottom",
+          "FontSize": 13
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "DisableAutomaticStates": true
+    },
+    {
+      "UUID": "org.openkeylight.chroma.brightness",
+      "Name": "Brightness",
+      "Icon": "imgs/brightness",
+      "Tooltip": "Step brightness with a key or dial. Press the dial or touch strip to toggle power.",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "Encoder": {
+        "layout": "$B1",
+        "TriggerDescription": {
+          "Rotate": "Adjust brightness",
+          "Push": "Toggle power",
+          "Touch": "Toggle power"
+        }
+      },
+      "States": [
+        {
+          "Image": "imgs/brightness",
+          "TitleAlignment": "bottom",
+          "FontSize": 13
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "DisableAutomaticStates": true
+    },
+    {
+      "UUID": "org.openkeylight.chroma.scene",
+      "Name": "Scene",
+      "Icon": "imgs/scene",
+      "Tooltip": "Recall one of the light's eight saved scenes.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/scene",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "DisableAutomaticStates": true
+    },
+    {
+      "UUID": "org.openkeylight.chroma.lock",
+      "Name": "Recording lock",
+      "Icon": "imgs/lock",
+      "Tooltip": "Explicitly lock or unlock output changes. Off is always available.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/lock",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        },
+        {
+          "Image": "imgs/locked",
+          "TitleAlignment": "bottom",
+          "FontSize": 12
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "DisableAutomaticStates": true
+    }
+  ]
+}
