@@ -33,7 +33,7 @@ static void prepare(nxp_board *b) {
     b->received = b->queued = 0; b->active = b->fault = 0;
     b->expected = b->link->phase == NXP_LINK_LENGTH ? 2 : NXP_SPI_SIZE;
     for (i = 0; i < NXP_SPI_SIZE; ++i) b->rx[i] = b->tx[i] = 0;
-    if (b->link->phase == NXP_LINK_LENGTH) b->tx[1] = NXP_SPI_SIZE;
+    if (b->link->phase == NXP_LINK_LENGTH) b->tx[1] = b->link->response_size;
     if (b->link->phase == NXP_LINK_BODY) for (i = 0; i < NXP_SPI_SIZE; ++i) b->tx[i] = b->link->response[i];
     reset_ssp(b);
     /* FIFO depth is eight words. Bounded loops never trust a stuck status bit. */
@@ -144,7 +144,10 @@ void nxp_board_poll(nxp_board *b, uint32_t now_ms) {
     uint8_t ignored[NXP_SPI_SIZE]; nxp_result result;
     if (!b || !b->spi_started) return;
     nxp_board_spi_irq(b);
-    if (selected(b) || (read_reg(b, SSP + 0xc) & 0x10u)) {
+    /* In slave mode, queued TX words can keep SSP.BSY set after deselect.
+     * Prepared response bytes therefore cannot be used as an end-of-request
+     * gate. The separate select monitor defines completed transactions. */
+    if (selected(b)) {
         if (nxp_link_expire(b->link, now_ms) == NXP_EXPIRED) { b->fault = 1; ready(b, 0); }
         return;
     }

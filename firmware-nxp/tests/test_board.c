@@ -19,7 +19,9 @@ static void store(bus *b, uint32_t address, uint32_t value) {
 static uint32_t read_reg(void *user, uint32_t address) {
     bus *b = user;
     if (address == 0x50002100) return b->selected ? 0 : 1u << 17;
-    if (address == 0x4005800c) return (b->tx_count < 8 ? 2u : 0u) | (b->rx_count ? 4u : 0u) | (b->selected ? 16u : 0u);
+    /* BSY includes queued TX data, even after the master deselects the slave. */
+    if (address == 0x4005800c) return (b->tx_count < 8 ? 2u : 0u) | (b->rx_count ? 4u : 0u) |
+        ((b->selected || b->tx_count) ? 16u : 0u);
     if (address == 0x40058008) { uint8_t v; CHECK(b->rx_count); v = b->rx[b->rx_read++ & 7]; --b->rx_count; return v; }
     if (address == 0x40058018) return b->fault;
     return stored(b, address);
@@ -96,6 +98,21 @@ static void tests(void) {
     clocks(&b, &board, q, rx, 97, 106); b.fault = 1; nxp_board_spi_irq(&board);
     CHECK(board.fault); b.selected = 1; nxp_board_poll(&board, 107); CHECK(board.fault);
     b.selected = 0; nxp_board_poll(&board, 108); CHECK(board.errors == 3 && !board.fault);
+    /* Stock bridge connection notifications are short completed-CS transfers. */
+    initialize(&b, &board, &state, &link, NXP_QUAL_SPI_REQUIRED);
+    CHECK(nxp_board_start_spi(&board));
+    memset(q, 0, sizeof(q)); q[0] = 2; q[5] = 1; q[6] = 11; q[7] = q[8] = 1;
+    clocks(&b, &board, q, rx, 9, 1); CHECK(state.claimed && link.phase == NXP_LINK_LENGTH && !board.errors);
+    clocks(&b, &board, dummy, rx, 2, 2); CHECK(rx[1] == 97);
+    clocks(&b, &board, dummy, rx, 97, 3); CHECK(rx[6] == 4 && rx[14] == 0x49 && rx[15] == 1);
+    clocks(&b, &board, q, rx, 9, 4); CHECK(nxp_link_ready(&link) && !board.errors);
+    clocks(&b, &board, dummy, rx, 2, 4); CHECK(!rx[0] && !rx[1] && !nxp_link_ready(&link));
+    q[7] = 0; q[8] = 0; clocks(&b, &board, q, rx, 9, 5); CHECK(!state.claimed && nxp_link_ready(&link));
+    clocks(&b, &board, dummy, rx, 2, 6); clocks(&b, &board, dummy, rx, 97, 7);
+    CHECK(rx[15] == 0 && !board.errors);
+    make_version(q); clocks(&b, &board, q, rx, 97, 8);
+    clocks(&b, &board, dummy, rx, 2, 9); clocks(&b, &board, dummy, rx, 97, 10);
+    CHECK(rx[7] == 2 && rx[14] == 0x87 && !board.errors);
     initialize(&b, &board, &state, &link, NXP_QUAL_PART);
     CHECK(!nxp_board_service_watchdog(&board) && !b.writes);
     store(&b, 0x40048080, 1u << 15); store(&b, 0x40004000, 1);

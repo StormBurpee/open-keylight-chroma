@@ -4,12 +4,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum { NXP_REPORT_SIZE = 90, NXP_SPI_SIZE = 97, NXP_NAME_MAX = 64 };
-typedef enum { NXP_OK = 0, NXP_INVALID, NXP_BAD_PACKET, NXP_EXPIRED } nxp_result;
+enum { NXP_REPORT_SIZE = 90, NXP_SPI_SIZE = 97, NXP_CONNECTION_SIZE = 9, NXP_NAME_MAX = 64 };
+typedef enum { NXP_OK = 0, NXP_INVALID, NXP_BAD_PACKET, NXP_EXPIRED, NXP_NO_REPLY } nxp_result;
 
 /* Original application state. All commands are RAM-only. */
 typedef struct {
-    uint8_t owner[6], claimed, name_size, name[NXP_NAME_MAX];
+    uint8_t owner[6], claimed, name_size, name[NXP_NAME_MAX], connection_count;
     uint8_t effect, rgb[3], rgb_brightness, white_brightness, boot_requested, trial_confirmed;
     uint16_t temperature_k;
     uint32_t revision, part_id, trial_started_ms;
@@ -25,7 +25,12 @@ typedef struct {
  * requests resident recovery, deferred until its entire reply is consumed. */
 void nxp_state_init(nxp_state *state);
 int nxp_state_valid(const nxp_state *state);
-/* One exact kind-0 request -> one exact kind-0 reply. Invalid framing/checksum
+/* A kind-0 report request produces a kind-0 reply. A nine-byte kind-11
+ * connection event claims an unowned first connection or releases its matching
+ * owner. Ownership changes produce a kind-4 notification; other valid events
+ * return NXP_NO_REPLY without writing the response buffer; the link still
+ * acknowledges them with READY and a zero-length response. Connection events
+ * never change lighting or confirm a trial. Invalid framing/checksum
  * produces no reply and leaves state/output untouched. Valid unsupported
  * commands receive status 5; bad parameters status 3; ownership denial 8. */
 nxp_result nxp_process(nxp_state *state, const uint8_t *request, size_t size,
@@ -45,7 +50,7 @@ typedef struct {
     nxp_link_phase phase;
     uint32_t prepared_ms;
     uint8_t response[NXP_SPI_SIZE];
-    uint8_t recovery_ready;
+    uint8_t recovery_ready, response_size;
 } nxp_link;
 
 /* Portable completed-CS transaction model. Platform FIFO/ISR integration must

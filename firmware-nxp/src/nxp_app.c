@@ -139,6 +139,25 @@ static uint8_t dispatch(nxp_state *s, const uint8_t tag[6], const uint8_t *q, ui
     return STATUS_OK;
 }
 
+static nxp_result connection_event(nxp_state *s, const uint8_t *request, uint8_t *reply) {
+    uint8_t response[NXP_SPI_SIZE], *r = response + 7;
+    uint8_t connected = request[7], count = request[8];
+    int changed = 0;
+    if (connected > 1 || (connected && !count)) return NXP_BAD_PACKET;
+    if (connected && count == 1 && !s->connection_count && !s->claimed) {
+        s->claimed = 1; copy(s->owner, request, 6); changed = 1;
+    } else if (!connected && s->claimed && equal(s->owner, request, 6)) {
+        s->claimed = 0; zero(s->owner, 6); changed = 1;
+    }
+    s->connection_count = count;
+    if (!changed) return NXP_NO_REPLY;
+    zero(s->name, NXP_NAME_MAX); s->name_size = 0; ++s->revision;
+    zero(response, sizeof(response)); response[6] = 4;
+    r[0] = STATUS_OK; r[5] = 80; r[7] = 0x49; r[8] = s->claimed;
+    copy(r + 9, request, 6); r[88] = checksum(r);
+    copy(reply, response, sizeof(response)); return NXP_OK;
+}
+
 nxp_result nxp_process(nxp_state *s, const uint8_t *request, size_t size, uint8_t *reply, size_t capacity) {
     return nxp_process_at(s, request, size, reply, capacity, 0);
 }
@@ -146,7 +165,12 @@ nxp_result nxp_process_at(nxp_state *s, const uint8_t *request, size_t size, uin
     uint8_t response[NXP_SPI_SIZE]; const uint8_t *q; uint8_t *r; nxp_state next;
     if (!s || !request || !reply || capacity < NXP_SPI_SIZE) return NXP_INVALID;
     if (!nxp_state_valid(s)) return NXP_INVALID;
-    if (size != NXP_SPI_SIZE) return NXP_BAD_PACKET;
+    if (size != NXP_SPI_SIZE && size != NXP_CONNECTION_SIZE) return NXP_BAD_PACKET;
+    if (zeros(request, 6) || (request[0] & 1)) return NXP_BAD_PACKET;
+    if (size == NXP_CONNECTION_SIZE) {
+        if (request[6] != 11) return NXP_BAD_PACKET;
+        return connection_event(s, request, reply);
+    }
     q = request + 7;
     if (request[6] || zeros(request, 6) || (request[0] & 1) || q[0] || !zeros(q + 2, 3) ||
         q[5] > 80 || q[89] || checksum(q) != q[88] || !zeros(q + 8 + q[5], 80 - q[5])) return NXP_BAD_PACKET;
@@ -190,7 +214,7 @@ void nxp_link_init(nxp_link *link, nxp_state *state) {
 }
 void nxp_link_cancel(nxp_link *link) {
     if (!link) return;
-    link->phase = NXP_LINK_REQUEST; link->recovery_ready = 0;
+    link->phase = NXP_LINK_REQUEST; link->recovery_ready = 0; link->response_size = 0;
     if (link->state) link->state->boot_requested = 0;
 }
 int nxp_link_ready(const nxp_link *link) { return link && link->phase != NXP_LINK_REQUEST; }
@@ -208,13 +232,17 @@ nxp_result nxp_link_transaction(nxp_link *link, const uint8_t *tx, size_t size,
     if (nxp_link_expire(link, now_ms) == NXP_EXPIRED) return NXP_EXPIRED;
     if (link->phase == NXP_LINK_REQUEST) {
         result = nxp_process_at(link->state, tx, size, link->response, sizeof(link->response), now_ms);
-        if (result != NXP_OK) return result;
+        if (result != NXP_OK && result != NXP_NO_REPLY) return result;
+        link->response_size = result == NXP_OK ? NXP_SPI_SIZE : 0;
         link->prepared_ms = now_ms; link->phase = NXP_LINK_LENGTH; zero(rx, size); return NXP_OK;
     }
     if (!zeros(tx, size) || size != (link->phase == NXP_LINK_LENGTH ? 2u : NXP_SPI_SIZE)) {
         nxp_link_cancel(link); return NXP_BAD_PACKET;
     }
-    if (link->phase == NXP_LINK_LENGTH) { rx[0] = 0; rx[1] = NXP_SPI_SIZE; link->phase = NXP_LINK_BODY; }
+    if (link->phase == NXP_LINK_LENGTH) {
+        rx[0] = 0; rx[1] = link->response_size;
+        link->phase = link->response_size ? NXP_LINK_BODY : NXP_LINK_REQUEST;
+    }
     else {
         copy(rx, link->response, NXP_SPI_SIZE); link->phase = NXP_LINK_REQUEST;
         link->recovery_ready = link->state ? link->state->boot_requested : 0;

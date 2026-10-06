@@ -179,8 +179,54 @@ static void test_trial(void) {
     s.part_id = 0x0001bc40; CHECK(nxp_process(&s, q, 97, r, 97) == NXP_OK && r[7] == 2);
     CHECK(r[12] == 4 && !r[15] && r[16] == 1 && r[17] == 0xbc && r[18] == 0x40);
 }
+static void test_connections(void) {
+    nxp_state s, before; nxp_link link; uint8_t q[97] = {0}, r[97], dummy[97] = {0}; unsigned i;
+    memcpy(q, tag, 6); q[6] = 11; q[7] = q[8] = 1;
+    nxp_state_init(&s); nxp_link_init(&link, &s);
+    s.effect = 1; s.rgb[0] = 18; s.rgb[1] = 42; s.rgb[2] = 240; s.rgb_brightness = 100;
+    CHECK(nxp_link_transaction(&link, q, 9, r, 97, 10) == NXP_OK && s.claimed && nxp_link_ready(&link));
+    CHECK(!memcmp(s.owner, tag, 6) && s.connection_count == 1 && !s.trial_confirmed);
+    CHECK(s.effect == 1 && s.rgb[1] == 42 && s.rgb_brightness == 100 && !s.boot_requested);
+    CHECK(nxp_link_transaction(&link, dummy, 2, r, 97, 11) == NXP_OK && r[1] == 97);
+    CHECK(nxp_link_transaction(&link, dummy, 97, r, 97, 12) == NXP_OK);
+    CHECK(!memcmp(r, dummy, 6) && r[6] == 4 && r[7] == 2 && r[12] == 80 && r[14] == 0x49 && r[15] == 1);
+    CHECK(!memcmp(r + 16, tag, 6) && r[95] == xor_report(r + 7) && !nxp_link_ready(&link));
+    before = s; memset(r, 0xa5, 97);
+    CHECK(nxp_process(&s, q, 9, r, 97) == NXP_NO_REPLY && !memcmp(&s, &before, sizeof(s)) && r[0] == 0xa5);
+    q[0] = 4; q[8] = 2;
+    CHECK(nxp_link_transaction(&link, q, 9, r, 97, 20) == NXP_OK && nxp_link_ready(&link) && !memcmp(s.owner, tag, 6));
+    CHECK(nxp_link_transaction(&link, dummy, 2, r, 97, 21) == NXP_OK && !r[0] && !r[1] && !nxp_link_ready(&link));
+    q[7] = 0; q[8] = 1;
+    CHECK(nxp_process(&s, q, 9, r, 97) == NXP_NO_REPLY && s.claimed && !memcmp(s.owner, tag, 6));
+    q[0] = tag[0]; q[8] = 0;
+    CHECK(nxp_process(&s, q, 9, r, 97) == NXP_OK && !s.claimed && !s.connection_count && r[15] == 0);
+    CHECK(!memcmp(r + 16, tag, 6) && r[95] == xor_report(r + 7));
+    CHECK(s.rgb[0] == 18 && s.rgb_brightness == 100 && s.effect == 1 && !s.trial_confirmed);
+    /* An explicit owner is never displaced by a first-connection event. */
+    s.claimed = 1; memset(s.owner, 4, 6); q[7] = q[8] = 1;
+    CHECK(nxp_process(&s, q, 9, r, 97) == NXP_NO_REPLY && s.owner[0] == 4);
+    before = s;
+    for (i = 2; i <= 255; ++i) {
+        q[7] = (uint8_t)i; CHECK(nxp_process(&s, q, 9, r, 97) == NXP_BAD_PACKET);
+        CHECK(!memcmp(&s, &before, sizeof(s)));
+    }
+    q[7] = 1; q[8] = 0; CHECK(nxp_process(&s, q, 9, r, 97) == NXP_BAD_PACKET);
+    q[8] = 1;
+    for (i = 0; i < 97; ++i) if (i != 9) {
+        CHECK(nxp_process(&s, q, i, r, 97) == NXP_BAD_PACKET && !memcmp(&s, &before, sizeof(s)));
+    }
+    q[0] |= 1; CHECK(nxp_process(&s, q, 9, r, 97) == NXP_BAD_PACKET);
+    memset(q, 0, 6); CHECK(nxp_process(&s, q, 9, r, 97) == NXP_BAD_PACKET);
+    memcpy(q, tag, 6); q[6] = 10; CHECK(nxp_process(&s, q, 9, r, 97) == NXP_BAD_PACKET);
+    /* Every reported count is bounded by its byte; only an unowned 0->1 claims. */
+    for (i = 1; i <= 255; ++i) {
+        nxp_state_init(&s); q[6] = 11; q[8] = (uint8_t)i;
+        CHECK(nxp_process(&s, q, 9, r, 97) == (i == 1 ? NXP_OK : NXP_NO_REPLY));
+        CHECK(s.claimed == (i == 1) && s.connection_count == i);
+    }
+}
 int main(void) {
-    test_packets(); test_parameters(); test_render(); test_driver_integration(); test_handshake(); test_trial();
+    test_packets(); test_parameters(); test_render(); test_driver_integration(); test_handshake(); test_trial(); test_connections();
     printf("%u checks passed; original NXP protocol, arithmetic and ESP-driver integration; no device I/O.\n", checks);
     return 0;
 }
