@@ -1,6 +1,6 @@
 # Getting started
 
-Open Keylight Chroma is a development preview for a qualified reference board. Both original MCU applications have run on that light, including native update and recovery tests. This is not yet a general installation release. High-output colour caused ESP brownouts during qualification; the cause and sustained-output reliability remain under investigation. An ESP update with the original controller also exposed a flash/SPI coordination fault; its correction must pass live qualification before release.
+Open Keylight Chroma is a development preview for a qualified reference board. Both original MCU applications run on that light, including native update and recovery tests. This is not yet a general installation release. Following PWM handoff and flash/SPI coordination changes, native OTA, progressive colour tests through 100%, a two-minute full-brightness hold and 24 rapid colour retargets passed without a reset. The cause of earlier brownouts and long-term electrical reliability remain unproven; these are bounded checks on one board.
 
 ## Choose the appropriate path
 
@@ -45,6 +45,8 @@ The separately packaged Stream Deck plugin is described in [its installation gui
 4. Within the 180-second application trial, explicitly choose **Confirm this firmware** only after those checks. Confirming the ESP does not independently qualify or install the NXP application.
 
 If a request times out, inspect the current device and preserve the audit before another action. Do not blindly repeat an upload or confirmation: a response can be lost after a successful operation. A later upload can replace the previous recovery image.
+
+ESP 0.1.8 shows update progress with a subtle blue → cyan → green breath: blue begins reception, and pure green means the image has passed verification. Failure uses two red pulses. The indicator depends on a healthy controller link and is suppressed by Recording Lock; its absence alone does not establish the update outcome. The API and the next boot's image identity are the acceptance evidence.
 
 ## Fallback and controller recovery
 

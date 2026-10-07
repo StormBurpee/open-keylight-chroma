@@ -20,7 +20,7 @@ Open Keylight Chroma is being built to replace **both** applications inside the 
 
 > **Development preview.** Original source and automated tests are available; public installation is not yet qualified. A successful build is not a claim of hardware safety, measured colour accuracy or production readiness. See the development record for exactly what has run on a device.
 
-Both original applications have been installed on the reference light. Native OTA, the OFF1 all-off handoff, the LOW1 five-channel sequence and their resident-loader recovery paths have been exercised; low-level lighting controls have also passed. High-output colour subsequently caused ESP brownout resets. Recovery and PWM handoff changes are under qualification, and the cause is not established. **Full-output reliability and a reproducible stock-to-original installation remain pending.** See [installation and recovery limits](docs/getting-started.md) before using a build on hardware.
+Both original applications are running on the reference light. Native OTA, diagnostic recovery and five-channel output have been exercised. After PWM handoff and flash/SPI coordination changes, progressive colour tests through 100%, a two-minute full-brightness hold and 24 rapid colour retargets passed without a reset. The owner observed clean instant changes, fades and update breathing. These bounded checks do not establish the cause of earlier brownouts or long-term electrical reliability. **A reproducible stock-to-original installation is the next qualification step.** See [installation and recovery limits](docs/getting-started.md) before using a build on hardware.
 
 ## A small instrument, carefully made
 
