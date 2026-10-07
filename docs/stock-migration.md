@@ -2,13 +2,13 @@
 
 `tools/stock_migration.py` provides a guided installer for the reviewed **Razer Key Light Chroma / ESP 1.0.13.0 / NXP 1.3.0.0** profile. It keeps the stock ESP network bridge until the original NXP controller has been installed and confirmed, then installs the original ESP application. The installer is experimental; passing its offline tests does not qualify another physical light.
 
-This is currently a builder/operator workflow. Preparing reviewed original images is still required. The recovery helper can acquire the exact reviewed stock controller image directly from Razer; vendor binaries are not distributed in this repository.
+This page documents the low-level Python workflow for builders and recovery operators. The [guided Windows setup](getting-started.md#install-with-the-guided-windows-setup) supplies the release images and device discovery; the manual commands below require prepared images and an explicit target. Both paths can acquire the exact reviewed stock controller recovery image directly from Razer. Vendor binaries are not distributed in this repository.
 
 Use one explicitly selected private IPv4 address. Close Razer software, integration clients, light-control browser tabs and every other updater first. Another connection to the stock bridge can generate controller traffic even without a command. In particular, traffic during the controller's flash commit can disrupt recovery.
 
 ## Identify the target
 
-Record the exact name currently shown in the stock application, then use your router's client/lease list to match that light to its current IP address and ESP MAC. With multiple lights, resolve the mapping before installation; do not select by proximity in a discovery list. The installer does not scan for a target. Close the stock application after recording the name.
+For the manual Python workflow, record the exact name currently shown in the stock application, then use your router's client/lease list to match that light to its current IP address and ESP MAC. With multiple lights, resolve the mapping before installation; do not select by proximity in a discovery list. The Python backend does not scan for a target. Close the stock application after recording the name.
 
 The expected native device ID is `keylight-` followed by the final six hexadecimal digits of the light's ESP MAC, lowercase and without separators. The stock HELLO owner/routing MAC identifies the connection; it is **not** the light's MAC. A name, version or digest is not cryptographic device authentication.
 

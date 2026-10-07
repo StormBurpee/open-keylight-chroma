@@ -2,7 +2,7 @@
 
 Open Keylight runs on the light itself. You use a computer for the initial installation; afterward, a browser is enough.
 
-**Current status:** the guided installer and first prerelease are being qualified. The reference light runs both original applications. On the second light, controller installation and the observed five-channel checks passed; final ESP acceptance is still pending. Do not treat a development artifact as a completed installation release.
+**Current status:** both reference lights run confirmed original ESP and NXP applications. The second installation required recovery after an installer defect; its image, dashboard assets and low-output control checks then passed. The packaged guided installer and first alpha release are still being qualified. Do not treat a development artifact as a completed installation release.
 
 ## Before you begin
 
