@@ -1004,13 +1004,17 @@ def http_get(ip: str, path: str, maximum: int) -> bytes:
     require(path == "/api/v1/device" or _asset_path(path), "Read-only path outside installer allowlist")
     connection = http.client.HTTPConnection(ip, 80, timeout=5)
     deadline = time.monotonic() + 5
+    response = None
     try:
         connection.request("GET", path, headers={"Accept-Encoding":"gzip", "Connection":"close"})
         active_socket = connection.sock
         response = connection.getresponse()
         require(response.status == 200, f"Device GET returned {response.status}")
         chunks, size = [], 0
-        while True:
+        # read1() closes the response file (and a Connection: close socket)
+        # as soon as its declared Content-Length reaches zero. Do not touch
+        # that socket again merely to request an additional EOF read.
+        while not response.isclosed():
             remaining = deadline - time.monotonic()
             if remaining <= 0: raise TimeoutError("Device GET deadline expired")
             active_socket.settimeout(remaining)
@@ -1020,6 +1024,7 @@ def http_get(ip: str, path: str, maximum: int) -> bytes:
             require(size <= maximum, "Device response exceeds bound")
         data = b"".join(chunks)
         if time.monotonic() >= deadline: raise TimeoutError("Device GET completed after deadline")
+        require(response.length in (None, 0), "Incomplete HTTP response body")
         require(len(data) <= maximum, "Device response exceeds bound")
         encoding = response.getheader("Content-Encoding", "identity").lower()
         require(encoding in ("identity", "gzip"), "Unknown response encoding")
@@ -1029,7 +1034,10 @@ def http_get(ip: str, path: str, maximum: int) -> bytes:
             require(decoder.eof and not decoder.unused_data and len(data) <= maximum, "Invalid/oversized gzip response")
         return data
     finally:
-        connection.close()
+        try:
+            if response is not None: response.close()
+        finally:
+            connection.close()
 
 
 def console_output(message):

@@ -420,7 +420,10 @@ class Tests(unittest.TestCase):
         class Reply:
             status = 200
             encoding = 'identity'
+            length = None
             def __init__(self, chunks): self.chunks = list(chunks)
+            def isclosed(self): return False
+            def close(self): pass
             def getheader(self, _name, default): return self.encoding or default
             def read1(self, maximum):
                 self_maximum.append(maximum)
