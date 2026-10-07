@@ -32,9 +32,11 @@ export async function loadBundle(path: string): Promise<Bundle> {
 
 export async function findBundle(explicit: string | undefined, root: string): Promise<Bundle> {
   if (explicit) return loadBundle(resolve(explicit));
-  for (const candidate of [resolve(root, 'bundle.json'), resolve(root, '../bundle.json'), resolve(root, 'release/bundle.json')]) {
+  const candidates = ['bundle.json', 'firmware/bundle.json', '../bundle.json', 'release/bundle.json']
+    .map(path => resolve(root, path));
+  for (const candidate of candidates) {
     try {await stat(candidate);} catch (error) {if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error;}
     return loadBundle(candidate); // An existing invalid bundle is never silently skipped.
   }
-  throw new Error('No release bundle found. Start from the extracted release, or pass --bundle /path/to/bundle.json.');
+  throw new Error(`No release bundle found. Checked: ${candidates.join(', ')}. Use an extracted release or pass --bundle with the absolute path to a prepared bundle.json; build directories are not searched.`);
 }
