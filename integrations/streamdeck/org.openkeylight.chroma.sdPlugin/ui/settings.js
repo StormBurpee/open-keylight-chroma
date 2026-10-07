@@ -1,6 +1,7 @@
 "use strict";
 let socket,
   context,
+  inspectorId,
   actionId,
   pendingSave,
   saveTimeout,
@@ -22,7 +23,7 @@ function send(event, payload) {
   socket.send(
     JSON.stringify({
       event,
-      context,
+      context: inspectorId,
       action: actionId,
       payload,
     }),
@@ -36,6 +37,7 @@ window.connectElgatoStreamDeckSocket = (
   actionInfo,
 ) => {
   const action = JSON.parse(actionInfo);
+  inspectorId = uuid;
   context = action.context;
   actionId = action.action;
   settings = action.payload?.settings ?? {};

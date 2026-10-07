@@ -111,7 +111,7 @@ test(
           size: { columns: 5, rows: 3 },
         },
       ],
-      plugin: { uuid: "org.openkeylight.chroma", version: "0.1.2.0" },
+      plugin: { uuid: "org.openkeylight.chroma", version: "0.1.3.0" },
     };
     const plugin = fileURLToPath(
       new URL("../org.openkeylight.chroma.sdPlugin/", import.meta.url),

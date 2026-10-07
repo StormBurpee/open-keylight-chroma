@@ -24,7 +24,10 @@ async function page(kind = "brightness") {
       ws = this;
     }
     send(v: string) {
-      sent.push(JSON.parse(v));
+      const message = JSON.parse(v);
+      if (message.event !== "registerPropertyInspector")
+        assert.equal(message.context, "pi-uuid", "Stream Deck rejects PI commands addressed to the action instance");
+      sent.push(message);
     }
   }
   dom.window.WebSocket = FakeSocket;
@@ -55,7 +58,7 @@ async function page(kind = "brightness") {
     $: (id: string) => dom.window.document.getElementById(id),
   };
 }
-test("property inspector addresses settings with both action type and instance, then verifies saved values", async () => {
+test("property inspector sends its registered UUID and action type, then verifies the action's saved values", async () => {
   const { dom, sent, ws, $ } = await page();
   assert.deepEqual(sent[0], {
     event: "registerPropertyInspector",
@@ -66,13 +69,13 @@ test("property inspector addresses settings with both action type and instance, 
   );
   assert.deepEqual(sent[1], {
     event: "setSettings",
-    context: "key-context",
+    context: "pi-uuid",
     action: "org.openkeylight.chroma.brightness",
     payload: { url: "http://light.local", token: "secret", step: 5, scene: 2 },
   });
   assert.deepEqual(sent[2], {
     event: "getSettings",
-    context: "key-context",
+    context: "pi-uuid",
     action: "org.openkeylight.chroma.brightness",
   });
   assert.equal($("check").disabled, true);
@@ -103,7 +106,7 @@ test("connection check sends only a read-check request and explicitly avoids cla
   $("check").click();
   assert.deepEqual(sent[1], {
     event: "sendToPlugin",
-    context: "key-context",
+    context: "pi-uuid",
     action: "org.openkeylight.chroma.brightness",
     payload: { event: "check" },
   });

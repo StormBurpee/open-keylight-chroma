@@ -4,7 +4,7 @@
 
 The initial package required Stream Deck 7.1 and Node 24 while the installed application was 7.0.3. Version 0.1.2 targets Stream Deck 7.0 and Node 20, including the SDK's explicit legacy settings mode. Its compiled-plugin test now exercises settings requests and replies without message identifiers. The owner's app was upgraded to 7.6 during this work; all 25 tests pass using that installation's Node 20.20.0 runtime, and Elgato validation and packaging pass.
 
-The owner's first installed test also exposed a missing action identifier in the property inspector's `setSettings` message. The previous DOM harness incorrectly accepted that incomplete envelope. Save and readback messages now carry both the action type and instance, and the panel reports success only after matching settings return. A valid IPv4 address and mismatched readback have explicit regression coverage. The corrected installer is ready for the owner's live test; automated checks do not establish physical Stream Deck control.
+The owner's first installed test exposed a settings-routing defect. Adding the missing action type in 0.1.2 did not resolve it: the actual application log explicitly rejected `setSettings` and `getSettings` as coming from the wrong context. Inspection of the SDPI client confirmed that outgoing property-inspector commands require its registered inspector UUID, while replies identify the action instance. Version 0.1.3 separates those identifiers. The DOM harness now rejects action-instance contexts on outgoing inspector commands and verifies returned values before displaying success. The corrected installer awaits another live test; automated checks do not establish physical Stream Deck control.
 
 ## ESP control qualification and browser correction
 
