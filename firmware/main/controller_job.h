@@ -4,6 +4,7 @@
 #include "okl_loader.h"
 #include "cJSON.h"
 #include "esp_err.h"
+#include "controller_profile.h"
 #include <stdbool.h>
 
 typedef struct {
@@ -13,6 +14,7 @@ typedef struct {
     okl_loader_source source;
     uint32_t resident_proof_job_id;
     bool recovery_only, allow_legacy_reconcile;
+    uint8_t diagnostic_profile;
 } app_controller_job;
 
 /* Volatile evidence produced only by the sole worker's update adapter. A
@@ -30,7 +32,8 @@ typedef struct {
     bool diagnostic_trial_observed;
     bool profile_verified, command_attempted, command_acknowledged, registers_verified;
     uint32_t resident_proof_job_id;
-    uint32_t diagnostic_words[224];
+    uint32_t diagnostic_words[256];
+    uint8_t diagnostic_profile;
     char diagnostic_error[81];
     bool legacy_reconciled;
     char stage[32];
@@ -51,6 +54,7 @@ bool app_controller_update_blocked(void); /* Safe while app.mutex is held. */
 int app_controller_update_begin(uint32_t *job_id);
 /* Explicit bench admission; role must be diagnostic1 or production2. */
 int app_controller_update_begin_role(uint32_t *job_id, uint8_t role);
+int app_controller_update_begin_mode(uint32_t *job_id, uint8_t diagnostic_profile);
 int app_controller_recovery_begin(uint32_t expected_job_id, bool power_cycle_acknowledged);
 bool app_controller_recovery_finish(uint32_t id, const app_controller_worker_outcome *outcome);
 /* 202 transfers ownership; every other result leaves ownership with caller. */

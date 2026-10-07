@@ -8,7 +8,7 @@ The worker requalifies the cached source through fresh typed controller observat
 
 ## Durable intent
 
-Before the core enters or mutates the controller, it persists a versioned 128-byte record under `openkeylight/nxp_job_v1`. The record contains the job ID, source, phase, result, target bank digest, version and role, acknowledged/readback block counts, and mutation-intent flags. Record version2 includes role; earlier version1 records remain readable as production-role records and still block recovery. Its fields have explicit byte offsets and a SHA-256 integrity digest; it contains neither pointers nor compiler-dependent structures. The digest detects corruption, not malicious modification.
+Before the core enters or mutates the controller, it persists a versioned 128-byte record under `openkeylight/nxp_job_v1`. The record contains the job ID, source, phase, result, target bank digest, version and role, acknowledged/readback block counts, and mutation-intent flags. Record version3 adds the explicitly selected diagnostic profile; version2 role1 records decode as OFF1, while version1 remains readable as production-role records. Role/profile contradictions are invalid and all retained versions still block automatic recovery. Its fields have explicit byte offsets and a SHA-256 integrity digest; it contains neither pointers nor compiler-dependent structures. The digest detects corruption, not malicious modification.
 
 The core writes at phase boundaries, not after every 64-byte transfer. Cached counters can therefore be newer than the last durable checkpoint. Both values describe evidence, never an instruction to continue programming.
 
@@ -49,6 +49,14 @@ The terminal job remains `diagnostic_trial`, with `controller_confirmed:false`, 
 A **new explicit package upload** may use that volatile resident proof while the same ESP boot and synchronized bus remain. The new job consumes it once before any loader mutation. Any attempted intervening SPI transfer, unknown bus phase or ESP reboot invalidates it. Receiving or rejecting an invalid package does not consume it. The new job persists fresh intent before proceeding; no interrupted job is resumed and no journal is silently cleared. After reboot, only a separately admitted physical-power-cycle recovery can create a new capability.
 
 Authenticated uploads trust the operator's selected original firmware; package hashes and profile declarations are not signatures. Hardware qualification separately pins the reviewed candidate binary and source. The initial diagnostic path does not expose arbitrary reports, arbitrary memory reads, duty values or FD.
+
+## Explicit low-duty diagnostic
+
+`X-Controller-Mode: diagnostic-low` selects the distinct LOW1 bench protocol. The package must still declare role 1; the worker additionally requires actual role 1/capability 1, part `0xbc40`, ABI 1, version 0.1.0.0, unconfirmed trial and uptime below 20 seconds. It checks unused F0 and initial F1 metadata before the one owned LOW1 trigger. OFF1 and LOW1 never substitute for one another.
+
+After a fully checked trigger ACK, the worker sends no SPI traffic for at least 6.7 seconds. The fixed candidate runs five 100 ms pulses, spaced 1600 ms apart, in R/G/B/warm/cool order; neither channel, duty nor duration is an HTTP argument. The worker then requires F0 spent-state, reads exactly sixteen fixed 64-byte pages and repeats the header. The separate LOW1 validator checks generation, all channel records, fixed compares/timing, final GPIO-low/timer-stop evidence and full completion. It never sends FD. These are reported protocol/register observations, not optical, current or thermal qualification.
+
+Only that validated record continues through the same 33-second silent recovery guard and exact resident information proof. The journal remains and output stays closed; another package requires a new explicit request. JSON identifies `diagnostic.profile` as `LOW1` with 256 snapshot words; OFF1 retains its 224-word shape. Malformed, incomplete or wrong-profile records cannot produce a resident capability.
 
 ## Verification
 

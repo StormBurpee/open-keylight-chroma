@@ -55,10 +55,10 @@ print(recovery_result.stdout, end="")
 if recovery_result.returncode:
     print(recovery_result.stderr, file=sys.stderr, end="")
     recovery_result.check_returncode()
-sources += [recovery_source]
+sources += [recovery_source, HERE / "low_fixture.h", ROOT / "tests/controller_job/off_fixture.h"]
 sources += [ROOT / "firmware/main/controller_worker.c", ROOT / "firmware/main/controller_worker.h",
             ROOT / "firmware/main/controller_diagnostic.h",
-            ROOT / "firmware/main/controller_job.h", ROOT / "firmware/main/nxp_transport.h",
+            ROOT / "firmware/main/controller_job.h", ROOT / "firmware/main/controller_profile.h", ROOT / "firmware/main/nxp_transport.h",
             ROOT / "tests/worker/worker_mocks.h", Path(__file__),
             components / "keylight_loader/include/okl_loader.h", components / "keylight_nxp/include/okl_nxp.h"]
 report = {"status": "pass", "sanitizer": "AddressSanitizer", "device_operations": 0,

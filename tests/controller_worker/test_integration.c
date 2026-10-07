@@ -20,6 +20,7 @@ static okl_result native_release(okl_nxp *, uint64_t);
 #undef okl_nxp_read_state
 #undef okl_nxp_release
 #include "../controller_job/off_fixture.h"
+#include "low_fixture.h"
 
 static unsigned checks, cases;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr,"case %u, line %d: %s\n",cases,__LINE__,#x); exit(1); } } while (0)
@@ -37,7 +38,10 @@ typedef struct {
     unsigned unsupported_query, malformed_query, claim_fault, poison_query, release_poison;
     unsigned owner_gate, denied_fault, bench_fault, bench_commands, bench_pages, bench_claims, preserves, resumes;
     unsigned bench_fail_page;
-    uint32_t bench_words[224];
+    uint32_t bench_words[256];
+    uint64_t bench_ack_us;
+    unsigned bench_profile_reads, bench_fail_call, bench_calls, bench_bad_ack;
+    uint32_t bench_uptime;
     uint64_t bench_last_page;
     bool original, loader, observing;
     okl_loader_phase persisted;
@@ -68,35 +72,57 @@ void vTaskDelay(unsigned ticks) {
     ++m.waits;m.now+=(uint64_t)ticks*1000;
 }
 static void call(okl_nxp *d,uint64_t deadline,uint64_t maximum) {
-    CHECK(d==&m.driver && m.leased && deadline>m.now && deadline<=m.now+maximum);m.now+=100;
+    CHECK(d==&m.driver && m.leased && deadline>m.now && deadline<=m.now+maximum);
+    if(m.job.diagnostic_profile==APP_CONTROLLER_PROFILE_LOW && m.bench_commands)
+        CHECK(m.now-m.bench_ack_us>=6700000); /* Every bus API is forbidden during the sequence. */
+    m.now+=100;
 }
 static okl_result native_execute(okl_nxp *d,const okl_request *q,okl_reply *r,uint64_t deadline) {
     call(d,deadline,150000);CHECK(!m.loader);memset(r,0,sizeof(*r));
     r->received=r->acknowledged=1;r->report.status=2;uint8_t *p=r->report.arguments;
-    if(q->command==OKL_GET_DIAGNOSTIC_PROFILE) {
+    bool low=m.job.diagnostic_profile==APP_CONTROLLER_PROFILE_LOW;
+    if(q->command==OKL_GET_DIAGNOSTIC_PROFILE || q->command==OKL_GET_LOW_DIAGNOSTIC_PROFILE) {
         CHECK(m.job.image.role==1 && m.observing && m.bench_claims==1);
-        r->report.opcode=0xf0;r->report.size=8;memcpy(p,"OFF1",4);p[6]=1;p[7]=144;
+        CHECK(q->command==(low?OKL_GET_LOW_DIAGNOSTIC_PROFILE:OKL_GET_DIAGNOSTIC_PROFILE));
+        ++m.bench_calls; ++m.bench_profile_reads;
+        if(m.bench_calls==m.bench_fail_call)return OKL_TIMEOUT;
+        r->report.opcode=0xf0;r->report.size=8;memcpy(p,low?"LOW1":"OFF1",4);
+        if(low) {p[4]=m.bench_commands?3:0;p[5]=5;p[7]=100;}
+        else {p[6]=1;p[7]=144;}
         if(m.bench_fault==1)p[0]^=1;
+        if(m.bench_fault==9 && m.bench_commands)p[4]=2;
         return OKL_OK;
     }
-    if(q->command==OKL_GET_DIAGNOSTIC_PAGE) {
-        CHECK(q->size==1 && q->arguments[0]<14 && m.bench_claims==1);
-        uint8_t page=q->arguments[0];++m.bench_pages;
-        if(m.bench_pages==m.bench_fail_page)return OKL_TIMEOUT;
-        r->report.opcode=0xf1;r->report.size=72;memcpy(p,"OFF1",4);p[4]=page;p[5]=14;p[6]=64;
+    if(q->command==OKL_GET_DIAGNOSTIC_PAGE || q->command==OKL_GET_LOW_DIAGNOSTIC_PAGE) {
+        unsigned pages=low?16:14;
+        CHECK(q->command==(low?OKL_GET_LOW_DIAGNOSTIC_PAGE:OKL_GET_DIAGNOSTIC_PAGE));
+        CHECK(q->size==1 && q->arguments[0]<pages && m.bench_claims==1);
+        uint8_t page=q->arguments[0];++m.bench_pages;++m.bench_calls;
+        CHECK(page==(m.bench_pages==1 || m.bench_pages==pages+2?0:m.bench_pages-2));
+        if(m.bench_pages==m.bench_fail_page || m.bench_calls==m.bench_fail_call)return OKL_TIMEOUT;
+        r->report.opcode=0xf1;r->report.size=72;memcpy(p,low?"LOW1":"OFF1",4);p[4]=page;p[5]=(uint8_t)pages;p[6]=64;
         uint32_t initial[16]={0x4f464631,1,0,0,0,0,0,0,0,0,0,0,0,0x193,30000,17};
+        if(low) {memcpy(initial,m.bench_words,sizeof(initial));initial[2]=0;for(unsigned i=3;i<10;++i)initial[i]=0;}
         if(m.bench_fault==2)initial[2]=1;
         const uint32_t *values=m.bench_commands?m.bench_words+page*16:initial;
         CHECK(m.bench_commands || !page);
         for(unsigned i=0;i<16;++i)word(p+8+i*4,values[i]);
-        if(m.bench_fault==4 && m.bench_commands && page==13)p[71]=1;
-        if(m.bench_fault==5 && m.bench_pages==16)p[71]^=1;
+        if(m.bench_fault==4 && m.bench_commands && page==pages-1)p[71]^=1;
+        if(m.bench_fault==5 && m.bench_pages==pages+2)p[71]^=1;
         m.bench_last_page=m.now;return OKL_OK;
     }
-    if(q->command==OKL_RUN_DIAGNOSTIC_OFF) {
-        CHECK(q->size==4 && !memcmp(q->arguments,"OFF1",4) && m.bench_claims==1 && !m.bench_commands);
-        ++m.bench_commands;r->report.opcode=0x70;r->report.size=4;memcpy(p,"OFF1",4);
-        return m.bench_fault==3?OKL_TIMEOUT:OKL_OK;
+    if(q->command==OKL_RUN_DIAGNOSTIC_OFF || q->command==OKL_RUN_DIAGNOSTIC_LOW) {
+        CHECK(q->command==(low?OKL_RUN_DIAGNOSTIC_LOW:OKL_RUN_DIAGNOSTIC_OFF));
+        CHECK(q->size==4 && !memcmp(q->arguments,low?"LOW1":"OFF1",4) && m.bench_claims==1 && !m.bench_commands);
+        ++m.bench_commands;++m.bench_calls;m.bench_ack_us=m.now;
+        r->report.opcode=low?0x71:0x70;r->report.size=4;memcpy(p,low?"LOW1":"OFF1",4);
+        if(m.bench_bad_ack==1)r->acknowledged=0;
+        if(m.bench_bad_ack==2)r->report.status=8;
+        if(m.bench_bad_ack==3)r->report.opcode^=1;
+        if(m.bench_bad_ack==4)r->report.size=3;
+        if(m.bench_bad_ack==5)p[0]^=1;
+        if(m.bench_bad_ack==6)r->received=0;
+        return m.bench_fault==3 || m.bench_calls==m.bench_fail_call?OKL_TIMEOUT:OKL_OK;
     }
     if(q->command==OKL_GET_FIRMWARE) {
         ++m.queries;r->report.opcode=0x87;r->report.size=4;
@@ -122,6 +148,7 @@ static okl_result native_execute(okl_nxp *d,const okl_request *q,okl_reply *r,ui
         word(p+8,m.wrong_caps?1:3);word(p+12,m.wrong_part?0xbc41:OKL_LOADER_PART_ID);word(p+16,5);
         if(m.observing) {
             p[6]=m.job.image.role;word(p+8,p[6]==1?1:3);
+            if(m.bench_uptime)word(p+16,m.bench_uptime);
             if(m.observation_fault==2)p[6]=1;
             if(m.observation_fault==3)word(p+8,1);
             if(m.observation_fault==4)p[4]=2;
@@ -174,7 +201,7 @@ void app_nxp_loader_release(okl_nxp *d,uint32_t id) {
     if(m.release_poison)d->needs_recovery=1;
 }
 okl_result app_nxp_loader_preserve_resident(okl_nxp *d,uint32_t id,uint64_t deadline) {
-    call(d,deadline,150000);CHECK(id==11 && m.bench_commands==1 && m.bench_pages==16);
+    call(d,deadline,150000);CHECK(id==11 && m.bench_commands==1 && m.bench_pages==(m.job.diagnostic_profile==APP_CONTROLLER_PROFILE_LOW?18u:16u));
     CHECK(m.now-m.bench_last_page>=33000000);++m.preserves;
     return m.bench_fault==7?OKL_IO:OKL_OK;
 }
@@ -203,7 +230,7 @@ static void flush(void) {
 okl_result app_nxp_loader_exchange(okl_nxp *d,uint32_t id,const uint8_t raw[90],uint8_t response[90],okl_loader_delivery *sent,uint64_t deadline) {
     okl_report q;uint8_t args[80];call(d,deadline,2000000);
     if(m.commits && m.job.image.role==1) {
-        CHECK(m.now-m.bench_last_page>=33000000 && m.bench_commands==1 && m.bench_pages==16);
+        CHECK(m.now-m.bench_last_page>=33000000 && m.bench_commands==1 && m.bench_pages==(m.job.diagnostic_profile==APP_CONTROLLER_PROFILE_LOW?18u:16u));
         CHECK(okl_report_decode(&q,raw,90)==OKL_OK && q.command_class==0x10 && q.opcode==0x80 && q.size==80);
         CHECK(!memcmp(q.arguments,(uint8_t[80]){0},80));m.loader=true;
         CHECK(okl_report_encode(response,0,0x10,0x80,(uint8_t[80]){3,24,1,2,0,0,0,2,93},80)==OKL_OK);
@@ -381,19 +408,56 @@ int main(void) {
     for(unsigned fault=0;fault<=7;++fault) {
         reset(false);m.owner_gate=1;m.bench_fault=fault;
         m.package[22]=m.job.image.role=1;m.package[26]=m.job.image.version.component[2]=0;
+        m.job.diagnostic_profile=APP_CONTROLLER_PROFILE_OFF;
         off_fixture(m.bench_words);
         CHECK(run(&a)==OKL_LOADER_OK && m.outcome.diagnostic_trial_observed && m.bench_commands<=1);
         CHECK(m.commits==1 && m.claims==1 && !m.aborts && !a.observation.controller.trial_confirmed);
         CHECK((m.outcome.resident_proof_job_id==11)==(fault==0));
         CHECK(m.outcome.diagnostic_error[0]!=(fault==0));
-        if(!fault)CHECK(m.outcome.registers_verified && m.preserves==1 && m.bench_pages==16 && m.waits==3955);
+        if(!fault)CHECK(m.outcome.registers_verified && m.preserves==1 && m.bench_pages==(m.job.diagnostic_profile==APP_CONTROLLER_PROFILE_LOW?18u:16u) && m.waits==3955);
     }
     for(unsigned page=1;page<=16;++page) {
         reset(true);m.bench_fail_page=page;
         m.package[22]=m.job.image.role=1;m.package[26]=m.job.image.version.component[2]=0;
+        m.job.diagnostic_profile=APP_CONTROLLER_PROFILE_OFF;
         off_fixture(m.bench_words);
         CHECK(run(&a)==OKL_LOADER_OK && m.bench_pages==page && !m.preserves && !m.outcome.resident_proof_job_id);
         CHECK(m.bench_commands<=1 && m.outcome.diagnostic_error[0]);
+    }
+    /* LOW1 uses the real adapter and loader core, including the independent
+     * 6.7s no-SPI window, exact completed record and later 33s reset guard. */
+    for(unsigned fault=0;fault<=9;++fault) {
+        if(fault==8)continue; /* resident-resume fault covered separately */
+        reset(false);m.bench_fault=fault;
+        m.package[22]=m.job.image.role=1;m.package[26]=m.job.image.version.component[2]=0;
+        m.job.diagnostic_profile=APP_CONTROLLER_PROFILE_LOW;low_fixture(m.bench_words);
+        CHECK(run(&a)==OKL_LOADER_OK && m.outcome.diagnostic_trial_observed);
+        CHECK(m.outcome.diagnostic_profile==APP_CONTROLLER_PROFILE_LOW && m.bench_commands<=1);
+        CHECK(m.commits==1 && !m.aborts && !a.observation.controller.trial_confirmed);
+        CHECK((m.outcome.resident_proof_job_id==11)==(fault==0));
+        CHECK(m.outcome.diagnostic_error[0]!=(fault==0));
+        if(!fault)CHECK(m.outcome.registers_verified && m.preserves==1 && m.bench_pages==18 &&
+                       m.bench_profile_reads==2 && m.waits==4570 && !memcmp(m.outcome.diagnostic_words,m.bench_words,1024));
+    }
+    for(unsigned fail=1;fail<=21;++fail) {
+        reset(true);m.bench_fail_call=fail;
+        m.package[22]=m.job.image.role=1;m.package[26]=m.job.image.version.component[2]=0;
+        m.job.diagnostic_profile=APP_CONTROLLER_PROFILE_LOW;low_fixture(m.bench_words);
+        CHECK(run(&a)==OKL_LOADER_OK && m.bench_calls==fail && !m.preserves && !m.outcome.resident_proof_job_id);
+        CHECK(m.bench_commands<=1 && m.outcome.diagnostic_error[0]);
+    }
+    for(unsigned bad=1;bad<=6;++bad) {
+        reset(true);m.bench_bad_ack=bad;
+        m.package[22]=m.job.image.role=1;m.package[26]=m.job.image.version.component[2]=0;
+        m.job.diagnostic_profile=APP_CONTROLLER_PROFILE_LOW;low_fixture(m.bench_words);
+        CHECK(run(&a)==OKL_LOADER_OK && m.bench_commands==1 && !m.outcome.command_acknowledged &&
+              !m.outcome.registers_verified && !m.preserves && m.bench_pages==1);
+    }
+    for(unsigned bad=0;bad<4;++bad) {
+        reset(true);m.package[22]=m.job.image.role=1;m.package[26]=m.job.image.version.component[2]=0;
+        m.job.diagnostic_profile=bad<2?APP_CONTROLLER_PROFILE_LOW:bad==2?APP_CONTROLLER_PROFILE_NONE:255;
+        low_fixture(m.bench_words);if(bad<2)m.bench_uptime=bad?20001:20000;
+        CHECK(run(&a)==OKL_LOADER_OK && !m.bench_claims && !m.bench_commands && !m.preserves && m.outcome.diagnostic_error[0]);
     }
     reset(true);m.job.source=OKL_LOADER_FROM_FRESH_RESIDENT;m.job.resident_proof_job_id=10;
     m.state.effect=0;m.state.white_brightness=0;

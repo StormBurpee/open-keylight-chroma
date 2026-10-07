@@ -972,7 +972,7 @@
       "post": {
         "operationId": "uploadControllerApplication",
         "summary": "Admit an original LED-controller package",
-        "description": "Authenticated upload of a fixed 28,736-byte Open Keylight NXP package. Requires a confirmed ESP trial and an available supported controller. The whole package is received in RAM within 30 seconds and checked before queuing controller work. X-SHA256 covers the whole package; the internal header separately hashes its 28,672-byte bank. Metadata and hashes do not authenticate a publisher or establish hardware qualification. The worker turns the light off, verifies native Off settings, enters the loader once, verifies all 448 blocks, commits once, holds SPI quiet, then checks the new application. 202 only transfers ownership to a background job; poll GET for its outcome. Do not retry an ambiguous response automatically. Legacy migration requires exact 1.3.0.0 plus an observed supported part getter; ordinary stock firmware without that getter is not admitted. Production lighting role2 is the default. X-Controller-Mode: diagnostic-off explicitly selects a trusted role1 OFF1 bench image; the package role must match the selected mode. The worker checks its fixed profile, requests the bounded off-only experiment once, captures register snapshots and waits silently through its immutable recovery deadline. It never sends trial confirmation to a diagnostic. Successful diagnostic recovery retains the journal and permits a subsequent explicitly uploaded package from the proven fresh resident loader, in the same ESP boot. Diagnostic profile declarations and hashes do not authenticate an arbitrary owner-supplied binary.",
+        "description": "Authenticated upload of a fixed 28,736-byte Open Keylight NXP package. Requires a confirmed ESP trial and an available supported controller. The whole package is received in RAM within 30 seconds and checked before queuing controller work. X-SHA256 covers the whole package; the internal header separately hashes its 28,672-byte bank. Metadata and hashes do not authenticate a publisher or establish hardware qualification. The worker turns the light off, verifies native Off settings, enters the loader once, verifies all 448 blocks, commits once, holds SPI quiet, then checks the new application. 202 only transfers ownership to a background job; poll GET for its outcome. Do not retry an ambiguous response automatically. Legacy migration requires exact 1.3.0.0 plus an observed supported part getter; ordinary stock firmware without that getter is not admitted. Production lighting role2 is the default. X-Controller-Mode: diagnostic-off or diagnostic-low explicitly selects a trusted role1 OFF1 or LOW1 bench image; the package role must match the selected mode. The worker checks its fixed profile, requests the selected fixed experiment once (OFF1 all-off or LOW1 five brief low-duty channel pulses), captures register snapshots and waits silently through its immutable recovery deadline. It never sends trial confirmation to a diagnostic. Successful diagnostic recovery retains the journal and permits a subsequent explicitly uploaded package from the proven fresh resident loader, in the same ESP boot. Diagnostic profile declarations and hashes do not authenticate an arbitrary owner-supplied binary.",
         "parameters": [
           {
             "name": "X-SHA256",
@@ -991,10 +991,11 @@
             "schema": {
               "type": "string",
               "enum": [
-                "diagnostic-off"
+                "diagnostic-off",
+                "diagnostic-low"
               ]
             },
-            "description": "Omit for a production lighting package. diagnostic-off explicitly selects the bounded OFF1 bench procedure for a diagnostic-role package. Other values are rejected."
+            "description": "Omit for a production lighting package. diagnostic-off selects OFF1; diagnostic-low selects LOW1 with fixed red, green, blue, warm-white and cool-white pulses. Each pulse lasts 100 ms at no more than 1% nominal duty, with 1500 ms dark gaps. Both require a matching diagnostic-role package and remain unconfirmed. Other values are rejected."
           }
         ],
         "requestBody": {
@@ -2214,7 +2215,11 @@
             "additionalProperties": false,
             "properties": {
               "profile": {
-                "const": "OFF1"
+                "type": "string",
+                "enum": [
+                  "OFF1",
+                  "LOW1"
+                ]
               },
               "command_attempted": {
                 "type": "boolean"
@@ -2233,7 +2238,7 @@
               "snapshot_words": {
                 "type": "array",
                 "minItems": 224,
-                "maxItems": 224,
+                "maxItems": 256,
                 "items": {
                   "type": "integer",
                   "minimum": 0,
@@ -2255,6 +2260,50 @@
               "generation",
               "snapshot_words",
               "error"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "const": "OFF1"
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "snapshot_words": {
+                      "minItems": 224,
+                      "maxItems": 224
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "type": "object",
+                  "properties": {
+                    "profile": {
+                      "const": "LOW1"
+                    }
+                  },
+                  "required": [
+                    "profile"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "snapshot_words": {
+                      "minItems": 256,
+                      "maxItems": 256
+                    }
+                  }
+                }
+              }
             ]
           },
           "power_cycle_recovery_available": {

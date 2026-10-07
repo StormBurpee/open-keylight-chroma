@@ -1,7 +1,10 @@
 #include "nxp_app.h"
 #include "nxp_board.h"
 #include "qualification.h"
-#if NXP_PWM_OFF_TRIAL
+#if NXP_PWM_LOW_TRIAL
+#include "nxp_pwm_low_trial.h"
+static nxp_pwm_low_trial low_trial;
+#elif NXP_PWM_OFF_TRIAL
 #include "nxp_pwm_off_trial.h"
 static nxp_pwm_off_trial off_trial;
 #endif
@@ -32,7 +35,9 @@ static uint32_t configured_clock(void) {
 }
 void SysTick_Handler(void) {
     uint32_t now = ++milliseconds;
-#if NXP_PWM_OFF_TRIAL
+#if NXP_PWM_LOW_TRIAL
+    nxp_pwm_low_tick(&low_trial, &board, now);
+#elif NXP_PWM_OFF_TRIAL
     nxp_pwm_off_tick(&off_trial, &board, now);
 #endif
     /* Expiry must not depend on a healthy main/SPI polling loop. State
@@ -43,7 +48,9 @@ void SysTick_Handler(void) {
 void SSP1_Handler(void) { nxp_board_spi_irq(&board); }
 static void enter_recovery(void) {
     __asm volatile ("cpsid i");
-#if NXP_PWM_OFF_TRIAL
+#if NXP_PWM_LOW_TRIAL
+    nxp_pwm_low_recovery(&low_trial, &board, milliseconds);
+#elif NXP_PWM_OFF_TRIAL
     nxp_pwm_off_recovery(&off_trial, &board, milliseconds);
 #endif
 #if !NXP_SPI_ONLY_TRIAL
@@ -133,7 +140,9 @@ void nxp_reset_c(void) {
         if (!nxp_state_platform(&state, NXP_SPI_ONLY_TRIAL,
             recovery_allowed == UINT32_C(0x5245434f) && config.clock_hz == 48000000u,
             board.pwm_started != 0, nxp_diagnostic.reset_status)) nxp_panic();
-#if NXP_PWM_OFF_TRIAL
+#if NXP_PWM_LOW_TRIAL
+        if (!nxp_pwm_low_init(&low_trial, &board)) enter_recovery();
+#elif NXP_PWM_OFF_TRIAL
         if (!nxp_pwm_off_init(&off_trial, &board)) enter_recovery();
 #endif
         __asm volatile ("cpsie i");
@@ -142,7 +151,9 @@ void nxp_reset_c(void) {
             if (nxp_trial_expired(&state, now)) enter_recovery();
             service_watchdog();
             __asm volatile ("cpsid i"); nxp_board_poll(&board, now);
-#if NXP_PWM_OFF_TRIAL
+#if NXP_PWM_LOW_TRIAL
+            nxp_pwm_low_service(&low_trial, &board, now);
+#elif NXP_PWM_OFF_TRIAL
             nxp_pwm_off_service(&off_trial, &board, now);
 #endif
             __asm volatile ("cpsie i");

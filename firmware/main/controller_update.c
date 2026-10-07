@@ -1,5 +1,6 @@
 #include "http_internal.h"
 #include "okl_loader.h"
+#include "controller_profile.h"
 #include "mbedtls/sha256.h"
 #include "lwip/sockets.h"
 #include <stdlib.h>
@@ -30,15 +31,15 @@ static bool controller_digest(httpd_req_t *request, uint8_t digest[32]) {
 
 esp_err_t http_controller_update(httpd_req_t *request) {
     uint8_t expected[32], digest[32];
-    uint8_t role = OKL_ROLE_LIGHTING;
+    uint8_t profile = APP_CONTROLLER_PROFILE_NONE;
     char mode[32];
     size_t mode_size = httpd_req_get_hdr_value_len(request, "X-Controller-Mode");
     if (mode_size) {
         if (mode_size >= sizeof(mode) ||
             httpd_req_get_hdr_value_str(request, "X-Controller-Mode", mode, sizeof(mode)) != ESP_OK ||
-            strcmp(mode, "diagnostic-off"))
-            return http_error(request, 400, "Controller mode must be diagnostic-off, or omitted for production");
-        role = OKL_ROLE_SPI_DIAGNOSTIC;
+            (strcmp(mode, "diagnostic-off") && strcmp(mode, "diagnostic-low")))
+            return http_error(request, 400, "Controller mode must be diagnostic-off, diagnostic-low, or omitted");
+        profile = !strcmp(mode, "diagnostic-low") ? APP_CONTROLLER_PROFILE_LOW : APP_CONTROLLER_PROFILE_OFF;
     }
     if (!controller_digest(request, expected))
         return http_error(request, 400, "Use application/octet-stream and a lowercase X-SHA256 package digest");
@@ -53,7 +54,7 @@ esp_err_t http_controller_update(httpd_req_t *request) {
     if (socket < 0 || getsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &old_timeout, &timeout_size) != 0)
         return http_error(request, 503, "Cannot bound the upload receive time");
     uint32_t job_id = 0;
-    int status = app_controller_update_begin_role(&job_id, role);
+    int status = app_controller_update_begin_mode(&job_id, profile);
     if (status != 200) return http_error(request, status, "Controller update is unavailable or another update is active");
 
     uint8_t *package = malloc(OKL_LOADER_PACKAGE_BYTES);

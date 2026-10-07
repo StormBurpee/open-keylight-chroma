@@ -22,3 +22,17 @@ digest = Draft202012Validator(schemas["Device"]["properties"]["firmware_elf_sha2
 assert digest.is_valid("a" * 64)
 assert not digest.is_valid("a" * 64 + "\n")
 print("PASS recovery request and firmware identity schema boundaries")
+
+diagnostic = Draft202012Validator(schemas["ControllerUpdateStatus"]["properties"]["diagnostic"])
+assert diagnostic.is_valid(None)
+for profile, size in (("OFF1", 224), ("LOW1", 256)):
+    value = {"profile": profile, "command_attempted": True, "command_acknowledged": True,
+             "registers_verified": True, "generation": 1, "snapshot_words": [0] * size, "error": None}
+    assert diagnostic.is_valid(value)
+    for wrong_size in (0, size - 1, size + 1, 256 if size == 224 else 224):
+        assert not diagnostic.is_valid({**value, "snapshot_words": [0] * wrong_size})
+    for wrong_profile in ("LOW2", "off1", None):
+        assert not diagnostic.is_valid({**value, "profile": wrong_profile})
+    assert not diagnostic.is_valid({**value, "snapshot_words": [-1] + [0] * (size - 1)})
+    assert not diagnostic.is_valid({**value, "snapshot_words": [4294967296] + [0] * (size - 1)})
+print("PASS fixed diagnostic profile and snapshot schema boundaries")

@@ -12,6 +12,7 @@ static void job_free(void *pointer) { CHECK(pointer != NULL); ++frees; free(poin
 #include "../../firmware/main/controller_job.c"
 #undef free
 #include "off_fixture.h"
+#include "../controller_worker/low_fixture.h"
 
 app_context app;
 static uint8_t disk[256], pending[256];
@@ -398,7 +399,8 @@ static void diagnostic_tests(void) {
         a.observation.controller.role=1;a.observation.controller.capabilities=1;
         app_controller_worker_outcome proof={.entry=APP_CONTROLLER_MUTATION_ATTEMPTED,.synchronized=true,
             .diagnostic_trial_observed=true,.profile_verified=true,.command_attempted=true,
-            .command_acknowledged=true,.registers_verified=true,.resident_proof_job_id=j.id};
+            .command_acknowledged=true,.registers_verified=true,.resident_proof_job_id=j.id,
+            .diagnostic_profile=APP_CONTROLLER_PROFILE_OFF};
         off_fixture(proof.diagnostic_words);
         CHECK(app_diagnostic_registers(proof.diagnostic_words,17));
         CHECK(!app_controller_update_persist(j.id,&a));
@@ -434,6 +436,62 @@ static void diagnostic_tests(void) {
         } else CHECK(app_controller_update_begin(&id)==503);
         reset(true);CHECK(app_controller_update_init()==ESP_OK && app_controller_update_blocked());
         CHECK(!job.resident_proof_job_id && app_controller_update_begin(&id)==503);
+    }
+}
+static void low_diagnostic_tests(void) {
+    uint32_t id=0;
+    initialize();CHECK(app_controller_update_begin_mode(&id,3)==400);
+    CHECK(app_controller_update_begin_mode(&id,255)==400 && !id && !app.updating);
+    for(unsigned fault=0;fault<7;++fault) {
+        initialize();CHECK(app_controller_update_begin_mode(&id,APP_CONTROLLER_PROFILE_LOW)==200);
+        uint8_t *p=package();CHECK(app_controller_update_submit(id,p,OKL_LOADER_PACKAGE_BYTES)==400);
+        p[22]=OKL_ROLE_SPI_DIAGNOSTIC;
+        CHECK(app_controller_update_submit(id,p,OKL_LOADER_PACKAGE_BYTES)==202);
+        app_controller_job j;CHECK(app_controller_update_take(&j));
+        CHECK(j.diagnostic_profile==APP_CONTROLLER_PROFILE_LOW && j.image.role==1);
+        okl_loader_audit a=complete_for(&j);a.observation.controller.role=1;a.observation.controller.capabilities=1;
+        app_controller_worker_outcome proof={.entry=APP_CONTROLLER_MUTATION_ATTEMPTED,.synchronized=true,
+            .diagnostic_trial_observed=true,.profile_verified=true,.command_attempted=true,
+            .command_acknowledged=true,.registers_verified=true,.resident_proof_job_id=j.id,
+            .diagnostic_profile=APP_CONTROLLER_PROFILE_LOW};
+        low_fixture(proof.diagnostic_words);CHECK(app_low_diagnostic_registers(proof.diagnostic_words,77));
+        CHECK(!app_controller_update_persist(j.id,&a));
+        CHECK(disk[8]==3 && disk[64]==1 && disk[65]==2);
+        if(fault==1)proof.diagnostic_profile=APP_CONTROLLER_PROFILE_OFF;
+        if(fault==2)off_fixture(proof.diagnostic_words);
+        if(fault==3)proof.diagnostic_words[12]=0;
+        if(fault==4)proof.diagnostic_words[56+4*40+39]=0;
+        if(fault==5)proof.command_acknowledged=false;
+        if(fault==6)a.observation.controller.trial_confirmed=true;
+        unsigned calls=nvs_calls;
+        app_controller_update_diagnostic_finish(j.id,&a,OKL_LOADER_OK,&proof);
+        CHECK(nvs_calls==calls && disk_present && frees==1 && app_controller_update_blocked() && !app.controller_ready);
+        CHECK((job.resident_proof_job_id==id)==(fault==0) && !job.confirmed);
+        cJSON *json=app_controller_update_json();cJSON *detail=cJSON_GetObjectItemCaseSensitive(json,"diagnostic");
+        CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(detail,"profile")->valuestring,"LOW1"));
+        CHECK(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(detail,"snapshot_words"))==256);
+        if(!fault)CHECK(cJSON_GetObjectItemCaseSensitive(detail,"generation")->valueint==77);
+        cJSON_Delete(json);
+        reset(true);CHECK(app_controller_update_init()==ESP_OK && app_controller_update_blocked());
+        CHECK(job.diagnostic_profile==APP_CONTROLLER_PROFILE_LOW && !job.resident_proof_job_id);
+    }
+    /* Decode prior journal versions, but reject role/profile contradictions
+     * even with an otherwise valid integrity digest. */
+    for(unsigned variant=0;variant<7;++variant) {
+        initialize();app_controller_job j=diagnostic_running();okl_loader_audit a=audit_for(&j);
+        CHECK(!app_controller_update_persist(j.id,&a));
+        if(variant==0){disk[8]=1;disk[64]=0;disk[65]=0;}
+        if(variant==1){disk[8]=2;disk[65]=0;}
+        if(variant==2)disk[65]=2;
+        if(variant==3)disk[65]=0;
+        if(variant==4){disk[64]=2;disk[65]=1;}
+        if(variant==5)disk[65]=3;
+        if(variant==6)disk[66]=1;
+        CHECK(!mbedtls_sha256(disk,JOURNAL_HASH_OFFSET,disk+JOURNAL_HASH_OFFSET,0));
+        reset(true);CHECK(app_controller_update_init()==ESP_OK && app_controller_update_blocked());
+        CHECK(job.target_known==(variant<3));
+        if(variant<3)CHECK(job.diagnostic_profile==(variant==0?0:variant==1?1:2));
+        else CHECK(!job.recovery_available);
     }
 }
 static uint32_t recovery_journal(unsigned changed) {
@@ -544,7 +602,7 @@ static void recovery_tests(void) {
     }
 }
 int main(void) {
-    admission_tests(); package_tests(); persistence_tests(); reboot_tests(); finish_tests(); rejection_tests(); diagnostic_tests();
+    admission_tests(); package_tests(); persistence_tests(); reboot_tests(); finish_tests(); rejection_tests(); diagnostic_tests();low_diagnostic_tests();
     recovery_tests();reset(false); CHECK(!locked);
     printf("controller job: %u assertions passed\n", checks);
     return 0;

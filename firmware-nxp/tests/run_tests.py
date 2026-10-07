@@ -47,10 +47,14 @@ extra_results = []
 for name, extra_sources in (
     ("pwm", [root / "tests/test_pwm.c"]),
     ("pwm_off", [root / "tests/test_pwm_off.c", root / "src/nxp_pwm_off_trial.c"]),
+    ("pwm_low", [root / "tests/test_pwm_low.c", root / "src/nxp_pwm_low_trial.c"]),
 ):
     test_sources = board_sources[:2] + extra_sources
     test_exe = build / (f"{name}_tests.exe" if os.name == "nt" else f"{name}_tests")
     test_command = board_command[:board_command.index(str(board_sources[0]))]
+    if name == "pwm_low":
+        test_command += ["-DNXP_PWM_LOW_TRIAL=1", "-I", str(root.parent / "firmware/main"),
+                         "-I", str(driver / "include")]
     test_command += [*map(str, test_sources), "-o", str(test_exe)]
     subprocess.run(test_command, check=True)
     completed = subprocess.run([str(test_exe)], capture_output=True, text=True)

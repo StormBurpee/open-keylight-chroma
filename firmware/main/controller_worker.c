@@ -255,14 +255,19 @@ static int observe(void *user, okl_loader_observation *observation, uint64_t dea
 
 static int diagnostic_request(update_context *c, okl_command command,
                               const uint8_t *args, size_t size, okl_reply *reply) {
-    okl_request request;
-    return okl_request_build(&request, command, args, size) == OKL_OK &&
-        okl_nxp_execute(c->driver, &request, reply, bounded(c, 150000)) == OKL_OK ? 0 : -1;
+    okl_request request; memset(reply, 0, sizeof(*reply));
+    okl_result result = okl_request_build(&request, command, args, size);
+    if (result == OKL_OK) result = okl_nxp_execute(c->driver, &request, reply, bounded(c, 150000));
+    trace(c, command == OKL_GET_DIAGNOSTIC_PAGE || command == OKL_GET_LOW_DIAGNOSTIC_PAGE ?
+        "diagnostic.page" : command == OKL_RUN_DIAGNOSTIC_OFF || command == OKL_RUN_DIAGNOSTIC_LOW ?
+        "diagnostic.trigger" : "diagnostic.profile", result, reply);
+    return result == OKL_OK ? 0 : -1;
 }
-static int diagnostic_page(update_context *c, uint8_t page, uint32_t *words) {
+static int diagnostic_page(update_context *c, bool low, uint8_t page, uint32_t *words) {
     okl_reply reply; uint8_t bytes[64];
-    if (diagnostic_request(c, OKL_GET_DIAGNOSTIC_PAGE, &page, 1, &reply) ||
-        okl_reply_decode_diagnostic_page(bytes, page, &reply) != OKL_OK) return -1;
+    if (diagnostic_request(c, low ? OKL_GET_LOW_DIAGNOSTIC_PAGE : OKL_GET_DIAGNOSTIC_PAGE, &page, 1, &reply) ||
+        (low ? okl_reply_decode_low_diagnostic_page(bytes, page, &reply) :
+            okl_reply_decode_diagnostic_page(bytes, page, &reply)) != OKL_OK) return -1;
     const uint8_t *p = bytes;
     for (unsigned i = 0; i < 16; ++i)
         words[i] = (uint32_t)p[i * 4] << 24 | (uint32_t)p[i * 4 + 1] << 16 |
@@ -272,31 +277,46 @@ static int diagnostic_page(update_context *c, uint8_t page, uint32_t *words) {
 static void diagnostic(update_context *c, const okl_loader_audit *audit) {
     app_controller_worker_outcome *out = &c->outcome;
     out->diagnostic_trial_observed = true;
+    out->diagnostic_profile = c->job->diagnostic_profile;
+    bool low = out->diagnostic_profile == APP_CONTROLLER_PROFILE_LOW;
+    bool off = out->diagnostic_profile == APP_CONTROLLER_PROFILE_OFF;
     const uint8_t expected_version[4] = {0, 1, 0, 0};
     const char *error = "Diagnostic profile was not verified; no bench command sent";
-    uint32_t initial[16], final_header[16]; okl_reply reply; okl_diagnostic_profile profile;
-    if (memcmp(c->job->image.version.component, expected_version, 4) ||
-        audit->observation.controller.uptime_ms >= 26000 ||
-        begin(c, clock_us(c) + UINT64_C(45000000))) goto failed;
-    if (okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000)) != OKL_OK ||
-        diagnostic_request(c, OKL_GET_DIAGNOSTIC_PROFILE, NULL, 0, &reply) ||
-        okl_reply_decode_diagnostic_profile(&profile, &reply) != OKL_OK || profile.requested ||
-        diagnostic_page(c, 0, initial) || !app_diagnostic_initial(initial)) goto failed;
+    uint32_t initial[16], final_header[16]; okl_reply reply;
+    okl_diagnostic_profile profile; okl_low_diagnostic_profile low_profile;
+    if ((!low && !off) || memcmp(c->job->image.version.component, expected_version, 4) ||
+        (low ? !app_low_diagnostic_identity(&audit->observation.controller, &audit->observation.version) :
+            audit->observation.controller.uptime_ms >= 26000) ||
+        begin(c, clock_us(c) + (low ? UINT64_C(50000000) : UINT64_C(45000000)))) goto failed;
+    okl_result result = okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000));
+    trace(c, "diagnostic.claim", result, NULL);
+    if (result != OKL_OK || diagnostic_request(c, low ? OKL_GET_LOW_DIAGNOSTIC_PROFILE :
+        OKL_GET_DIAGNOSTIC_PROFILE, NULL, 0, &reply)) goto failed;
+    if (low ? (okl_reply_decode_low_diagnostic_profile(&low_profile, &reply) != OKL_OK || low_profile.requested) :
+        (okl_reply_decode_diagnostic_profile(&profile, &reply) != OKL_OK || profile.requested)) goto failed;
+    if (diagnostic_page(c, low, 0, initial) ||
+        !(low ? app_low_diagnostic_initial(initial) : app_diagnostic_initial(initial))) goto failed;
     out->profile_verified = true;
     out->command_attempted = true;
-    error = "OFF1 acknowledgement was not verified; command was not retried";
-    if (diagnostic_request(c, OKL_RUN_DIAGNOSTIC_OFF, (const uint8_t *)"OFF1", 4, &reply) ||
-        okl_reply_check_diagnostic_off(&reply) != OKL_OK) goto failed;
+    error = "Diagnostic acknowledgement was not verified; command was not retried";
+    if (diagnostic_request(c, low ? OKL_RUN_DIAGNOSTIC_LOW : OKL_RUN_DIAGNOSTIC_OFF,
+        (const uint8_t *)(low ? "LOW1" : "OFF1"), 4, &reply) ||
+        (low ? okl_reply_check_diagnostic_low(&reply) : okl_reply_check_diagnostic_off(&reply)) != OKL_OK) goto failed;
     out->command_acknowledged = true;
-    uint64_t settle = clock_us(c) + UINT64_C(550000);
+    /* LOW1's full five-pulse sequence owns the hardware. No status, owner,
+     * page or health request may clock SPI until this quiet interval ends. */
+    uint64_t settle = clock_us(c) + (low ? UINT64_C(6700000) : UINT64_C(550000));
     while (clock_us(c) < settle) wait_until(c, settle);
-    error = "OFF1 register snapshots were not verified";
-    for (uint8_t page = 0; page < APP_DIAGNOSTIC_PAGES; ++page)
-        if (diagnostic_page(c, page, out->diagnostic_words + page * 16)) goto failed;
-    if (diagnostic_page(c, 0, final_header) || memcmp(final_header, out->diagnostic_words, sizeof(final_header)) ||
-        !app_diagnostic_registers(out->diagnostic_words, initial[15])) goto failed;
+    error = "Diagnostic register snapshots were not verified";
+    if (low && (diagnostic_request(c, OKL_GET_LOW_DIAGNOSTIC_PROFILE, NULL, 0, &reply) ||
+        okl_reply_decode_low_diagnostic_profile(&low_profile, &reply) != OKL_OK || low_profile.requested != 3)) goto failed;
+    for (uint8_t page = 0; page < (low ? APP_LOW_DIAGNOSTIC_PAGES : APP_DIAGNOSTIC_PAGES); ++page)
+        if (diagnostic_page(c, low, page, out->diagnostic_words + page * 16)) goto failed;
+    if (diagnostic_page(c, low, 0, final_header) || memcmp(final_header, out->diagnostic_words, sizeof(final_header)) ||
+        !(low ? app_low_diagnostic_registers(out->diagnostic_words, initial[12]) :
+            app_diagnostic_registers(out->diagnostic_words, initial[15]))) goto failed;
     out->registers_verified = true;
-    /* A known-complete End reset and the exact compiled OFF1 recovery profile
+    /* A known-complete End reset and the selected fixed OFF1/LOW1 profile
      * preceded this wait. Do not send anything until its immutable 30s expiry
      * plus the proven 3s guard has passed, even if our uptime estimate was low.
      * No loader writes/reads have occurred since that reset. Info80 below is
@@ -306,8 +326,11 @@ static void diagnostic(update_context *c, const okl_loader_audit *audit) {
     uint8_t request[90], response[90], args[80] = {0};
     okl_loader_delivery delivery;
     error = "Diagnostic returned no qualified resident loader; explicit recovery required";
-    if (okl_report_encode(request, 0, 0x10, 0x80, args, 80) != OKL_OK ||
-        app_nxp_loader_exchange(c->driver, c->job->id, request, response, &delivery, bounded(c, 2000000)) != OKL_OK ||
+    result = okl_report_encode(request, 0, 0x10, 0x80, args, 80);
+    if (result == OKL_OK) result = app_nxp_loader_exchange(c->driver, c->job->id, request, response,
+        &delivery, bounded(c, 2000000));
+    trace(c, "diagnostic.resident_information", result, NULL);
+    if (result != OKL_OK ||
         delivery != OKL_LOADER_SENT_COMPLETE || !okl_loader_information_valid(response) ||
         app_nxp_loader_preserve_resident(c->driver, c->job->id, bounded(c, 150000)) != OKL_OK) goto failed;
     out->resident_proof_job_id = c->job->id;

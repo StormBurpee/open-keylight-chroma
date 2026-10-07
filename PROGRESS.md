@@ -155,3 +155,19 @@ The authenticated recovery action now requires an acknowledged whole-light power
 An authenticated recovery request now requires a confirmed ESP image, matching valid journal, explicit whole-light power-cycle acknowledgment, fresh ESP POWERON and pristine SPI. The worker waits silently, probes once, and can retain a fresh resident capability for a new explicit package without clearing the journal or replaying output. A narrowly proven unchanged legacy application after an entry-only failure may instead be checked Off and durably reconciled. Warm OTA boots, corrupt journals, stale requests, ambiguous bus state and failed journal clearing remain blocked.
 
 The cached audit now includes the precise operation stage, transport result, complete raw envelope tag/kind and report digest, separately labelled from parsed/correlated replies. Evidence is captured before cleanup can replace the failed response. Targeted actual-source tests cover physical-reset admission, one-shot consumption, no initial SPI, no loader writes/FD, all recovery exchange failures, strict legacy identity/Off/release, journal persistence errors and no old-scene replay. Manager and worker sanitizer suites pass; the independent actual recovery-adapter harness covers 315 deterministic cases. This slice is prepared for hardware recovery, not a claim that recovery has already succeeded.
+
+## Native LOW1 diagnostic admission
+
+The controller upload API now separately admits the fixed LOW1 profile. It preserves the role 1 trial and journal, checks the unused profile, triggers once, and keeps SPI silent throughout the five-pulse sequence. All sixteen result pages and a repeated header must validate before the protected resident-return sequence can create a one-use next-upload capability. OFF1 keeps its distinct command and validator. Neither profile receives FD confirmation or production readiness.
+
+The actual adapter/core suite passes 1,049 cases, including every LOW1 request failure, uncertain ACK, wrong profile, incomplete capture and both silence windows. The manager tests verify profile persistence, old journal compatibility, cross-profile rejection and no clearing or confirmation; HTTP tests verify explicit mode selection and malformed headers. These are offline results. They do not qualify emitted light, electrical polarity or live LOW1 installation.
+
+## Native OFF1 passes on Storm Rim
+
+ESP 0.1.4-dev was installed and explicitly confirmed after verifying its running ELF, embedded dashboard assets and preserved settings. The corrected recovery probe recognized the observed legacy unsupported reply, verified the unchanged controller and Off readback, and cleared the earlier entry-only failure.
+
+The subsequent original NXP OFF1 installation acknowledged and read back all 448 blocks before its single commit. The application identity, fixed all-off command and all 224 register words passed. The owner reported that the lamp stayed completely dark throughout the test. After protected silence, the native updater verified the resident loader again and retained a one-use next-upload capability. The journal remains blocked intentionally; this proves the bounded all-off procedure and native recovery, not production lighting.
+
+The next build adds the separate LOW1 procedure to verify red, green, blue, warm-white and cool-white output with fixed brief pulses. Full lighting remains gated on those observations and subsequent qualification.
+
+The complete 21-suite host run passes with AddressSanitizer and UndefinedBehaviorSanitizer, including the new LOW1 suite. The fixed diagnostic schema boundary tests pass, and ESP 0.1.5-dev builds with 23% application-slot space free. Independent compiled-controller tests reproduce the exact OFF1 and LOW1 banks; live LOW1 qualification is next.

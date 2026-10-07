@@ -10,6 +10,12 @@
 #ifndef NXP_PWM_OFF_TRIAL
 #define NXP_PWM_OFF_TRIAL 0
 #endif
+#ifndef NXP_PWM_LOW_TRIAL
+#define NXP_PWM_LOW_TRIAL 0
+#endif
+#if NXP_PWM_LOW_TRIAL && (NXP_PWM_OFF_TRIAL || !NXP_SPI_ONLY_TRIAL)
+#error "LOW1 must be a separate unconfirmable SPI diagnostic"
+#endif
 #if NXP_PWM_OFF_TRIAL && !NXP_SPI_ONLY_TRIAL
 #error "The off-only experiment must remain an unconfirmable SPI diagnostic"
 #endif

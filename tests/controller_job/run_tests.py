@@ -40,7 +40,9 @@ if result.returncode:
     print(result.stderr, file=sys.stderr, end="")
     result.check_returncode()
 sources += [ROOT / "firmware/main/controller_job.c", ROOT / "firmware/main/controller_job.h",
-            ROOT / "firmware/main/app.h", HERE / "job_mocks.h", Path(__file__)]
+            ROOT / "firmware/main/controller_profile.h", ROOT / "firmware/main/controller_diagnostic.h",
+            ROOT / "firmware/main/app.h", HERE / "job_mocks.h", HERE / "off_fixture.h",
+            ROOT / "tests/controller_worker/low_fixture.h", Path(__file__)]
 report = {"status": "pass", "sanitizer": "AddressSanitizer+UndefinedBehaviorSanitizer", "device_operations": 0,
           "output": result.stdout.strip(), "source_sha256": {
               path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources},

@@ -20,7 +20,7 @@ static struct {
     okl_loader_source source;
     okl_loader_audit audit;
     bool confirmed, target_known;
-    uint8_t requested_role;
+    uint8_t requested_role, diagnostic_profile;
     uint32_t resident_proof_job_id;
     app_controller_worker_outcome diagnostic;
     bool recovery_available, recovery_only, allow_legacy_reconcile, recovery_taken;
@@ -64,7 +64,7 @@ static void disable_locked(const char *error) {
 static bool encode_journal(uint8_t record[JOURNAL_BYTES], const okl_loader_audit *a) {
     memset(record, 0, JOURNAL_BYTES);
     memcpy(record, journal_magic, sizeof(journal_magic));
-    record[8] = 2;
+    record[8] = 3;
     record[9] = (uint8_t)a->phase; record[10] = (uint8_t)a->source;
     record[11] = (uint8_t)a->result; put32(record + 12, job.id);
     put32(record + 16, a->program_blocks_acked); put32(record + 20, a->readback_blocks_verified);
@@ -73,18 +73,21 @@ static bool encode_journal(uint8_t record[JOURNAL_BYTES], const okl_loader_audit
     record[60] = a->erase_attempted != 0; record[61] = a->commit_attempted != 0;
     record[62] = a->abort_attempted != 0; record[63] = a->complete_bank_verified != 0;
     record[64] = job.image.role;
+    record[65] = job.diagnostic_profile;
     return !sha256(NULL, record, JOURNAL_HASH_OFFSET, record + JOURNAL_HASH_OFFSET);
 }
 static bool decode_journal(const uint8_t record[JOURNAL_BYTES]) {
     uint8_t digest[32];
-    if (memcmp(record, journal_magic, sizeof(journal_magic)) || (record[8] != 1 && record[8] != 2) ||
+    if (memcmp(record, journal_magic, sizeof(journal_magic)) || record[8] < 1 || record[8] > 3 ||
         record[9] > OKL_LOADER_COMMIT_UNRESOLVED || record[10] > OKL_LOADER_FROM_FRESH_RESIDENT ||
         record[11] > OKL_LOADER_UNRESOLVED || !get32(record + 12) ||
         get32(record + 16) > OKL_LOADER_BLOCKS || get32(record + 20) > OKL_LOADER_BLOCKS)
         return false;
     for (unsigned i = 60; i < 64; ++i) if (record[i] > 1) return false;
-    if (record[8] == 2 && record[64] != OKL_ROLE_LIGHTING && record[64] != OKL_ROLE_SPI_DIAGNOSTIC) return false;
-    for (unsigned i = record[8] == 1 ? 64 : 65; i < JOURNAL_HASH_OFFSET; ++i) if (record[i]) return false;
+    if (record[8] >= 2 && record[64] != OKL_ROLE_LIGHTING && record[64] != OKL_ROLE_SPI_DIAGNOSTIC) return false;
+    if (record[8] == 3 && (record[65] > APP_CONTROLLER_PROFILE_LOW ||
+        ((record[64] == OKL_ROLE_LIGHTING) != (record[65] == APP_CONTROLLER_PROFILE_NONE)))) return false;
+    for (unsigned i = record[8] == 1 ? 64 : record[8] == 2 ? 65 : 66; i < JOURNAL_HASH_OFFSET; ++i) if (record[i]) return false;
     if (sha256(NULL, record, JOURNAL_HASH_OFFSET, digest) ||
         memcmp(digest, record + JOURNAL_HASH_OFFSET, 32)) return false;
     job.id = job.next_id = get32(record + 12);
@@ -96,6 +99,8 @@ static bool decode_journal(const uint8_t record[JOURNAL_BYTES]) {
     memcpy(job.image.version.component, record + 24, 4);
     job.image.role = record[8] == 1 ? OKL_ROLE_LIGHTING : record[64];
     job.requested_role = job.image.role;
+    job.diagnostic_profile = record[8] == 3 ? record[65] :
+        job.image.role == OKL_ROLE_SPI_DIAGNOSTIC ? APP_CONTROLLER_PROFILE_OFF : APP_CONTROLLER_PROFILE_NONE;
     memcpy(job.image.bank_sha256, record + 28, 32);
     job.target_known = true;
     memcpy(job.audit.bank_sha256, record + 28, 32);
@@ -168,6 +173,13 @@ int app_controller_update_begin(uint32_t *id) {
 
 int app_controller_update_begin_role(uint32_t *id, uint8_t role) {
     if (!id || (role != OKL_ROLE_LIGHTING && role != OKL_ROLE_SPI_DIAGNOSTIC)) return 400;
+    return app_controller_update_begin_mode(id, role == OKL_ROLE_LIGHTING ?
+        APP_CONTROLLER_PROFILE_NONE : APP_CONTROLLER_PROFILE_OFF);
+}
+
+int app_controller_update_begin_mode(uint32_t *id, uint8_t profile) {
+    if (!id || profile > APP_CONTROLLER_PROFILE_LOW) return 400;
+    uint8_t role = profile == APP_CONTROLLER_PROFILE_NONE ? OKL_ROLE_LIGHTING : OKL_ROLE_SPI_DIAGNOSTIC;
     app_lock();
     bool resident = atomic_load(&blocked) && job.resident_proof_job_id != 0;
     if (!job.initialized || (atomic_load(&blocked) && !resident) || job.next_id == UINT32_MAX) {
@@ -187,6 +199,7 @@ int app_controller_update_begin_role(uint32_t *id, uint8_t role) {
     job.confirmed = false; job.target_known = false; job.error[0] = 0;
     job.recovery_only = false;
     job.requested_role = role;
+    job.diagnostic_profile = profile;
     memset(&job.diagnostic, 0, sizeof(job.diagnostic));
     memset(&job.image, 0, sizeof(job.image)); memset(&job.audit, 0, sizeof(job.audit));
     job.audit.source = source;
@@ -227,7 +240,7 @@ bool app_controller_update_take(app_controller_job *out) {
         (job.source == OKL_LOADER_FROM_FRESH_RESIDENT && job.resident_proof_job_id));
     if (available) {
         *out = (app_controller_job){job.id, job.package, job.image, job.source, job.resident_proof_job_id,
-            job.recovery_only, job.allow_legacy_reconcile};
+            job.recovery_only, job.allow_legacy_reconcile, job.diagnostic_profile};
         job.recovery_taken = job.recovery_only;
         job.recovery_available = false;
         job.resident_proof_job_id = 0;
@@ -362,9 +375,13 @@ void app_controller_update_diagnostic_finish(uint32_t id, const okl_loader_audit
     if ((unsigned)result <= OKL_LOADER_UNRESOLVED) job.audit.result = result;
     if (outcome) job.diagnostic = *outcome;
     job.diagnostic.diagnostic_trial_observed = observed;
-    bool proof = observed && outcome->synchronized && outcome->profile_verified &&
+    bool low = job.diagnostic_profile == APP_CONTROLLER_PROFILE_LOW;
+    bool off = job.diagnostic_profile == APP_CONTROLLER_PROFILE_OFF;
+    bool proof = observed && outcome->diagnostic_profile == job.diagnostic_profile && (low || off) &&
+        outcome->synchronized && outcome->profile_verified &&
         outcome->command_attempted && outcome->command_acknowledged && outcome->registers_verified &&
-        app_diagnostic_registers(outcome->diagnostic_words, outcome->diagnostic_words[15]) &&
+        (low ? app_low_diagnostic_registers(outcome->diagnostic_words, outcome->diagnostic_words[12]) :
+            app_diagnostic_registers(outcome->diagnostic_words, outcome->diagnostic_words[15])) &&
         outcome->resident_proof_job_id == id;
     job.resident_proof_job_id = proof ? id : 0;
     job.diagnostic.resident_proof_job_id = job.resident_proof_job_id;
@@ -389,7 +406,7 @@ void app_controller_update_diagnostic_finish(uint32_t id, const okl_loader_audit
     uint8_t *package = job.package;
     job.package = NULL; job.image.package = NULL; job.image.size = 0; app.updating = false;
     app_event_locked("update", proof ? "controller.diagnostic" : "controller.unresolved", proof ?
-        "Off diagnostic and resident return verified; explicit next package required" : job.error);
+        "Diagnostic register record and resident return verified; explicit next package required" : job.error);
     app_unlock(); free(package);
 }
 
@@ -450,6 +467,7 @@ cJSON *app_controller_update_json(void) {
     enum job_state state = job.state; uint32_t id = job.id; bool confirmed = job.confirmed;
     bool target_known = job.target_known;
     uint8_t role = job.image.role;
+    uint8_t profile = job.diagnostic_profile;
     bool resident_ready = job.resident_proof_job_id != 0;
     bool recovery_available = job.recovery_available && !app.updating &&
         esp_reset_reason() == ESP_RST_POWERON && app_now_ms() < 180000;
@@ -506,13 +524,14 @@ cJSON *app_controller_update_json(void) {
     else cJSON_AddNullToObject(wire, "report_sha256");
     if (role == OKL_ROLE_SPI_DIAGNOSTIC && target_known) {
         cJSON *detail = cJSON_AddObjectToObject(json, "diagnostic");
-        cJSON_AddStringToObject(detail, "profile", "OFF1");
+        bool low = profile == APP_CONTROLLER_PROFILE_LOW;
+        cJSON_AddStringToObject(detail, "profile", low ? "LOW1" : "OFF1");
         cJSON_AddBoolToObject(detail, "command_attempted", diagnostic.command_attempted);
         cJSON_AddBoolToObject(detail, "command_acknowledged", diagnostic.command_acknowledged);
         cJSON_AddBoolToObject(detail, "registers_verified", diagnostic.registers_verified);
-        cJSON_AddNumberToObject(detail, "generation", diagnostic.diagnostic_words[15]);
+        cJSON_AddNumberToObject(detail, "generation", diagnostic.diagnostic_words[low ? 12 : 15]);
         cJSON *words = cJSON_AddArrayToObject(detail, "snapshot_words");
-        for (unsigned i = 0; i < APP_DIAGNOSTIC_WORDS; ++i)
+        for (unsigned i = 0; i < (low ? APP_LOW_DIAGNOSTIC_WORDS : APP_DIAGNOSTIC_WORDS); ++i)
             cJSON_AddItemToArray(words, cJSON_CreateNumber(diagnostic.diagnostic_words[i]));
         if (diagnostic.diagnostic_error[0]) cJSON_AddStringToObject(detail, "error", diagnostic.diagnostic_error);
         else cJSON_AddNullToObject(detail, "error");

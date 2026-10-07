@@ -40,9 +40,15 @@ void nxp_state_init(nxp_state *s) {
 
 int nxp_state_valid(const nxp_state *s) {
     return s && s->claimed <= 1 && s->name_size <= NXP_NAME_MAX && s->boot_requested <= 1 && s->trial_confirmed <= 1 &&
+#if defined(NXP_PWM_LOW_TRIAL) && NXP_PWM_LOW_TRIAL
+        s->low_profile <= 1 && s->low_requested <= 3 &&
+        (!s->low_profile || (s->image_role == NXP_ROLE_SPI_TRIAL && s->low_snapshot && !s->trial_confirmed)) &&
+        (s->low_profile || (!s->low_requested && !s->low_snapshot)) &&
+#else
         s->off_profile <= 1 && s->off_requested <= 3 &&
         (!s->off_profile || (s->image_role == NXP_ROLE_SPI_TRIAL && s->off_snapshot && !s->trial_confirmed)) &&
         (s->off_profile || (!s->off_requested && !s->off_snapshot)) &&
+#endif
         s->image_role <= NXP_ROLE_LIGHTING &&
         !(s->capabilities & ~(uint32_t)(NXP_CAP_RECOVERY_READY | NXP_CAP_LIGHTING_READY)) &&
         (!s->capabilities || s->part_id) &&
@@ -69,6 +75,15 @@ int nxp_state_platform(nxp_state *s, int spi_trial, int recovery_ready,
     *s = next;
     return 1;
 }
+#if defined(NXP_PWM_LOW_TRIAL) && NXP_PWM_LOW_TRIAL
+int nxp_state_low_trial(nxp_state *s, const volatile uint8_t record[NXP_LOW_RECORD_BYTES]) {
+    if (!nxp_state_valid(s) || !record || s->low_profile || s->image_role != NXP_ROLE_SPI_TRIAL ||
+        s->capabilities != NXP_CAP_RECOVERY_READY || s->trial_confirmed || s->boot_requested ||
+        s->effect || s->rgb_brightness || s->white_brightness) return 0;
+    s->low_profile = 1; s->low_snapshot = record;
+    return 1;
+}
+#else
 int nxp_state_off_trial(nxp_state *s, const volatile uint8_t record[NXP_OFF_RECORD_BYTES]) {
     if (!nxp_state_valid(s) || !record || s->off_profile || s->image_role != NXP_ROLE_SPI_TRIAL ||
         s->capabilities != NXP_CAP_RECOVERY_READY || s->trial_confirmed || s->boot_requested ||
@@ -76,6 +91,7 @@ int nxp_state_off_trial(nxp_state *s, const volatile uint8_t record[NXP_OFF_RECO
     s->off_profile = 1; s->off_snapshot = record;
     return 1;
 }
+#endif
 
 static int owner_exempt(uint8_t cls, uint8_t op) {
     return cls == 0 && (op == 0x87 || op == 0x84 || op == 0xc9 || op == 0x49 || op == 0xfe || op == 0xfc);
@@ -120,6 +136,30 @@ static uint8_t dispatch(nxp_state *s, const uint8_t tag[6], const uint8_t *q, ui
             if (!(s->capabilities & NXP_CAP_RECOVERY_READY)) return STATUS_UNSUPPORTED;
             s->boot_requested = 1; r[5] = 1; b[0] = 1; return STATUS_OK;
         }
+#if defined(NXP_PWM_LOW_TRIAL) && NXP_PWM_LOW_TRIAL
+        if (op == 0x71 || op == 0xf0 || op == 0xf1) {
+            unsigned i;
+            if (!s->low_profile) return STATUS_UNSUPPORTED;
+            if (op == 0x71) {
+                if (n != 4 || !equal(a, (const uint8_t *)"LOW1", 4)) return STATUS_PARAMETER;
+                if (!s->claimed || !equal(s->owner, tag, 6)) return STATUS_OWNER;
+                if (s->low_requested || s->boot_requested || (uint32_t)(now_ms - s->trial_started_ms) >= 22000u)
+                    return STATUS_PARAMETER;
+                s->low_requested = 1; copy(s->low_owner, tag, 6);
+                copy(b, a, 4); r[5] = 4; return STATUS_OK;
+            }
+            if ((op == 0xf0 && n) || (op == 0xf1 && (n != 1 || a[0] >= NXP_LOW_RECORD_PAGES))) return STATUS_PARAMETER;
+            copy(b, (const uint8_t *)"LOW1", 4);
+            if (op == 0xf0) {
+                b[4] = s->low_requested; b[5] = 5; b[6] = 0; b[7] = 100; r[5] = 8;
+            } else {
+                b[4] = a[0]; b[5] = NXP_LOW_RECORD_PAGES; b[6] = 64;
+                for (i = 0; i < 64; ++i) b[8 + i] = s->low_snapshot[(unsigned)a[0] * 64u + i];
+                r[5] = 72;
+            }
+            return STATUS_OK;
+        }
+#else
         if (op == 0x70 || op == 0xf0 || op == 0xf1) {
             unsigned i;
             if (!s->off_profile) return STATUS_UNSUPPORTED;
@@ -142,6 +182,7 @@ static uint8_t dispatch(nxp_state *s, const uint8_t tag[6], const uint8_t *q, ui
             }
             return STATUS_OK;
         }
+#endif
         if (op == 0xc9 && !n) {
             b[0] = s->claimed; copy(b + 1, s->owner, 6);
             r[5] = 7;
@@ -160,7 +201,11 @@ static uint8_t dispatch(nxp_state *s, const uint8_t tag[6], const uint8_t *q, ui
         }
         return STATUS_UNSUPPORTED;
     }
+#if defined(NXP_PWM_LOW_TRIAL) && NXP_PWM_LOW_TRIAL
+    if (s->low_profile && (cls == 3 || cls == 15) && !(op & 0x80)) return STATUS_UNSUPPORTED;
+#else
     if (s->off_profile && (cls == 3 || cls == 15) && !(op & 0x80)) return STATUS_UNSUPPORTED;
+#endif
     if (cls == 15) {
         if (op == 0x82) {
             if (n != 2 || !zeros(a, 2)) return STATUS_PARAMETER;
@@ -264,7 +309,11 @@ void nxp_render(const nxp_state *s, int qualified, nxp_pwm_frame *out) {
     if (!out) return;
     out->red_match = out->green_match = out->blue_match = 25500;
     out->cool_match = out->warm_match = 255;
+#if defined(NXP_PWM_LOW_TRIAL) && NXP_PWM_LOW_TRIAL
+    if (!qualified || !nxp_state_valid(s) || s->low_profile) return;
+#else
     if (!qualified || !nxp_state_valid(s) || s->off_profile) return;
+#endif
     if (s->effect) {
         const uint8_t *rgb = s->effect == 8 ? s->custom_rgb : s->rgb;
         out->red_match = (uint16_t)(25500u - divide((uint32_t)rgb[0] * s->rgb_brightness * 100u, 255));
@@ -291,7 +340,11 @@ void nxp_link_cancel(nxp_link *link) {
     link->phase = NXP_LINK_REQUEST; link->recovery_ready = 0; link->response_size = 0;
     if (link->state) {
         link->state->boot_requested = 0;
+#if defined(NXP_PWM_LOW_TRIAL) && NXP_PWM_LOW_TRIAL
+        if (link->state->low_requested == 1) link->state->low_requested = 3;
+#else
         if (link->state->off_requested == 1) link->state->off_requested = 3;
+#endif
     }
 }
 int nxp_link_ready(const nxp_link *link) { return link && link->phase != NXP_LINK_REQUEST; }
@@ -323,9 +376,15 @@ nxp_result nxp_link_transaction(nxp_link *link, const uint8_t *tx, size_t size,
     else {
         copy(rx, link->response, NXP_SPI_SIZE); link->phase = NXP_LINK_REQUEST;
         link->recovery_ready = link->state ? link->state->boot_requested : 0;
+#if defined(NXP_PWM_LOW_TRIAL) && NXP_PWM_LOW_TRIAL
+        if (link->state && link->state->low_requested == 1 && link->response[7] == STATUS_OK &&
+            link->response[12] == 4 && link->response[13] == 0 && link->response[14] == 0x71 &&
+            equal(link->response + 15, (const uint8_t *)"LOW1", 4)) link->state->low_requested = 2;
+#else
         if (link->state && link->state->off_requested == 1 && link->response[7] == STATUS_OK &&
             link->response[12] == 4 && link->response[13] == 0 && link->response[14] == 0x70 &&
             equal(link->response + 15, (const uint8_t *)"OFF1", 4)) link->state->off_requested = 2;
+#endif
     }
     return NXP_OK;
 }

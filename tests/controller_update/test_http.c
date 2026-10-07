@@ -9,7 +9,7 @@ static unsigned checks;
 
 static struct {
     const char *type, *digest, *mode;
-    uint8_t role;
+    uint8_t role, profile;
     bool pending, allocation_fail, get_timeout_fail, sha_start_fail, sha_finish_fail, wrong_digest;
     int begin_status, submit_status, response_result, socket;
     unsigned begins, cancels, submits, reads, sets, restores, allocations, frees, sha_frees;
@@ -36,6 +36,10 @@ uint64_t app_now_ms(void) { return mock.now; }
 bool app_trial_pending(void) { return mock.pending; }
 int app_controller_update_begin(uint32_t *id) { ++mock.begins; *id = 73; return mock.begin_status; }
 int app_controller_update_begin_role(uint32_t *id, uint8_t role) { mock.role = role; return app_controller_update_begin(id); }
+int app_controller_update_begin_mode(uint32_t *id, uint8_t profile) {
+    mock.profile=profile;mock.role=profile?OKL_ROLE_SPI_DIAGNOSTIC:OKL_ROLE_LIGHTING;
+    return app_controller_update_begin(id);
+}
 int app_controller_update_submit(uint32_t id, uint8_t *package, size_t size) {
     ++mock.submits;
     CHECK(id == 73 && size == OKL_LOADER_PACKAGE_BYTES && mock.restores == 1);
@@ -125,8 +129,13 @@ int main(void) {
     unsigned chunks = mock.reads, sets = mock.sets;
     reset(); mock.mode = "diagnostic-off";
     CHECK(http_controller_update(&request) == ESP_OK && mock.status == 202 && mock.role == OKL_ROLE_SPI_DIAGNOSTIC);
+    CHECK(mock.profile==APP_CONTROLLER_PROFILE_OFF);
+    reset();mock.mode="diagnostic-low";
+    CHECK(http_controller_update(&request)==ESP_OK && mock.status==202 && mock.profile==APP_CONTROLLER_PROFILE_LOW);
+    CHECK(mock.role==OKL_ROLE_SPI_DIAGNOSTIC);
     const char *bad_modes[] = {"diagnostic", "production", "DIAGNOSTIC-OFF", "diagnostic-off ",
-        "diagnostic-off,diagnostic-off", "diagnostic-off01234567890123456789"};
+        "diagnostic-off,diagnostic-off", "diagnostic-off01234567890123456789", "DIAGNOSTIC-LOW",
+        "diagnostic-low ","diagnostic-low,diagnostic-off"};
     for (unsigned i = 0; i < sizeof(bad_modes) / sizeof(*bad_modes); ++i) {
         reset(); mock.mode = bad_modes[i]; reject(400); CHECK(!mock.begins && !mock.reads);
     }

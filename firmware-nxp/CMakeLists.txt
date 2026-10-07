@@ -38,3 +38,16 @@ add_test(NAME nxp_protocol COMMAND test_nxp_protocol)
 add_test(NAME nxp_board COMMAND test_nxp_board)
 add_test(NAME nxp_pwm COMMAND test_nxp_pwm)
 add_test(NAME nxp_pwm_off COMMAND test_nxp_pwm_off)
+
+# Keep LOW1 separate from the OFF1/default state layout and binary profile.
+add_executable(test_nxp_pwm_low tests/test_pwm_low.c src/nxp_app.c
+  src/nxp_board.c src/nxp_pwm_low_trial.c)
+target_compile_definitions(test_nxp_pwm_low PRIVATE NXP_PWM_LOW_TRIAL=1)
+target_include_directories(test_nxp_pwm_low PRIVATE include ../firmware/main
+  ../firmware/components/keylight_nxp/include)
+set_property(TARGET test_nxp_pwm_low PROPERTY C_STANDARD 99)
+set_property(TARGET test_nxp_pwm_low PROPERTY C_STANDARD_REQUIRED ON)
+if(NOT MSVC)
+  target_compile_options(test_nxp_pwm_low PRIVATE -Wall -Wextra -Werror -Wpedantic)
+endif()
+add_test(NAME nxp_pwm_low COMMAND test_nxp_pwm_low)

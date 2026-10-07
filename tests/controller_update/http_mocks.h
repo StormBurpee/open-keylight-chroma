@@ -19,6 +19,7 @@ uint64_t app_now_ms(void);
 bool app_trial_pending(void);
 int app_controller_update_begin(uint32_t *);
 int app_controller_update_begin_role(uint32_t *, uint8_t);
+int app_controller_update_begin_mode(uint32_t *, uint8_t);
 int app_controller_update_submit(uint32_t, uint8_t *, size_t);
 void app_controller_update_cancel_upload(uint32_t);
 int httpd_req_to_sockfd(httpd_req_t *);
