@@ -4,6 +4,21 @@
 #include "okl_loader.h"
 #include "esp_err.h"
 esp_err_t app_nxp_transport_init(okl_nxp *driver, const uint8_t mac[6]);
+typedef enum {
+    APP_NXP_BUS_IDLE, APP_NXP_LENGTH_PENDING, APP_NXP_BODY_PENDING,
+    APP_NXP_ZERO_COMPLETE, APP_NXP_BUS_UNKNOWN, APP_NXP_RESET_PENDING
+} app_nxp_transport_phase;
+typedef struct {
+    app_nxp_transport_phase phase;
+    unsigned ready, has_report;
+    okl_loader_delivery last_delivery;
+    uint8_t routing_tag[6], reply_kind, report[90];
+} app_nxp_transport_diagnostic;
+/* Copies the last fully consumed 97-byte response and current phase/READY.
+ * Raw bytes are evidence, not a validated reply. The next request attempt
+ * clears them. Takes the bus mutex but performs no SPI or recovery operation. */
+okl_result app_nxp_transport_snapshot(okl_nxp *driver, app_nxp_transport_diagnostic *out,
+    uint64_t deadline_us);
 /* Only the SPI worker may hold this logical updater lease. Ordinary worker
  * dispatch/health must remain suspended; individual calls still take the bus
  * mutex. The lease does not clear any pre-existing ambiguous wire state. */

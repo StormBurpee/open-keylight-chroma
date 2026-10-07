@@ -283,7 +283,8 @@ static void known_loader(void) {
     uint8_t request[90], response[90], args[80] = {0}; okl_loader_delivery delivery;
     loader_report(request, 0x80, args, sizeof(args));
     step(97, 2, 0); length_step(97, 0);
-    spi_step *body = step(97, 0, 1); memcpy(body->response, identity, 6);
+    /* Actual resident envelope: zero routing tag, kind0, then the report. */
+    spi_step *body = step(97, 0, 1);
     const uint8_t info[] = {3,0x18,1,2,0,0,0,2,0x5d}; memcpy(args, info, sizeof(info));
     loader_report(body->response + 7, 0x80, args, sizeof(args)); body->response[7] = 2;
     CHECK(app_nxp_loader_exchange(&driver, 17, request, response, &delivery, time_us + 10000) == OKL_OK);
@@ -308,6 +309,43 @@ static void test_loader_lease_and_qualification(void) {
     loader_report(request, 2, NULL, 0);
     CHECK(app_nxp_loader_send_only(&driver, 17, request, &delivery, time_us + 10000) == OKL_INVALID);
     CHECK(starts == 3); consumed();
+}
+static void test_loader_envelopes_do_not_relax_application_identity(void) {
+    for (unsigned kind = 0; kind < 256; ++kind) {
+        for (unsigned tag = 0; tag < 3; ++tag) {
+            reset(); CHECK(app_nxp_loader_acquire(&driver, 17, 10000) == OKL_OK);
+            uint8_t request[90], response[90], args[80] = {0}; okl_loader_delivery delivery;
+            loader_report(request, 0x80, args, sizeof(args));
+            step(97, 2, 0); length_step(97, 1); spi_step *body = step(97, 0, 1);
+            if (tag) memcpy(body->response, identity, 6);
+            if (tag == 2) body->response[0] ^= 1;
+            body->response[6] = (uint8_t)kind;
+            const uint8_t info[] = {3,0x18,1,2,0,0,0,2,0x5d}; memcpy(args, info, sizeof(info));
+            loader_report(body->response + 7, 0x80, args, sizeof(args)); body->response[7] = 2;
+            unsigned accepted = (kind == 0 && tag != 2) || (kind == 4 && tag == 0);
+            CHECK(app_nxp_loader_exchange(&driver, 17, request, response, &delivery, 10000) ==
+                (accepted ? OKL_OK : OKL_PROTOCOL));
+            CHECK(bus.loader_known == accepted && driver.needs_recovery == !accepted);
+            CHECK(bus.phase == BUS_IDLE && delivery == OKL_LOADER_SENT_COMPLETE);
+            if (accepted) CHECK(okl_loader_information_valid(response));
+            consumed();
+        }
+    }
+    for (unsigned bad = 0; bad < 3; ++bad) {
+        reset(); valid_getter();
+        if (!bad) memset(script[2].response, 0, 6);
+        else if (bad == 1) script[2].response[0] ^= 1;
+        else script[2].response[6] = 4;
+        CHECK(execute(10000) != OKL_OK && driver.needs_recovery);
+        consumed();
+    }
+    /* Original application entry ACKs retain their exact owner-tag contract. */
+    reset(); CHECK(app_nxp_loader_acquire(&driver, 17, 10000) == OKL_OK);
+    step(97, 3, 0); length_step(97, 1); spi_step *body = step(97, 0, 1);
+    uint8_t yes = 1; CHECK(okl_report_encode(body->response + 7, 0, 0, 4, &yes, 1) == OKL_OK);
+    body->response[7] = 2; okl_loader_delivery delivery;
+    CHECK(app_nxp_loader_enter(&driver, 17, OKL_LOADER_FROM_ORIGINAL, &delivery, 10000) == OKL_PROTOCOL);
+    CHECK(bus.phase == BUS_IDLE && !bus.reset_opcode && driver.needs_recovery); consumed();
 }
 static void test_expected_reset_is_one_shot(void) {
     for (uint8_t opcode = 4; opcode <= 5; ++opcode) {
@@ -451,6 +489,49 @@ static void test_resident_proof_is_scoped_and_consumed(void) {
     CHECK(app_nxp_loader_use_resident(&driver, 18, 17, time_us + 10000) != OKL_OK);
     CHECK(!bus.resident_proof_job_id && starts == 3);
 }
+static void test_diagnostic_snapshot_never_clocks_or_clears(void) {
+    app_nxp_transport_diagnostic snapshot;
+    reset(); memset(&snapshot, 0xa5, sizeof(snapshot));
+    CHECK(app_nxp_transport_snapshot(&driver, &snapshot, 10000) == OKL_OK);
+    CHECK(snapshot.phase == APP_NXP_BUS_IDLE && snapshot.ready && !snapshot.has_report && !starts);
+    for (unsigned i = 0; i < sizeof(snapshot.report); ++i) CHECK(!snapshot.report[i]);
+    CHECK(app_nxp_transport_snapshot(NULL, &snapshot, 10000) == OKL_INVALID);
+    CHECK(app_nxp_transport_snapshot(&driver, NULL, 10000) == OKL_INVALID);
+    CHECK(app_nxp_transport_snapshot(&driver, &snapshot, 0) == OKL_TIMEOUT && !starts);
+
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        reset(); valid_getter();
+        if (failure == 0) script[2].response[0] ^= 1; /* Bad envelope remains inspectable. */
+        if (failure == 1) script[2].response[95] ^= 1; /* Bad report checksum. */
+        if (failure == 2) script[2].duration = 20000; /* Complete body, elapsed deadline. */
+        if (failure == 3) script[2].end_result = ESP_ERR_INVALID_STATE; /* Uncertain DMA is not evidence. */
+        CHECK(execute(10000) != OKL_OK && driver.needs_recovery);
+        unsigned before = starts, phase = bus.phase;
+        CHECK(app_nxp_transport_snapshot(&driver, &snapshot, time_us + 10000) == OKL_OK);
+        CHECK(starts == before && bus.phase == phase && driver.needs_recovery);
+        CHECK(snapshot.phase == (app_nxp_transport_phase)phase && snapshot.ready);
+        CHECK(snapshot.has_report == (failure != 3));
+        CHECK(snapshot.last_delivery == (failure == 3 ? OKL_LOADER_MAYBE_SENT : OKL_LOADER_SENT_COMPLETE));
+        if (snapshot.has_report) {
+            CHECK(!memcmp(snapshot.report, script[2].response + 7, 90));
+            CHECK(!memcmp(snapshot.routing_tag, script[2].response, 6) && snapshot.reply_kind == script[2].response[6]);
+        } else for (unsigned i = 0; i < sizeof(snapshot.report); ++i) CHECK(!snapshot.report[i]);
+        consumed();
+    }
+    reset(); known_loader();
+    CHECK(app_nxp_transport_snapshot(&driver, &snapshot, time_us + 10000) == OKL_OK);
+    CHECK(snapshot.has_report && !snapshot.reply_kind && okl_loader_information_valid(snapshot.report));
+    for (unsigned i = 0; i < 6; ++i) CHECK(!snapshot.routing_tag[i]);
+    unsigned before = starts; deny_mutex = 1;
+    CHECK(app_nxp_transport_snapshot(&driver, &snapshot, time_us + 1000) == OKL_TIMEOUT && starts == before);
+    deny_mutex = 0; app_nxp_loader_release(&driver, 17);
+    step(97, 1, 0)->start_result = ESP_ERR_TIMEOUT;
+    CHECK(execute(10000) == OKL_TIMEOUT);
+    CHECK(app_nxp_transport_snapshot(&driver, &snapshot, time_us + 10000) == OKL_OK);
+    CHECK(!snapshot.has_report && snapshot.last_delivery == OKL_LOADER_NOT_SENT && driver.needs_recovery);
+    for (unsigned i = 0; i < sizeof(snapshot.report); ++i) CHECK(!snapshot.report[i]);
+    consumed();
+}
 int main(void) {
     test_normal_and_zero(); test_zero_wait_preserves_boundary(); test_zero_length_crosses_deadline();
     test_startup_zero(); test_zero_completion_does_not_clock(); test_retained_stale_body();
@@ -459,8 +540,10 @@ int main(void) {
     test_end_error_keeps_unknown_phase(); test_start_error_has_not_clocked_wire();
     test_idf_rejects_finite_polling_start(); test_deadline_and_mutex();
     test_loader_lease_and_qualification(); test_expected_reset_is_one_shot();
+    test_loader_envelopes_do_not_relax_application_identity();
     test_reset_delivery_failures_stay_distinct(); test_unqualified_reply_cannot_arm_reset();
     test_typed_entry_boundary();
     test_resident_proof_is_scoped_and_consumed();
+    test_diagnostic_snapshot_never_clocks_or_clears();
     printf("native transport: %u checks across %u cases passed\n", checks, cases); return 0;
 }

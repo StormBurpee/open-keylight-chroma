@@ -9,7 +9,9 @@
 #include <string.h>
 
 enum { PIN_READY = 4, PIN_MOSI = 12, PIN_MISO = 13, PIN_CLOCK = 14, PIN_SELECT = 15 };
-enum { BUS_IDLE, LENGTH_PENDING, BODY_PENDING, ZERO_COMPLETE, BUS_UNKNOWN, RESET_PENDING };
+enum { BUS_IDLE = APP_NXP_BUS_IDLE, LENGTH_PENDING = APP_NXP_LENGTH_PENDING,
+    BODY_PENDING = APP_NXP_BODY_PENDING, ZERO_COMPLETE = APP_NXP_ZERO_COMPLETE,
+    BUS_UNKNOWN = APP_NXP_BUS_UNKNOWN, RESET_PENDING = APP_NXP_RESET_PENDING };
 typedef struct {
     spi_device_handle_t spi;
     SemaphoreHandle_t mutex;
@@ -22,6 +24,8 @@ typedef struct {
     uint8_t reset_opcode;
     uint64_t reset_completed_us;
     okl_loader_delivery last_delivery;
+    unsigned has_report;
+    uint8_t last_body[97];
 } nxp_bus;
 static nxp_bus bus;
 
@@ -55,6 +59,10 @@ static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t
     b->resident_proof_job_id = 0;
     b->resident_information_seen = false;
     b->last_delivery = OKL_LOADER_NOT_SENT;
+    if (b->phase == BUS_IDLE) {
+        b->has_report = 0;
+        memset(b->last_body, 0, sizeof(b->last_body));
+    }
     if (b->phase == ZERO_COMPLETE || b->phase == BUS_UNKNOWN || b->phase == RESET_PENDING) return OKL_NEEDS_RECOVERY;
     if (!size || size > OKL_SPI_LIMIT || !ticks_left(deadline)) return OKL_TIMEOUT;
     spi_transaction_t transaction = {.length = size * 8, .tx_buffer = tx, .rx_buffer = rx};
@@ -74,6 +82,10 @@ static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t
         return OKL_IO;
     }
     b->last_delivery = OKL_LOADER_SENT_COMPLETE;
+    if (b->phase == BODY_PENDING && size == sizeof(b->last_body)) {
+        memcpy(b->last_body, rx, sizeof(b->last_body));
+        b->has_report = 1;
+    }
     if (b->phase == BUS_IDLE) b->phase = LENGTH_PENDING;
     else if (b->phase == LENGTH_PENDING) {
         b->pending_length = (size_t)rx[0] * 256 + rx[1];
@@ -114,6 +126,26 @@ static okl_result recover(void *context, uint64_t deadline) {
 
 static int loader_driver(const okl_nxp *driver) {
     return driver && driver->transport.user == &bus && driver->transport.transfer == transfer;
+}
+
+okl_result app_nxp_transport_snapshot(okl_nxp *driver, app_nxp_transport_diagnostic *out,
+                                       uint64_t deadline) {
+    if (!loader_driver(driver) || !out) return OKL_INVALID;
+    if (!ticks_left(deadline)) return OKL_TIMEOUT;
+    okl_result result = lock_bus(&bus, deadline);
+    if (result != OKL_OK) return result;
+    memset(out, 0, sizeof(*out));
+    out->phase = (app_nxp_transport_phase)bus.phase;
+    out->ready = gpio_get_level(PIN_READY) != 0;
+    out->last_delivery = bus.last_delivery;
+    out->has_report = bus.has_report;
+    if (out->has_report) {
+        memcpy(out->routing_tag, bus.last_body, 6);
+        out->reply_kind = bus.last_body[6];
+        memcpy(out->report, bus.last_body + 7, 90);
+    }
+    unlock_bus(&bus);
+    return OKL_OK;
 }
 
 okl_result app_nxp_loader_acquire(okl_nxp *driver, uint32_t lease_id, uint64_t deadline) {
@@ -236,7 +268,12 @@ okl_result app_nxp_loader_exchange(okl_nxp *driver, uint32_t lease_id, const uin
     if (rx[0] || rx[1] != 97) { result = OKL_PROTOCOL; goto finished; }
     result = transfer(&bus, tx, rx, 97, deadline);
     if (result != OKL_OK) goto finished;
-    if ((rx[6] == 0 && memcmp(rx, driver->identity, 6)) ||
+    /* The resident loader returns kind0 with an all-zero routing tag; unlike
+     * application replies, it does not echo the requester's identity. Accept
+     * that exact envelope only on this lease-scoped loader path. The report
+     * still passes the caller's command/correlation validation, and only the
+     * exact Info signature below can qualify a loader for reset operations. */
+    if ((rx[6] == 0 && memcmp(rx, driver->identity, 6) && memcmp(rx, (const uint8_t[6]){0}, 6)) ||
         (rx[6] == 4 && memcmp(rx, (const uint8_t[6]){0}, 6)) || (rx[6] != 0 && rx[6] != 4)) {
         result = OKL_PROTOCOL; goto finished;
     }
@@ -292,6 +329,8 @@ okl_result app_nxp_loader_reset_boundary(okl_nxp *driver, uint32_t lease_id, uin
 }
 
 esp_err_t app_nxp_transport_init(okl_nxp *driver, const uint8_t mac[6]) {
+    bus.has_report = 0;
+    memset(bus.last_body, 0, sizeof(bus.last_body));
     bus.resident_proof_job_id = 0;
     bus.resident_information_seen = false;
     bus.mutex = xSemaphoreCreateMutex();
