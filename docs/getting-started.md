@@ -2,7 +2,7 @@
 
 Open Keylight runs on the light itself. You use a computer for the initial installation; afterward, a browser is enough.
 
-**Installation status:** the first release is still being qualified. Both original applications have run on the reference lights, but the complete public installer path has not yet passed its final live check. Use the [release record](../PROGRESS.md) to distinguish a tested release from a development build.
+**Tested release: 0.2.0.** The packaged Windows installer completed all seven steps on a light restored to the supported stock firmware, including both visual checks, pairing and confirmation. A second light upgraded from an earlier Open Keylight version with its settings and scenes preserved. The restored light retained earlier Open Keylight storage; this was not a factory-fresh fixture. See the [release record](releases/0.2.0.md).
 
 ## Before you begin
 
@@ -16,7 +16,7 @@ If an earlier installation already put Open Keylight on the lighting controller 
 
 ## Install with the guided Windows setup
 
-The release package is designed for **Windows 10/11 x64**. It includes original firmware and the React / Ink installer. The launcher downloads verified portable Node and Python runtimes on first use—about 47 MB—without installing them globally or changing PATH.
+The release package is designed for **Windows 10/11 x64**. It includes Open Keylight firmware and the React / Ink installer. The launcher downloads verified portable Node and Python runtimes on first use—about 47 MB—without installing them globally or changing PATH.
 
 1. Download the Windows installer ZIP from the project's [Releases](https://github.com/StormBurpee/open-keylight-chroma/releases) page. Read that release's supported hardware and qualification record.
 2. Choose **Extract all**. Open **start-open-keylight.cmd** from the extracted folder.

@@ -18,7 +18,7 @@ Set the warmth of your key light. Pick a background colour. Save the scene and c
 
 Open Keylight replaces the applications on **both the ESP32 and the NXP lighting controller**. It keeps the existing power electronics, bootloaders and partition layout. Once installed, the light works without a desktop service, Razer software or an internet connection.
 
-> **Early access.** The first installer release is being qualified. Hardware support currently covers the reviewed Key Light Chroma board and stock firmware profile; broad compatibility and long-term electrical testing remain open. [Installation status and recovery limits →](docs/getting-started.md)
+> **Hardware support.** Release 0.2.0 has passed a complete stock installation and an upgrade on the tested Key Light Chroma board. Check the supported firmware before installing; other board revisions and long-term electrical testing remain open. [Getting started →](docs/getting-started.md)
 
 ![Colour controls served directly by an Open Keylight light](assets/dashboard/light-live.jpg)
 
@@ -36,7 +36,7 @@ Open Keylight replaces the applications on **both the ESP32 and the NXP lighting
 
 ![Saved scenes in the on-device dashboard](assets/dashboard/scenes-live.jpg)
 
-*Dashboard screenshots captured from a light running both original applications.*
+*Dashboard screenshots captured from a light running Open Keylight on both chips.*
 
 ## Get started
 
