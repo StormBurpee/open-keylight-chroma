@@ -148,7 +148,10 @@ class FlowSession:
             if self.firmware != "resident": raise m.RemoteError("not loader")
             if op == 0x80: return m.NXP_INFORMATION + bytes(71)
             if op == 0x83: return payload
-        if cls == 15: return bytes(6) if op == 0x82 else payload
+        if cls == 15:
+            if op == 0x82: return bytes(6)
+            if op == 2 and self.firmware == "stock": return b"\0\x05" + bytes(10)
+            return payload
         if cls == 3: return b"\0\x20\0\0" if op == 0x83 else payload
         if cls == 0:
             if op == 0x87: return bytes([1,3,0,0]) if self.firmware == "stock" else bytes([0,1,0,0])
@@ -433,6 +436,75 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(sum(x[:2] == (0, 0x71) for x in s.commands), 1)
         self.assertEqual(sum(x == ("quiet", 33) for x in s.commands), 3)
         self.assertEqual(sum(event == "diagnostic_registers_verified" for event,_ in s.audit.events), 2)
+
+    def test_captured_stock_rgb_off_ack_and_independent_getter(self):
+        # Exact frame digest from the historical reference capture and the
+        # first Fill attempt: the stock setter normalizes argument 1 to five.
+        captured = reply(15, 2, b"\0\x05" + bytes(10))
+        self.assertEqual(m.digest(captured), "3304812bd700e64ad95c65bfc9bfdfd602c8a8b542bc36ad5b5d67c05ab65186")
+        session, _, _, _ = make_session([captured])
+        self.assertEqual(session.exchange(15, 2, bytes(12), mutation=True), b"\0\x05" + bytes(10))
+        migration, s, _ = flow()
+        with patch.object(m, "inspect_nxp_loader", return_value={"reference_code_matches": True}):
+            migration.open_stock(); migration.enter_stock_loader()
+        setter = next(i for i, command in enumerate(s.commands) if command[:2] == (15, 2))
+        self.assertEqual(s.commands[setter + 1][:2], (3, 3))
+        self.assertEqual(s.commands[setter + 2][:2], (15, 0x82))
+        self.assertEqual(s.commands[setter + 3][:2], (3, 0x83))
+        self.assertEqual(s.commands[setter + 4][:2], (0, 4))
+        self.assertEqual(sum(command[:2] == (15, 2) for command in s.commands), 1)
+
+    def test_stock_rgb_off_restores_cached_white_before_explicit_white_off(self):
+        # Stock RGB->Off restores its white-only cache. Clearing white first
+        # would therefore leave this lamp bright; the old order fails here.
+        for remembered in (1, 38, 255):
+            for effect in (1, 8):
+                migration, s, _ = flow(); migration.open_stock()
+                state = {"effect": effect, "white": 0, "white_only": remembered}
+                observed = []
+                exchange = s.exchange
+                def stateful(cls, op, payload=b"", **kwargs):
+                    result = exchange(cls, op, payload, **kwargs)
+                    if (cls, op) == (15, 2):
+                        if state["effect"] != 0:
+                            state["white"] = state["white_only"]
+                        state["effect"] = 0
+                        observed.append(("rgb_off", state["white"]))
+                    elif (cls, op) == (3, 3):
+                        state["white"] = payload[2]
+                        if state["effect"] == 0: state["white_only"] = payload[2]
+                        observed.append(("white_off", state["white"]))
+                    elif (cls, op) == (3, 0x83):
+                        result = b"\0\x20" + bytes([state["white"], 0])
+                    return result
+                s.exchange = stateful
+                with self.subTest(remembered=remembered, effect=effect), \
+                     patch.object(m, "inspect_nxp_loader", return_value={"reference_code_matches": True}):
+                    migration.enter_stock_loader()
+                self.assertEqual(observed, [("rgb_off", remembered), ("white_off", 0)])
+                self.assertEqual(state, {"effect": 0, "white": 0, "white_only": 0})
+                self.assertTrue(migration.fresh_resident)
+
+    def test_stock_off_invalid_ack_or_dark_readback_never_enters_loader(self):
+        expected = b"\0\x05" + bytes(10)
+        invalid = [bytes(12), bytes(6), expected[:-1], expected + b"\0"]
+        for index in range(12):
+            changed = bytearray(expected); changed[index] ^= 1
+            invalid.append(bytes(changed))
+        cases = [((15, 2), value) for value in invalid]
+        cases += [((15, 0x82), b"\0\x05" + bytes(4)), ((3, 0x83), b"\0\x20\0\x01")]
+        for command, value in cases:
+            migration, s, _ = flow(); migration.open_stock()
+            exchange = s.exchange
+            def altered(cls, op, payload=b"", **kwargs):
+                result = exchange(cls, op, payload, **kwargs)
+                return value if (cls, op) == command else result
+            s.exchange = altered
+            with self.subTest(command=command, value=value.hex()), self.assertRaises(ValueError):
+                migration.enter_stock_loader()
+            self.assertFalse(any(item[:2] == (0, 4) for item in s.commands))
+            self.assertFalse(any(item[0] == 16 for item in s.commands))
+            self.assertEqual(sum(item[:2] == (15, 2) for item in s.commands), 1)
 
     def test_diagnostic_corruption_stops_before_recovery_proof(self):
         for stage in ("OFF1", "LOW1"):

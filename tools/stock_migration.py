@@ -689,9 +689,15 @@ class Migration:
     def enter_stock_loader(self):
         with self._stage({"stock"}, "fresh_stock_loader"):
             self._claim()
+            # Stock 1.3 normalizes the effect's second argument to 5 in its
+            # 12-byte setter ACK. The independent getter below remains the
+            # exact six-zero Off record; this is not the original app's echo.
+            require(self.session.exchange(15, 2, bytes(12), mutation=True) == b"\0\x05" + bytes(10),
+                    "RGB Off ACK differs")
+            # Switching RGB off can restore remembered white-only brightness.
+            # Clear white afterwards, then require both independent getters.
             require(self.session.exchange(3, 3, b"\0\x20\0\0", mutation=True) == b"\0\x20\0\0",
                     "White Off ACK differs")
-            require(self.session.exchange(15, 2, bytes(12), mutation=True) == bytes(12), "RGB Off ACK differs")
             self._dark()
             # A single synchronous stock 00/04 resets, with no ACK. Never
             # repeat a mutation based on a timeout or send an immediate HELLO.
