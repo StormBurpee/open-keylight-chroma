@@ -250,6 +250,11 @@ class RemoteError(MigrationError):
     """A complete, correlated negative reply; framing remains synchronized."""
 
 
+class StockEntryError(MigrationError):
+    """Entry is unresolved before any controller image operation."""
+    code = "stock_loader_entry_unconfirmed"
+
+
 class Audit:
     """Exclusive, append-only JSONL journal; flush intent before any mutation.
 
@@ -841,15 +846,38 @@ class Migration:
             require(self.session.exchange(3, 3, b"\0\x20\0\0", mutation=True) == b"\0\x20\0\0",
                     "White Off ACK differs")
             self._dark()
-            # A single synchronous stock 00/04 resets, with no ACK. Never
-            # repeat a mutation based on a timeout or send an immediate HELLO.
+            # Follow the stock updater's fixed two-frame entry recipe. The
+            # app resets immediately on 00/04=1 without replying; class 00 is
+            # a no-op in the resident loader. This is a planned sequence,
+            # never a retry selected from a missing reply. Keep one socket.
+            step = "entry sequence"
             try:
-                self.session.send(report_request(0, 4, b"\x01\0"), "stock_entry_once",
-                                  self.session.clock() + 5, mutation=True)
-            finally:
-                self.session.quiet(3)
-            self._information()
-            self._capture_resident()
+                self.session.audit.record("stock_entry_sequence", frames=2, gap_ms=100,
+                                          adaptive_retry=False, image_operations=0)
+                for index in (1, 2):
+                    step = f"fixed entry frame {index}"
+                    try:
+                        self.session.send(report_request(0, 4, b"\x01\0"), f"stock_entry_fixed_{index}",
+                                          self.session.clock() + 5, mutation=True)
+                    finally:
+                        self.session.quiet(.1)
+                # TCP dispatch is synchronous. An ESP-local getter queued
+                # after both frames proves those bridge calls have returned,
+                # without another controller command or reconnect. It does
+                # not prove loader entry; the exact Info/fingerprint do that.
+                step = "ESP queue barrier"
+                require(self.session.network_get(0x84) == self.session.target.esp_version,
+                        "Stock ESP version changed across entry")
+                self.session.audit.record("stock_entry_queue_barrier", esp_version=self.session.target.esp_version.hex())
+                step = "resident information"
+                self._information()
+                step = "resident fingerprint"
+                self._capture_resident()
+            except (ValueError, OSError, MigrationError) as error:
+                raise StockEntryError(
+                    f"Stock loader entry was not confirmed at {step}. No controller image was erased, "
+                    f"programmed or committed. Preserve the audit; no automatic retry. {type(error).__name__}: {error}"
+                ) from error
             self.fresh_resident, self.phase = True, "resident"
 
     def _capture_resident(self):
@@ -1465,6 +1493,7 @@ def run_cli(argv=None, *, input_fn=input, output_fn=console_output, session_fact
             pending = migration is not None and migration.phase == "esp_trial_pending"
             try:
                 events.emit("stopped", message=str(error), error_type=type(error).__name__,
+                            code=getattr(error, "code", "installer_stopped"),
                             automatic_retry=False, automatic_restore=False, native_trial_may_be_pending=pending,
                             recovery_hint=("The ESP trial may still be pending; an unconfirmed running application uses its timed fallback."
                                            if pending else "Preserve the audit; no automatic retry or restore."))

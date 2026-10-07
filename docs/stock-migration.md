@@ -112,7 +112,7 @@ The audit path must be new. The installer records durable intent before sending 
 The stages are:
 
 1. Match the selected stock name, ESP version and controller version. Claim the connection and verify native Off settings.
-2. Enter the resident controller loader once, inspect its exact information and code fingerprint, and install the reviewed SPI-only identity trial. Read its actual ROM-IAP part ID through FE and its typed FC status. No PWM diagnostic or production image is admitted before `0x0000bc40` is observed.
+2. Enter the resident controller loader using the stock updater's fixed two-frame sequence, inspect its exact information and code fingerprint, and install the reviewed SPI-only identity trial. Read its actual ROM-IAP part ID through FE and its typed FC status. No PWM diagnostic or production image is admitted before `0x0000bc40` is observed.
 3. Wait for that trial's reviewed 30-second recovery path. Install OFF1, trigger its single bounded all-low experiment, verify the fixed register record and wait for resident recovery. Only then ask whether the light stayed dark.
 4. Install LOW1, trigger its five fixed low pulses, leave the bus silent during the sequence, verify the fixed record and wait for resident recovery. Only then ask about the observed red, green, blue, warm-white and cool-white pulses. A rejected, cancelled or unanswered prompt stops the installer.
 5. Install the lighting package, require fresh original identity and Off readback, issue one controller confirmation and verify it with another FC read. Diagnostics never receive FD.
@@ -120,6 +120,12 @@ The stages are:
 7. Observe the exact native device ID, ELF digest, version, original-controller readiness and every served dashboard asset. Open the printed URL and pair the browser while its initial pairing window is open. If that window is closed, hold the physical button for three seconds to reopen it. Check controls at low brightness, return to Off, and explicitly confirm the trial in the dashboard. The CLI only observes public status. It neither obtains a bearer token nor confirms for the user.
 
 The original ESP has an application-level trial lasting 180 seconds **from application startup**, not from the printed browser prompt. Boot and asset verification consume some of that window. Its fallback requires the new application to boot and run its recovery logic; this is not a guarantee that the old hardware bootloader recovers an image that cannot start. Do not leave the acceptance stage unattended.
+
+### Stock recovery entry
+
+On the existing TCP connection, the installer sends `00/04 = 01 00`, waits 100 ms, sends the same frame, then waits another 100 ms. This is the fixed sequence recovered from the stock updater, not a retry selected after a timeout. The stock application resets on the first processed frame; class 00 is a no-op in the resident loader. An ESP-local version getter then establishes that the synchronous bridge queue has drained. Only exact loader information and the complete resident code fingerprint admit the first image operation.
+
+The earlier single-frame entry timed out at its first loader-information request on the restored reference light. Replaying the captured loader instructions shows that two residual SPI bytes can produce a zero-length response to that request, and that the stock two-frame sequence consumes this condition before the information request. The physical reset timing was not measured, so this remains a supported explanation, not a proven diagnosis of the live timeout. Any unresolved entry still stops before image erase, program or commit and records its failing phase.
 
 ### Why a raw ESP partition capture is optional
 
