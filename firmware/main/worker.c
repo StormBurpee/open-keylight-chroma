@@ -7,6 +7,14 @@
 
 static okl_nxp nxp;
 static uint8_t native_effect;
+enum { CONTROLLER_UNKNOWN, CONTROLLER_LEGACY, CONTROLLER_ORIGINAL };
+static struct {
+    unsigned backend;
+    bool confirmation_uncertain;
+    okl_controller_status status;
+} lifecycle;
+#define CONTROLLER_PART_ID UINT32_C(0x0000bc40)
+#define HEALTH_INTERVAL_MS UINT64_C(1000)
 
 static okl_result execute(void *unused, const okl_request *request) {
     (void)unused;
@@ -39,6 +47,8 @@ static void fault(okl_result result, bool fresh_mismatch) {
     } else {
         snprintf(app.error, sizeof(app.error), "Controller exchange failed (%u); command was not replayed", (unsigned)result);
         app.controller_connected = false; app.reported_valid = false; app.reported_fields = 0;
+        app.controller_ready = false;
+        snprintf(app.controller_status, sizeof(app.controller_status), "fault");
     }
     app_event_locked("controller", "command.failed", app.error);
     app_unlock();
@@ -86,33 +96,175 @@ static okl_result release_if_synchronized(okl_result result) {
     return result == OKL_OK ? released : result;
 }
 
-static void worker_task(void *unused) {
-    (void)unused;
-    okl_request request; okl_reply reply; okl_firmware_version version;
-    /* The migration connection may leave its previous owner installed. */
-    okl_result result = okl_nxp_claim(&nxp, (const uint8_t *)"Open Keylight", 13,
-        nxp.transport.now_us(NULL) + 600000);
-    okl_request_get(&request, OKL_GET_FIRMWARE);
-    if (result == OKL_OK) result = okl_nxp_execute(&nxp, &request, &reply, okl_nxp_default_deadline(&nxp));
+static okl_result getter(okl_command command, okl_reply *reply) {
+    okl_request request;
+    okl_result result = okl_request_get(&request, command);
+    return result == OKL_OK ? okl_nxp_execute(&nxp, &request, reply, okl_nxp_default_deadline(&nxp)) : result;
+}
+
+static bool legacy_version(const okl_firmware_version *version) {
+    const uint8_t supported[4] = {1, 3, 0, 0};
+    return !memcmp(version->component, supported, sizeof(supported));
+}
+
+static bool unsupported_status(okl_result result, const okl_reply *reply) {
+    return result == OKL_REMOTE && reply->received && reply->report.status == 5 &&
+        reply->report.command_class == 0 && reply->report.opcode == 0xfc && reply->report.size == 0;
+}
+
+static bool lighting_status(const okl_controller_status *status) {
+    return status->role == OKL_ROLE_LIGHTING && !status->boot_requested &&
+        status->part_id == CONTROLLER_PART_ID &&
+        status->capabilities == (OKL_CAP_RECOVERY_READY | OKL_CAP_LIGHTING_READY);
+}
+
+static okl_result controller_status(okl_controller_status *status) {
+    okl_reply reply;
+    okl_result result = getter(OKL_GET_CONTROLLER_STATUS, &reply);
+    return result == OKL_OK ? okl_reply_decode_controller_status(status, &reply) : result;
+}
+
+static void lifecycle_observed(const char *status, bool connected) {
+    app_lock();
+    snprintf(app.controller_backend, sizeof(app.controller_backend), "%s",
+        lifecycle.backend == CONTROLLER_LEGACY ? "legacy" : lifecycle.backend == CONTROLLER_ORIGINAL ? "original" : "unknown");
+    snprintf(app.controller_status, sizeof(app.controller_status), "%s", status);
+    app.controller_connected = connected;
+    app.controller_ready = false;
+    app.controller_part_id = lifecycle.backend == CONTROLLER_ORIGINAL ? lifecycle.status.part_id : 0;
+    app.controller_trial_confirmed = lifecycle.backend == CONTROLLER_ORIGINAL && lifecycle.status.trial_confirmed;
+    if (connected) app.controller_last_health_ms = app_now_ms();
+    if (!strcmp(status, "diagnostic") || !strcmp(status, "unsupported")) {
+        app.reported_valid = false; app.reported_fields = 0;
+        snprintf(app.operation, sizeof(app.operation), "error");
+        snprintf(app.error, sizeof(app.error), "%s", !strcmp(status, "diagnostic") ?
+            "SPI diagnostic image; automatic confirmation and lighting are disabled" :
+            "Unsupported controller identity or readiness; lighting is disabled");
+    }
+    app_unlock();
+}
+
+static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision) {
+    okl_reply reply; okl_firmware_version version;
+    okl_controller_status status = {0}; uint32_t part;
     bool mismatch = false;
-    kl_frame current = {0};
-    if (result == OKL_OK) result = okl_reply_decode_firmware(&version, &reply);
-    if (result == OKL_OK) {
-        app_lock(); snprintf(app.controller_version, sizeof(app.controller_version), "%u.%u.%u.%u",
-            version.component[0], version.component[1], version.component[2], version.component[3]); app_unlock();
-        result = read_and_publish(true, NULL, 0, &mismatch, &current);
+    lifecycle_observed("starting", false);
+    app_lock(); app.reported_valid = false; app.reported_fields = 0; app_unlock();
+    if (nxp.needs_recovery) {
+        okl_result recovered = okl_nxp_recover(&nxp, nxp.transport.now_us(NULL) + 250000);
+        if (recovered != OKL_OK) return recovered;
+    }
+    okl_result result = getter(OKL_GET_FIRMWARE, &reply);
+    if (result != OKL_OK || (result = okl_reply_decode_firmware(&version, &reply)) != OKL_OK) return result;
+    app_lock(); snprintf(app.controller_version, sizeof(app.controller_version), "%u.%u.%u.%u",
+        version.component[0], version.component[1], version.component[2], version.component[3]); app_unlock();
+    result = getter(OKL_GET_CONTROLLER_STATUS, &reply);
+    if (unsupported_status(result, &reply) && legacy_version(&version)) {
+        lifecycle.backend = CONTROLLER_LEGACY;
+    } else {
+        lifecycle.backend = CONTROLLER_UNKNOWN;
+        if (result != OKL_OK) {
+            if (unsupported_status(result, &reply)) { lifecycle_observed("unsupported", true); return OKL_VERIFY; }
+            return result;
+        }
+        result = okl_reply_decode_controller_status(&status, &reply);
+        if (result != OKL_OK) { lifecycle_observed("unsupported", true); return result; }
+        lifecycle.backend = CONTROLLER_ORIGINAL; lifecycle.status = status;
+        if (!lighting_status(&status)) {
+            lifecycle_observed(status.role == OKL_ROLE_SPI_DIAGNOSTIC ? "diagnostic" : "unsupported", true);
+            return OKL_VERIFY;
+        }
+        result = getter(OKL_GET_PART_ID, &reply);
+        if (result == OKL_OK) result = okl_reply_decode_part_id(&part, &reply);
+        if (result != OKL_OK) return result;
+        if (part != status.part_id) { lifecycle_observed("unsupported", true); return OKL_VERIFY; }
+    }
+    lifecycle_observed("starting", true);
+    result = okl_nxp_claim(&nxp, (const uint8_t *)"Open Keylight", 13, nxp.transport.now_us(NULL) + 600000);
+    if (result == OKL_OK) result = read_and_publish(true, NULL, 0, &mismatch, current);
+    if (result == OKL_OK && lifecycle.backend == CONTROLLER_ORIGINAL) {
+        result = controller_status(&status);
+        if (result == OKL_OK && !lighting_status(&status)) result = OKL_VERIFY;
+        if (result == OKL_OK && !status.trial_confirmed) {
+            /* A fresh unconfirmed image must still be dark. Never replay an
+             * old desired scene to qualify it, or repeat an uncertain FD. */
+            if (lifecycle.confirmation_uncertain || native_effect != 0 || current->white || status.uptime_ms >= 30000u)
+                result = OKL_VERIFY;
+            else {
+                okl_request request; okl_request_confirm_controller(&request);
+                lifecycle.confirmation_uncertain = true;
+                result = okl_nxp_execute(&nxp, &request, &reply, okl_nxp_default_deadline(&nxp));
+                if (result == OKL_OK) result = okl_reply_check_controller_confirmation(&reply);
+                if (result == OKL_OK) result = controller_status(&status);
+                if (result == OKL_OK && (!lighting_status(&status) || !status.trial_confirmed)) result = OKL_VERIFY;
+            }
+        }
+        if (result == OKL_OK) { lifecycle.confirmation_uncertain = false; lifecycle.status = status; }
     }
     result = release_if_synchronized(result);
-    if (result != OKL_OK) fault(result, false);
-    else {
-        app_lock(); if (app.output_revision == 0) snprintf(app.operation, sizeof(app.operation), "idle"); app_unlock();
-        app_mqtt_publish();
+    if (result != OKL_OK) return result;
+    app_lock();
+    /* Discard every pre-readiness output revision before opening the gate.
+     * A later user mutation is observed normally; a reset cannot replay one. */
+    *seen_revision = app.output_revision;
+    app.controller_ready = app.controller_connected = true;
+    snprintf(app.controller_status, sizeof(app.controller_status), "ready");
+    app.controller_trial_confirmed = lifecycle.backend == CONTROLLER_ORIGINAL && lifecycle.status.trial_confirmed;
+    app.controller_last_health_ms = app_now_ms();
+    if (app.output_revision == 0) { snprintf(app.operation, sizeof(app.operation), "idle"); app.error[0] = 0; }
+    app_event_locked("controller", "controller.ready", lifecycle.backend == CONTROLLER_LEGACY ?
+        "Legacy 1.3 controller; no original trial confirmation" : "Original controller identity and trial verified");
+    app_unlock(); app_mqtt_publish();
+    return OKL_OK;
+}
+
+static okl_result health(void) {
+    okl_reply reply; okl_firmware_version version; okl_controller_status status;
+    okl_result result;
+    if (lifecycle.backend == CONTROLLER_LEGACY) {
+        result = getter(OKL_GET_FIRMWARE, &reply);
+        if (result == OKL_OK) result = okl_reply_decode_firmware(&version, &reply);
+        if (result != OKL_OK) return result;
+        if (!legacy_version(&version)) return OKL_VERIFY;
+        result = getter(OKL_GET_CONTROLLER_STATUS, &reply);
+        if (!unsupported_status(result, &reply)) return result == OKL_OK ? OKL_VERIFY : result;
+    } else {
+        result = controller_status(&status);
+        if (result != OKL_OK) return result;
+        if (!lighting_status(&status) || !status.trial_confirmed ||
+            (uint32_t)(status.uptime_ms - lifecycle.status.uptime_ms) >= UINT32_C(0x80000000)) return OKL_VERIFY;
+        lifecycle.status = status;
     }
-    /* A queued command cannot replace the physical starting frame read above. */
-    kl_transition transition = {0};
+    app_lock(); app.controller_last_health_ms = app_now_ms(); app_unlock();
+    return OKL_OK;
+}
+
+static void worker_task(void *unused) {
+    (void)unused;
+    bool mismatch = false;
+    kl_frame current = {0};
     uint32_t seen_revision = 0;
+    okl_result result = bootstrap(&current, &seen_revision);
+    if (result != OKL_OK) {
+        app_lock(); bool classified = !strcmp(app.controller_status, "diagnostic") || !strcmp(app.controller_status, "unsupported"); app_unlock();
+        if (!classified) fault(result, false);
+    }
+    uint64_t next_health = app_now_ms() + HEALTH_INTERVAL_MS;
+    kl_transition transition = {0};
     bool rendering = false;
     for (;;) {
+        app_lock(); bool ready = app.controller_ready; app_unlock();
+        if (app_now_ms() >= next_health) {
+            result = ready ? health() : bootstrap(&current, &seen_revision);
+            next_health = app_now_ms() + HEALTH_INTERVAL_MS;
+            if (result != OKL_OK) {
+                rendering = false;
+                app_lock(); bool classified = !strcmp(app.controller_status, "diagnostic") || !strcmp(app.controller_status, "unsupported"); app_unlock();
+                if (!classified) fault(result, false);
+            }
+            app_lock(); ready = app.controller_ready; app_unlock();
+        }
+        if (!ready) { rendering = false; vTaskDelay(pdMS_TO_TICKS(10)); continue; }
         app_lock(); kl_state target = app.desired; uint32_t revision = app.output_revision; app_unlock();
         if (revision != seen_revision) {
             seen_revision = revision;
@@ -173,6 +325,8 @@ static void worker_task(void *unused) {
 }
 
 esp_err_t app_worker_start(void) {
+    memset(&lifecycle, 0, sizeof(lifecycle));
+    lifecycle_observed("starting", false);
     esp_err_t result = app_nxp_transport_init(&nxp, app.mac);
     if (result != ESP_OK) return result;
     return xTaskCreate(worker_task, "lighting", 8192, NULL, 8, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;

@@ -17,6 +17,10 @@ static uint8_t checksum(const uint8_t *report) {
     for (i = 2; i < 88; ++i) value ^= report[i];
     return value;
 }
+static void write_be32(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)(value >> 24); out[1] = (uint8_t)(value >> 16);
+    out[2] = (uint8_t)(value >> 8); out[3] = (uint8_t)value;
+}
 /* Fixed 32 iterations avoids compiler runtime division dependencies on M0.
  * The bounded rendering numerators are <= 6,502,500 and divisors <= 2200. */
 static uint32_t divide(uint32_t numerator, uint32_t denominator) {
@@ -36,13 +40,31 @@ void nxp_state_init(nxp_state *s) {
 
 int nxp_state_valid(const nxp_state *s) {
     return s && s->claimed <= 1 && s->name_size <= NXP_NAME_MAX && s->boot_requested <= 1 && s->trial_confirmed <= 1 &&
+        s->image_role <= NXP_ROLE_LIGHTING &&
+        !(s->capabilities & ~(uint32_t)(NXP_CAP_RECOVERY_READY | NXP_CAP_LIGHTING_READY)) &&
+        (!s->capabilities || s->part_id) &&
+        (s->image_role != NXP_ROLE_SPI_TRIAL || s->capabilities == NXP_CAP_RECOVERY_READY) &&
+        (s->image_role != NXP_ROLE_LIGHTING || s->capabilities == (NXP_CAP_RECOVERY_READY | NXP_CAP_LIGHTING_READY)) &&
+        (!(s->capabilities & NXP_CAP_LIGHTING_READY) || s->image_role == NXP_ROLE_LIGHTING) &&
         (s->effect == 0 || s->effect == 1 || s->effect == 8) &&
         (!s->effect || s->white_brightness <= 38) &&
         s->temperature_k >= 3000 && s->temperature_k <= 7000;
 }
+int nxp_state_platform(nxp_state *s, int spi_trial, int recovery_ready,
+                       int lighting_ready, uint32_t reset_cause) {
+    if (!nxp_state_valid(s) || (spi_trial != 0 && spi_trial != 1) ||
+        (recovery_ready != 0 && recovery_ready != 1) || (lighting_ready != 0 && lighting_ready != 1) ||
+        (recovery_ready && !s->part_id) || (lighting_ready && (!recovery_ready || spi_trial))) return 0;
+    s->capabilities = (recovery_ready ? NXP_CAP_RECOVERY_READY : 0u) |
+        (lighting_ready ? NXP_CAP_LIGHTING_READY : 0u);
+    s->image_role = lighting_ready ? NXP_ROLE_LIGHTING :
+        (spi_trial && recovery_ready ? NXP_ROLE_SPI_TRIAL : NXP_ROLE_UNQUALIFIED);
+    s->reset_cause = reset_cause;
+    return 1;
+}
 
 static int owner_exempt(uint8_t cls, uint8_t op) {
-    return cls == 0 && (op == 0x87 || op == 0x84 || op == 0xc9 || op == 0x49 || op == 0xfe);
+    return cls == 0 && (op == 0x87 || op == 0x84 || op == 0xc9 || op == 0x49 || op == 0xfe || op == 0xfc);
 }
 
 int nxp_trial_expired(const nxp_state *s, uint32_t now_ms) {
@@ -54,6 +76,14 @@ static uint8_t dispatch(nxp_state *s, const uint8_t tag[6], const uint8_t *q, ui
     uint8_t n = q[5], cls = q[6], op = q[7];
     if (s->claimed && !equal(s->owner, tag, 6) && !owner_exempt(cls, op)) return STATUS_OWNER;
     if (cls == 0) {
+        if (op == 0xfc) {
+            if (n) return STATUS_PARAMETER;
+            b[0] = 'O'; b[1] = 'K'; b[2] = 'L'; b[3] = 'C'; b[4] = 1;
+            b[6] = s->image_role; b[7] = (uint8_t)(s->trial_confirmed | (s->boot_requested << 1));
+            write_be32(b + 8, s->capabilities); write_be32(b + 12, s->part_id);
+            write_be32(b + 16, now_ms); write_be32(b + 20, s->reset_cause);
+            r[5] = 24; return STATUS_OK;
+        }
         if (op == 0x87 && !n) { r[5] = 4; b[1] = 1; return STATUS_OK; }
         if (op == 0x84 && !n) { r[5] = 1; b[0] = s->boot_requested; return STATUS_OK; }
         if (op == 0xfe && !n) {

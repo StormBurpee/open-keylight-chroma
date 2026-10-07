@@ -144,6 +144,57 @@ static void test_requests(void) {
     CHECK(okl_request_static(&request,rgb)==OKL_OK);original=request;request.arguments[0]=1;
     CHECK(okl_request_build(&original,request.command,request.arguments,request.size)==OKL_INVALID);
     CHECK(original.arguments[0]==0); /* Persistent profile is never accepted. */
+    CHECK(okl_request_get(&request,OKL_GET_PART_ID)==OKL_OK && request.size==0);
+    CHECK(okl_request_get(&request,OKL_GET_CONTROLLER_STATUS)==OKL_OK && request.size==0);
+    CHECK(okl_request_get(&request,OKL_CONFIRM_CONTROLLER)==OKL_INVALID);
+    CHECK(okl_request_confirm_controller(&request)==OKL_OK && request.size==4 && !memcmp(request.arguments,"OKLC",4));
+    for(i=0;i<4;++i) {
+        uint8_t confirmation[4]={'O','K','L','C'}; confirmation[i]^=1;
+        CHECK(okl_request_build(&request,OKL_CONFIRM_CONTROLLER,confirmation,4)==OKL_INVALID);
+    }
+}
+static void test_controller_status(void) {
+    okl_reply reply={0}; okl_controller_status value,sentinel; uint32_t part=123;
+    reply.received=reply.acknowledged=1; reply.report.status=2;
+    reply.report.opcode=0xfc; reply.report.size=24;
+    const uint8_t payload[24]={'O','K','L','C',1,0,2,1,0,0,0,3,0,0,0xbc,0x40,
+                              0xff,0xff,0xff,0xf0,0,0,0,0x13};
+    memcpy(reply.report.arguments,payload,24);
+    CHECK(okl_reply_decode_controller_status(&value,&reply)==OKL_OK);
+    CHECK(value.abi_major==1 && !value.abi_minor && value.role==OKL_ROLE_LIGHTING && value.trial_confirmed && !value.boot_requested);
+    CHECK(value.capabilities==3 && value.part_id==0xbc40 && value.uptime_ms==0xfffffff0 && value.reset_cause==0x13);
+    memset(&sentinel,0xa5,sizeof(sentinel));
+    for(unsigned n=0;n<=80;++n) if(n!=24) {
+        value=sentinel;reply.report.size=(uint8_t)n;
+        CHECK(okl_reply_decode_controller_status(&value,&reply)==OKL_PROTOCOL && !memcmp(&value,&sentinel,sizeof(value)));
+    }
+    reply.report.size=24;
+    const unsigned invalid_offsets[]={0,1,2,3,4,5,6,7,8,9,10,11};
+    const uint8_t invalid_values[]={'X','X','X','X',2,1,3,4,1,1,1,4};
+    for(unsigned i=0;i<sizeof(invalid_offsets)/sizeof(invalid_offsets[0]);++i) {
+        memcpy(reply.report.arguments,payload,24);reply.report.arguments[invalid_offsets[i]]=invalid_values[i];value=sentinel;
+        CHECK(okl_reply_decode_controller_status(&value,&reply)==OKL_PROTOCOL && !memcmp(&value,&sentinel,sizeof(value)));
+    }
+    memcpy(reply.report.arguments,payload,24);
+    for(unsigned bad=0;bad<5;++bad) {
+        okl_reply mutated=reply;value=sentinel;
+        if(bad==0)mutated.acknowledged=0;
+        if(bad==1)mutated.received=0;
+        if(bad==2)mutated.report.status=5;
+        if(bad==3)mutated.report.command_class=1;
+        if(bad==4)mutated.report.opcode=0xfe;
+        CHECK(okl_reply_decode_controller_status(&value,&mutated)==OKL_PROTOCOL && !memcmp(&value,&sentinel,sizeof(value)));
+    }
+    CHECK(okl_reply_decode_controller_status(NULL,&reply)==OKL_INVALID);
+    CHECK(okl_reply_decode_controller_status(&value,NULL)==OKL_INVALID);
+    reply.report.opcode=0xfe;reply.report.size=4;memcpy(reply.report.arguments,payload+12,4);
+    CHECK(okl_reply_decode_part_id(&part,&reply)==OKL_OK && part==0xbc40);
+    reply.report.size=3;part=123;
+    CHECK(okl_reply_decode_part_id(&part,&reply)==OKL_PROTOCOL && part==123);
+    reply.report.opcode=0xfd;reply.report.size=1;reply.report.arguments[0]=1;
+    CHECK(okl_reply_check_controller_confirmation(&reply)==OKL_OK);
+    reply.report.arguments[0]=0;CHECK(okl_reply_check_controller_confirmation(&reply)==OKL_PROTOCOL);
+    CHECK(okl_reply_check_controller_confirmation(NULL)==OKL_INVALID);
 }
 static void test_exchange(void) {
     mock m;okl_nxp d;okl_reply reply;okl_request request;unsigned i;
@@ -254,7 +305,7 @@ static void test_button(void) {
 }
 
 int main(void) {
-    test_codec();test_requests();test_exchange();test_owner_and_state();test_button();
+    test_codec();test_requests();test_controller_status();test_exchange();test_owner_and_state();test_button();
     printf("%u checks passed; original C99 codec/driver/gesture tests; no hardware I/O.\n",checks);
     return 0;
 }

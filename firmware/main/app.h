@@ -29,6 +29,10 @@ typedef struct {
     uint32_t revision, output_revision, completed_revision;
     uint32_t reported_revision, reported_fields;
     bool reported_valid, rgb_confirmed, controller_connected, network_connected;
+    bool controller_ready, controller_trial_confirmed;
+    uint32_t controller_part_id;
+    uint64_t controller_last_health_ms;
+    char controller_backend[12], controller_status[16];
     bool updating;
     char operation[12], error[81], actor[17], controller_version[20];
     char id[24], hostname[40], ip[16];

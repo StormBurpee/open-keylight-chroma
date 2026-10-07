@@ -128,6 +128,60 @@ static void test_driver_integration(void) {
         CHECK(nxp_process(&f.state, q, 97, r, 97) == NXP_OK && r[7] == 3);
     }
 }
+static void test_lifecycle_integration(void) {
+    fixture f; okl_transport transport; okl_nxp driver; okl_request request;
+    okl_reply reply, good; okl_controller_status status, before; uint32_t part;
+    unsigned role, i;
+    memset(&f, 0, sizeof(f)); nxp_state_init(&f.state); nxp_link_init(&f.link, &f.state);
+    f.state.part_id = 0x0000bc40; f.now = 12345000;
+    memset(&transport, 0, sizeof(transport)); transport.user = &f; transport.now_us = now_us;
+    transport.lock = lock; transport.unlock = unlock; transport.arm_ready = arm;
+    transport.wait_ready = wait_ready; transport.transfer = transfer;
+    CHECK(okl_nxp_init(&driver, &transport, tag) == OKL_OK);
+    for (role = NXP_ROLE_SPI_TRIAL; role <= NXP_ROLE_LIGHTING; ++role) {
+        CHECK(nxp_state_platform(&f.state, role == NXP_ROLE_SPI_TRIAL, 1, role == NXP_ROLE_LIGHTING, 0x80000014));
+        f.state.claimed = 1; memset(f.state.owner, 4, 6); /* Discovery is owner-exempt. */
+        CHECK(okl_request_get(&request, OKL_GET_CONTROLLER_STATUS) == OKL_OK);
+        CHECK(okl_nxp_execute(&driver, &request, &reply, f.now + 150000) == OKL_OK);
+        CHECK(okl_reply_decode_controller_status(&status, &reply) == OKL_OK);
+        CHECK(status.abi_major == 1 && status.abi_minor == 0 && status.role == role);
+        CHECK(status.capabilities == (role == NXP_ROLE_SPI_TRIAL ? 1u : 3u));
+        CHECK(status.part_id == 0x0000bc40 && status.uptime_ms == 12345 && status.reset_cause == 0x80000014);
+        CHECK(!status.trial_confirmed && !status.boot_requested && f.state.owner[0] == 4);
+        CHECK(okl_request_get(&request, OKL_GET_PART_ID) == OKL_OK);
+        CHECK(okl_nxp_execute(&driver, &request, &reply, f.now + 150000) == OKL_OK);
+        CHECK(okl_reply_decode_part_id(&part, &reply) == OKL_OK && part == status.part_id);
+    }
+    CHECK(okl_request_confirm_controller(&request) == OKL_OK);
+    CHECK(okl_nxp_execute(&driver, &request, &reply, f.now + 150000) == OKL_OWNER_DENIED);
+    CHECK(!f.state.trial_confirmed && !driver.needs_recovery);
+    f.state.claimed = 0; memset(f.state.owner, 0, sizeof(f.state.owner));
+    CHECK(okl_nxp_claim(&driver, (const uint8_t *)"Open Keylight Chroma", 20, f.now + 150000) == OKL_OK);
+    CHECK(okl_nxp_execute(&driver, &request, &reply, f.now + 150000) == OKL_OK);
+    CHECK(okl_reply_check_controller_confirmation(&reply) == OKL_OK);
+    CHECK(okl_request_get(&request, OKL_GET_CONTROLLER_STATUS) == OKL_OK);
+    CHECK(okl_nxp_execute(&driver, &request, &reply, f.now + 150000) == OKL_OK);
+    CHECK(okl_reply_decode_controller_status(&status, &reply) == OKL_OK && status.trial_confirmed);
+    CHECK(status.role == OKL_ROLE_LIGHTING && !status.boot_requested);
+    good = reply; before = status;
+    for (i = 0; i <= OKL_ARGUMENT_BYTES; ++i) if (i != OKL_CONTROLLER_STATUS_BYTES) {
+        reply = good; reply.report.size = (uint8_t)i;
+        CHECK(okl_reply_decode_controller_status(&status, &reply) == OKL_PROTOCOL);
+        CHECK(!memcmp(&status, &before, sizeof(status)));
+    }
+    for (i = 0; i < 9; ++i) {
+        reply = good;
+        if (i < 4) reply.report.arguments[i] ^= 1;
+        else if (i == 4) reply.report.arguments[4] = 2;
+        else if (i == 5) reply.report.arguments[5] = 1;
+        else if (i == 6) reply.report.arguments[6] = 3;
+        else if (i == 7) reply.report.arguments[7] = 4;
+        else reply.report.arguments[11] |= 4;
+        CHECK(okl_reply_decode_controller_status(&status, &reply) == OKL_PROTOCOL);
+        CHECK(!memcmp(&status, &before, sizeof(status)));
+    }
+    CHECK(okl_nxp_release(&driver, f.now + 150000) == OKL_OK && !f.locked);
+}
 static void test_handshake(void) {
     nxp_state state; nxp_link link; uint8_t q[97], r[97], dummy[97] = {0}; unsigned i;
     nxp_state_init(&state); nxp_link_init(&link, &state); packet(q, 0, 0x87, NULL, 0);
@@ -179,6 +233,45 @@ static void test_trial(void) {
     s.part_id = 0x0001bc40; CHECK(nxp_process(&s, q, 97, r, 97) == NXP_OK && r[7] == 2);
     CHECK(r[12] == 4 && !r[15] && r[16] == 1 && r[17] == 0xbc && r[18] == 0x40);
 }
+static uint32_t read_be32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+static void test_platform_status(void) {
+    nxp_state s, before; uint8_t q[97], r[97], bad = 0; unsigned role, flags, i;
+    const uint32_t times[] = {0, 29999, 30000, UINT32_MAX};
+    nxp_state_init(&s); packet(q, 0, 0xfc, NULL, 0); before = s;
+    CHECK(nxp_process_at(&s, q, 97, r, 97, 1) == NXP_OK && r[7] == 2 && r[12] == 24);
+    CHECK(!memcmp(r + 15, "OKLC\x01\x00\x00\x00", 8));
+    CHECK(read_be32(r + 23) == 0 && read_be32(r + 27) == 0 && read_be32(r + 31) == 1);
+    CHECK(!memcmp(&s, &before, sizeof(s)));
+    CHECK(!nxp_state_platform(&s, 1, 1, 0, 0) && !memcmp(&s, &before, sizeof(s)));
+    s.part_id = 0x0000bc40;
+    for (role = 0; role < 3; ++role) for (flags = 0; flags < 4; ++flags) {
+        CHECK(nxp_state_platform(&s, role == 1, role != 0, role == 2, UINT32_MAX));
+        s.trial_confirmed = (uint8_t)(flags & 1); s.boot_requested = (uint8_t)(flags >> 1);
+        s.claimed = 1; memset(s.owner, 4, 6); /* FC is owner-exempt. */
+        before = s;
+        for (i = 0; i < sizeof(times) / sizeof(times[0]); ++i) {
+            CHECK(nxp_process_at(&s, q, 97, r, 97, times[i]) == NXP_OK && r[7] == 2);
+            CHECK(r[8] == 7 && r[12] == 24 && r[21] == role && r[22] == flags && r[95] == xor_report(r + 7));
+            CHECK(read_be32(r + 23) == (role == 2 ? 3u : role == 1 ? 1u : 0u));
+            CHECK(read_be32(r + 27) == 0x0000bc40 && read_be32(r + 31) == times[i] && read_be32(r + 35) == UINT32_MAX);
+            CHECK(!memcmp(&s, &before, sizeof(s)) && !memcmp(r + 39, (uint8_t[56]){0}, 56));
+        }
+    }
+    before = s;
+    CHECK(!nxp_state_platform(&s, 1, 1, 1, 0) && !memcmp(&s, &before, sizeof(s)));
+    CHECK(!nxp_state_platform(&s, 0, 0, 1, 0) && !memcmp(&s, &before, sizeof(s)));
+    CHECK(!nxp_state_platform(&s, 2, 1, 0, 0) && !memcmp(&s, &before, sizeof(s)));
+    CHECK(!nxp_state_platform(&s, 0, -1, 0, 0) && !memcmp(&s, &before, sizeof(s)));
+    packet(q, 0, 0xfc, &bad, 1);
+    CHECK(nxp_process_at(&s, q, 97, r, 97, 123) == NXP_OK && r[7] == 3 && r[12] == 0);
+    CHECK(!memcmp(&s, &before, sizeof(s)));
+    for (i = 4; i < 32; ++i) { s.capabilities = i; CHECK(!nxp_state_valid(&s)); }
+    s = before; s.image_role = 3; CHECK(!nxp_state_valid(&s));
+    s = before; s.image_role = NXP_ROLE_SPI_TRIAL; CHECK(!nxp_state_valid(&s)); /* Cannot advertise lighting. */
+    s = before; s.capabilities = NXP_CAP_RECOVERY_READY; CHECK(!nxp_state_valid(&s)); /* Lighting role needs runtime PWM. */
+}
 static void test_connections(void) {
     nxp_state s, before; nxp_link link; uint8_t q[97] = {0}, r[97], dummy[97] = {0}; unsigned i;
     memcpy(q, tag, 6); q[6] = 11; q[7] = q[8] = 1;
@@ -226,7 +319,7 @@ static void test_connections(void) {
     }
 }
 int main(void) {
-    test_packets(); test_parameters(); test_render(); test_driver_integration(); test_handshake(); test_trial(); test_connections();
+    test_packets(); test_parameters(); test_render(); test_driver_integration(); test_lifecycle_integration(); test_handshake(); test_trial(); test_platform_status(); test_connections();
     printf("%u checks passed; original NXP protocol, arithmetic and ESP-driver integration; no device I/O.\n", checks);
     return 0;
 }

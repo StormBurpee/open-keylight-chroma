@@ -98,6 +98,12 @@ static cJSON *device_json(void) {
     cJSON *controller = cJSON_AddObjectToObject(json, "controller");
     cJSON_AddBoolToObject(controller, "connected", app.controller_connected);
     cJSON_AddStringToObject(controller, "version", app.controller_version);
+    cJSON_AddBoolToObject(controller, "ready", app.controller_ready);
+    cJSON_AddStringToObject(controller, "backend", app.controller_backend[0] ? app.controller_backend : "unknown");
+    cJSON_AddStringToObject(controller, "status", app.controller_status[0] ? app.controller_status : "starting");
+    cJSON_AddNumberToObject(controller, "part_id", app.controller_part_id);
+    cJSON_AddBoolToObject(controller, "trial_confirmed", app.controller_trial_confirmed);
+    cJSON_AddNumberToObject(controller, "last_health_ms", app.controller_last_health_ms);
     app_unlock();
     cJSON *capabilities = cJSON_AddObjectToObject(json, "capabilities");
     const char *names[] = {"white", "color", "transitions", "effects", "scenes", "settings", "ota"};

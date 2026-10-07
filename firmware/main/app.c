@@ -24,6 +24,7 @@ void app_event_locked(const char *actor, const char *event, const char *detail) 
 
 int app_submit(const kl_patch *patch, const char *actor, uint32_t expected, bool has_expected) {
     app_lock();
+    if ((patch->fields & KL_OUTPUT_FIELDS) && !app.controller_ready) { app_unlock(); return 503; }
     if (app.updating && !(patch->fields == KL_POWER && !patch->value.power)) { app_unlock(); return 503; }
     if (has_expected && expected != app.revision) { app_unlock(); return 409; }
     kl_state next;
@@ -66,10 +67,13 @@ void app_main(void) {
     }
     app_trial_start();
     if (!app.token_count) app_pair_window();
+    esp_err_t worker = app_worker_start();
+    if (worker != ESP_OK) {
+        ESP_LOGE("keylight", "Lighting unavailable: %s", esp_err_to_name(worker));
+        snprintf(app.controller_status, sizeof(app.controller_status), "fault");
+    }
     ESP_ERROR_CHECK(app_network_start());
     ESP_ERROR_CHECK(app_http_start());
-    esp_err_t worker = app_worker_start();
-    if (worker != ESP_OK) ESP_LOGE("keylight", "Lighting unavailable: %s", esp_err_to_name(worker));
     app_button_start();
     app_mqtt_start();
 }

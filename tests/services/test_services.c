@@ -234,4 +234,24 @@ static void http_tests(void) {
     request.content_len = 2; header_type = "text/plain"; CHECK(!http_read_json(&request));
     CHECK(app_http_start() == ESP_OK && server_handlers == 5);
 }
-int main(void) { storage_tests(); http_tests(); printf("PASS %u assertions against actual storage.c/http_server.c\n", assertions); return 0; }
+static void controller_json_tests(void) {
+    memset(&app,0,sizeof(app));
+    cJSON *document=device_json(), *controller=cJSON_GetObjectItemCaseSensitive(document,"controller");
+    CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(controller,"ready")));
+    CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(controller,"backend")->valuestring,"unknown"));
+    CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(controller,"status")->valuestring,"starting"));
+    cJSON_Delete(document);
+    app.controller_connected=true;app.controller_ready=false;app.controller_part_id=0xbc40;
+    app.controller_last_health_ms=1234;app.controller_trial_confirmed=true;
+    snprintf(app.controller_backend,sizeof(app.controller_backend),"original");
+    snprintf(app.controller_status,sizeof(app.controller_status),"diagnostic");
+    document=device_json();controller=cJSON_GetObjectItemCaseSensitive(document,"controller");
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(controller,"connected")));
+    CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(controller,"ready")));
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(controller,"trial_confirmed")));
+    CHECK(cJSON_GetObjectItemCaseSensitive(controller,"part_id")->valueint==0xbc40);
+    CHECK(cJSON_GetObjectItemCaseSensitive(controller,"last_health_ms")->valueint==1234);
+    CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(controller,"status")->valuestring,"diagnostic"));
+    cJSON_Delete(document);
+}
+int main(void) { storage_tests(); http_tests(); controller_json_tests(); printf("PASS %u assertions against actual storage.c/http_server.c\n", assertions); return 0; }

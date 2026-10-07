@@ -112,6 +112,9 @@ void nxp_reset_c(void) {
 #if !NXP_SPI_ONLY_TRIAL
         nxp_diagnostic.outputs_enabled = (uint32_t)nxp_board_start_pwm(&board);
 #endif
+        if (!nxp_state_platform(&state, NXP_SPI_ONLY_TRIAL,
+            recovery_allowed == UINT32_C(0x5245434f) && config.clock_hz == 48000000u,
+            board.pwm_started != 0, nxp_diagnostic.reset_status)) nxp_panic();
         __asm volatile ("cpsie i");
         for (;;) {
             uint32_t now = milliseconds;

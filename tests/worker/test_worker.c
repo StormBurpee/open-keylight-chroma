@@ -37,6 +37,13 @@ static okl_result claim_result, read_result, release_result;
 static bool poison_claim, poison_read, malformed_version, queued_on_read, retarget_after_failure;
 static bool claimed, task_failure;
 static bool poison_write;
+static bool original, confirmation_missing, lost_confirmation_ack, malformed_status, status_unsupported;
+static uint8_t legacy_minor;
+static unsigned status_reads, part_reads, confirmations;
+static uint32_t part_reply;
+static okl_controller_status remote_status;
+static uint64_t boot_at, reset_at;
+static bool reset_done;
 
 uint64_t app_now_ms(void) { return now; }
 static uint64_t transport_now(void *unused) { (void)unused; return now * 1000; }
@@ -46,7 +53,15 @@ void app_event_locked(const char *actor, const char *event, const char *detail) 
     CHECK(locks == 1 && actor && event && detail);
     if (!strcmp(event, "command.failed")) ++faults;
 }
-void app_mqtt_publish(void) { CHECK(!locks); ++publications; }
+void app_mqtt_publish(void) {
+    CHECK(!locks); ++publications;
+    /* A real API mutation is admitted only after the worker opens readiness. */
+    if (queued_on_read && publications == 1 && app.controller_ready) {
+        app.desired = kl_state_default(); app.desired.power = true; app.desired.mode = KL_COLOR;
+        app.desired.rgb = (kl_rgb){10, 180, 90}; app.desired.brightness = 80;
+        app.output_revision = 1; snprintf(app.operation, sizeof(app.operation), "queued");
+    }
+}
 esp_err_t app_nxp_transport_init(okl_nxp *driver, const uint8_t mac[6]) {
     CHECK(driver && mac); memset(driver, 0, sizeof(*driver)); driver->transport.now_us = transport_now;
     memcpy(driver->identity, mac, 6); return ESP_OK;
@@ -58,6 +73,10 @@ int xTaskCreate(void (*task)(void *), const char *name, unsigned stack, void *ar
 }
 void vTaskDelay(unsigned ticks) {
     CHECK(!locks && (ticks == 5 || ticks == 10)); ++delays; now += delay_step;
+    if (reset_at && !reset_done && now >= reset_at) {
+        reset_done = true; boot_at = now; remote_status.trial_confirmed = 0; claimed = false;
+        controller = (okl_light_state){.temperature_kelvin = 5200};
+    }
     if (retarget_after_failure && delays == 2) {
         app.desired.rgb = (kl_rgb){5, 220, 35}; ++app.output_revision;
     }
@@ -80,17 +99,16 @@ static okl_result worker_release(okl_nxp *driver, uint64_t deadline) {
 }
 static okl_result worker_read(okl_nxp *driver, okl_light_state *state, uint64_t deadline) {
     bounded(deadline, 800000); ++reads;
-    if (queued_on_read && reads == 1) {
-        app.desired = kl_state_default(); app.desired.power = true; app.desired.mode = KL_COLOR;
-        app.desired.rgb = (kl_rgb){10, 180, 90}; app.desired.brightness = 80;
-        app.output_revision = 1; strcpy(app.operation, "queued");
-    }
     if (poison_read) driver->needs_recovery = 1;
     if (read_result == OKL_OK) *state = controller;
     return read_result;
 }
 static okl_result worker_recover(okl_nxp *driver, uint64_t deadline) {
     bounded(deadline, 250000); ++recoveries; driver->needs_recovery = 0; return OKL_OK;
+}
+static void put_word(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)(value >> 24); out[1] = (uint8_t)(value >> 16);
+    out[2] = (uint8_t)(value >> 8); out[3] = (uint8_t)value;
 }
 static okl_result worker_execute(okl_nxp *driver, const okl_request *request, okl_reply *reply, uint64_t deadline) {
     bounded(deadline, OKL_DEFAULT_TIMEOUT_US); CHECK(!driver->needs_recovery);
@@ -99,8 +117,33 @@ static okl_result worker_execute(okl_nxp *driver, const okl_request *request, ok
         ++versions; reply->received = 1; reply->acknowledged = 1; reply->report.status = 2;
         reply->report.command_class = 0; reply->report.opcode = 0x87;
         reply->report.size = malformed_version ? 3 : 4;
-        reply->report.arguments[0] = 1; reply->report.arguments[1] = 3;
+        reply->report.arguments[0] = original ? 0 : 1; reply->report.arguments[1] = original ? 1 : legacy_minor;
         return OKL_OK;
+    }
+    if (request->command == OKL_GET_CONTROLLER_STATUS) {
+        ++status_reads; reply->received = 1; reply->report.opcode = 0xfc;
+        if (!original || status_unsupported) { reply->report.status = 5; return OKL_REMOTE; }
+        reply->acknowledged = 1; reply->report.status = 2; reply->report.size = 24;
+        uint8_t *a = reply->report.arguments;
+        memcpy(a, "OKLC", 4); a[4] = 1; a[6] = remote_status.role;
+        a[7] = remote_status.trial_confirmed | (remote_status.boot_requested << 1);
+        put_word(a + 8, remote_status.capabilities); put_word(a + 12, remote_status.part_id);
+        put_word(a + 16, (uint32_t)(now - boot_at)); put_word(a + 20, remote_status.reset_cause);
+        if (malformed_status) a[5] = 1;
+        return OKL_OK;
+    }
+    if (request->command == OKL_GET_PART_ID) {
+        ++part_reads; reply->received = reply->acknowledged = 1;
+        reply->report.status = 2; reply->report.opcode = 0xfe; reply->report.size = 4;
+        put_word(reply->report.arguments, part_reply); return OKL_OK;
+    }
+    if (request->command == OKL_CONFIRM_CONTROLLER) {
+        CHECK(claimed && original && remote_status.role == OKL_ROLE_LIGHTING);
+        CHECK(request->size == 4 && !memcmp(request->arguments, "OKLC", 4)); ++confirmations;
+        if (!confirmation_missing) remote_status.trial_confirmed = 1;
+        if (lost_confirmation_ack) { driver->needs_recovery = 1; return OKL_TIMEOUT; }
+        reply->received = reply->acknowledged = 1; reply->report.status = 2;
+        reply->report.opcode = 0xfd; reply->report.size = 1; reply->report.arguments[0] = 1; return OKL_OK;
     }
     CHECK(claimed && writes < 32); sent[writes++] = *request;
     if (fail_write == writes) {
@@ -127,6 +170,12 @@ static void reset(void) {
     claim_result = read_result = release_result = OKL_OK;
     poison_claim = poison_read = malformed_version = queued_on_read = retarget_after_failure = claimed = task_failure = false;
     poison_write = false;
+    original = confirmation_missing = lost_confirmation_ack = malformed_status = reset_done = status_unsupported = false;
+    legacy_minor = 3;
+    status_reads = part_reads = confirmations = 0; boot_at = reset_at = 0;
+    part_reply = CONTROLLER_PART_ID;
+    remote_status = (okl_controller_status){.role = OKL_ROLE_LIGHTING, .capabilities = 3,
+        .part_id = CONTROLLER_PART_ID, .reset_cause = 0x13};
     controller = (okl_light_state){.effect = 1, .color_count = 1, .colors = {255, 0, 32},
                                   .color_brightness = 102, .temperature_kelvin = 4500};
 }
@@ -149,9 +198,9 @@ static void test_startup(void) {
         if (failure == 3) { release_result = OKL_IO; }
         if (failure == 4) { malformed_version = true; }
         run();
-        CHECK(!writes && claims == 1 && !recoveries && faults == 1);
+        CHECK(!writes && claims == (unsigned)(failure != 4) && !recoveries && faults == 1);
         CHECK(!app.reported_valid && !app.controller_connected && !strcmp(app.operation, "error"));
-        CHECK(releases == (unsigned)(failure != 1 && failure != 2));
+        CHECK(releases == (unsigned)(failure != 1 && failure != 2 && failure != 4));
     }
     reset(); task_failure = true;
     CHECK(app_worker_start() == ESP_ERR_NO_MEM && !claims && !writes);
@@ -182,10 +231,9 @@ static void test_setup_and_frame_failures(void) {
     }
     reset(); queued_on_read = true; fail_write = 7; delay_step = 500;
     retarget_after_failure = true; stop_after = 3; run();
-    CHECK(faults == 1 && claims == 3 && writes == 13);
+    CHECK(faults == 1 && claims == 3 && writes == 7);
     CHECK(sent[6].command == OKL_SET_FRAME && sent[6].arguments[6] != 0); /* Rejected mid-fade sample. */
-    CHECK(sent[10].command == OKL_SET_FRAME);
-    CHECK(sent[10].arguments[5] == 102 && sent[10].arguments[6] == 0 && sent[10].arguments[7] == 13);
+    CHECK(app.controller_ready && app.completed_revision == 0); /* No queued replay through recovery. */
     for (unsigned failed = 1; failed <= 6; ++failed) {
         reset(); queued_on_read = true; fail_write = failed; poison_write = true; stop_after = 3; run();
         CHECK(writes == failed && claims == 2 && releases == 1 && nxp.needs_recovery);
@@ -200,9 +248,76 @@ static void test_transition_completion(void) {
     CHECK(app.completed_revision == 1 && app.reported_revision == 1 && app.reported_valid && app.rgb_confirmed);
     CHECK(!strcmp(app.operation, "idle") && app.reported.rgb.g == 180 && app.reported.brightness == 80);
 }
+static void original_reset(void) {
+    reset(); original = true;
+    controller = (okl_light_state){.temperature_kelvin = 5200};
+}
+static void test_original_bootstrap(void) {
+    original_reset(); run();
+    CHECK(confirmations == 1 && status_reads == 3 && part_reads == 1 && claims == 1 && releases == 1);
+    CHECK(!writes && !faults && app.controller_ready && app.controller_trial_confirmed);
+    CHECK(!strcmp(app.controller_backend, "original") && app.controller_part_id == CONTROLLER_PART_ID);
+    CHECK(!app.desired.power && !claimed && app.reported_valid);
+    original_reset(); remote_status.trial_confirmed = 1;
+    controller.effect = 1; controller.color_count = 1; controller.colors[1] = 255; controller.color_brightness = 127;
+    run(); CHECK(confirmations == 0 && !writes && app.controller_ready && app.desired.power);
+    CHECK(app.desired.rgb.g == 255 && app.desired.brightness == 50); /* ESP-only restart adopts a confirmed peer. */
+}
+static void test_original_rejections(void) {
+    for (unsigned variant = 0; variant < 10; ++variant) {
+        original_reset();
+        if (variant == 0) remote_status.role = OKL_ROLE_SPI_DIAGNOSTIC;
+        if (variant == 1) { remote_status.role = OKL_ROLE_SPI_DIAGNOSTIC; remote_status.trial_confirmed = 1; }
+        if (variant == 2) remote_status.role = OKL_ROLE_UNQUALIFIED;
+        if (variant == 3) remote_status.capabilities = OKL_CAP_RECOVERY_READY;
+        if (variant == 4) remote_status.part_id ^= 1;
+        if (variant == 5) part_reply ^= 1;
+        if (variant == 6) malformed_status = true;
+        if (variant == 7) status_unsupported = true; /* Old diagnostic has only version/FE. */
+        if (variant == 8) remote_status.boot_requested = 1;
+        if (variant == 9) { original = false; legacy_minor = 4; }
+        run(); CHECK(!app.controller_ready && !writes && !confirmations && !claims && !reads);
+        CHECK(app.controller_connected && !app.reported_valid);
+        CHECK(!strcmp(app.controller_status, variant < 2 ? "diagnostic" : "unsupported"));
+    }
+    for (unsigned variant = 0; variant < 4; ++variant) {
+        original_reset();
+        if (variant == 0) controller.white_brightness = 1;
+        if (variant == 1) { controller.effect = 8; controller.color_brightness = 255; } /* Unknown framebuffer is not dark proof. */
+        if (variant == 2) now = 30000;
+        if (variant == 3) claim_result = OKL_OWNER_DENIED;
+        run(); CHECK(!app.controller_ready && !confirmations && !writes && faults == 1);
+    }
+}
+static void test_confirmation_readback_and_ambiguity(void) {
+    original_reset(); confirmation_missing = true; delay_step = 1000; stop_after = 3; run();
+    CHECK(confirmations == 1 && !writes && !app.controller_ready && lifecycle.confirmation_uncertain);
+    CHECK(faults == 3); /* An ACK without confirmed FC never opens readiness or retries FD. */
+    original_reset(); lost_confirmation_ack = true; delay_step = 1000; stop_after = 3; run();
+    CHECK(confirmations == 1 && recoveries == 1 && app.controller_ready && app.controller_trial_confirmed);
+    CHECK(!writes && faults == 1 && !lifecycle.confirmation_uncertain); /* Fresh FC resolves the uncertain ACK. */
+}
+static void test_health_and_reset_no_replay(void) {
+    original_reset(); queued_on_read = true; reset_at = 1000; delay_step = 1000; stop_after = 5; run();
+    CHECK(reset_done && confirmations == 2 && faults == 1 && app.controller_ready);
+    CHECK(writes == 6 && !controller.effect && !controller.white_brightness); /* No frames after reset detection. */
+    CHECK(app.output_revision == 1 && app.completed_revision == 0 && app.reported_revision == 0);
+    CHECK(app.desired.power && app.reported_valid && !app.reported.power); /* Desired scene remains visible, never replayed. */
+    CHECK(app.controller_last_health_ms == 4000);
+    original_reset(); delay_step = 1000; stop_after = 4; run();
+    CHECK(status_reads == 6 && confirmations == 1 && !writes && app.controller_last_health_ms == 3000);
+    /* Uptime wraps normally; backward movement within a healthy session does not. */
+    lifecycle.status.uptime_ms = UINT32_MAX - 15u; now = (uint64_t)UINT32_MAX + 20;
+    CHECK(health() == OKL_OK);
+    boot_at = now - 1; CHECK(health() == OKL_VERIFY);
+    reset(); delay_step = 1000; stop_after = 3; run();
+    CHECK(versions == 3 && status_reads == 3 && !confirmations && app.controller_ready);
+}
 int main(void) {
     test_startup(); test_startup_queued_transition(); test_setup_and_frame_failures();
     test_transition_completion();
+    test_original_bootstrap(); test_original_rejections(); test_confirmation_readback_and_ambiguity();
+    test_health_and_reset_no_replay();
     printf("%u worker assertions passed; actual source, no device I/O.\n", checks);
     return 0;
 }

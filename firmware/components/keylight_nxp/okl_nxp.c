@@ -5,7 +5,8 @@ typedef struct { uint8_t cls, op, size; } descriptor;
 static const descriptor commands[OKL_COMMAND_COUNT] = {
     {0,0x87,0}, {0,0x84,0}, {0,0xc9,0},
     {15,0x82,2}, {15,0x84,2}, {3,0x83,3}, {3,0x81,2},
-    {0,0x49,72}, {15,2,12}, {15,4,3}, {3,3,4}, {3,1,4}, {15,3,9}
+    {0,0x49,72}, {15,2,12}, {15,4,3}, {3,3,4}, {3,1,4}, {15,3,9},
+    {0,0xfe,0}, {0,0xfc,0}, {0,0xfd,4}
 };
 
 static int all_zero(const uint8_t *bytes, size_t size) {
@@ -49,6 +50,8 @@ static okl_result valid_request(const okl_request *r) {
         return !a[0] && a[1]==32 && temperature>=3000 && temperature<=7000?OKL_OK:OKL_INVALID;
     case OKL_SET_FRAME:
         return all_zero(a,5) && a[8]==0?OKL_OK:OKL_INVALID;
+    case OKL_CONFIRM_CONTROLLER:
+        return !memcmp(a,"OKLC",4)?OKL_OK:OKL_INVALID;
     default: return OKL_OK;
     }
 }
@@ -68,7 +71,8 @@ okl_result okl_request_build(okl_request *out, okl_command command,
 
 okl_result okl_request_get(okl_request *out, okl_command command) {
     uint8_t args[3]={0,0,0};
-    if((unsigned)command>OKL_GET_TEMPERATURE) return OKL_INVALID;
+    if((unsigned)command>OKL_GET_TEMPERATURE && command!=OKL_GET_PART_ID && command!=OKL_GET_CONTROLLER_STATUS)
+        return OKL_INVALID;
     if(command==OKL_GET_WHITE_BRIGHTNESS || command==OKL_GET_TEMPERATURE) args[1]=32;
     return okl_request_build(out,command,args,commands[command].size);
 }
@@ -103,6 +107,10 @@ okl_result okl_request_white_brightness(okl_request *out, uint8_t brightness, ui
 okl_result okl_request_temperature(okl_request *out, uint16_t kelvin) {
     const uint8_t args[4]={0,32,(uint8_t)(kelvin>>8),(uint8_t)kelvin};
     return okl_request_build(out,OKL_SET_TEMPERATURE,args,sizeof(args));
+}
+
+okl_result okl_request_confirm_controller(okl_request *out) {
+    return okl_request_build(out,OKL_CONFIRM_CONTROLLER,(const uint8_t *)"OKLC",4);
 }
 
 static uint8_t checksum(const uint8_t *report) {
@@ -161,6 +169,36 @@ okl_result okl_reply_decode_mode(uint8_t *out, const okl_reply *reply) {
     if(!out || !reply) return OKL_INVALID;
     if(!is_getter_reply(reply,0x84,1)) return OKL_PROTOCOL;
     *out=reply->report.arguments[0];return OKL_OK;
+}
+
+static uint32_t read_u32(const uint8_t *p) {
+    return (uint32_t)p[0]<<24 | (uint32_t)p[1]<<16 | (uint32_t)p[2]<<8 | p[3];
+}
+
+okl_result okl_reply_decode_part_id(uint32_t *out, const okl_reply *reply) {
+    if(!out || !reply) return OKL_INVALID;
+    if(!is_getter_reply(reply,0xfe,4)) return OKL_PROTOCOL;
+    *out=read_u32(reply->report.arguments); return OKL_OK;
+}
+
+okl_result okl_reply_decode_controller_status(okl_controller_status *out, const okl_reply *reply) {
+    okl_controller_status status={0}; const uint8_t *a;
+    if(!out || !reply) return OKL_INVALID;
+    if(!is_getter_reply(reply,0xfc,OKL_CONTROLLER_STATUS_BYTES)) return OKL_PROTOCOL;
+    a=reply->report.arguments;
+    if(memcmp(a,"OKLC",4) || a[4]!=OKL_CONTROLLER_ABI_MAJOR || a[5]!=OKL_CONTROLLER_ABI_MINOR ||
+       a[6]>OKL_ROLE_LIGHTING || (a[7]&~3u)) return OKL_PROTOCOL;
+    status.abi_major=a[4]; status.abi_minor=a[5]; status.role=a[6];
+    status.trial_confirmed=a[7]&1u; status.boot_requested=(a[7]>>1)&1u;
+    status.capabilities=read_u32(a+8);
+    if(status.capabilities & ~(OKL_CAP_RECOVERY_READY|OKL_CAP_LIGHTING_READY)) return OKL_PROTOCOL;
+    status.part_id=read_u32(a+12); status.uptime_ms=read_u32(a+16); status.reset_cause=read_u32(a+20);
+    *out=status; return OKL_OK;
+}
+
+okl_result okl_reply_check_controller_confirmation(const okl_reply *reply) {
+    if(!reply) return OKL_INVALID;
+    return is_getter_reply(reply,0xfd,1) && reply->report.arguments[0]==1?OKL_OK:OKL_PROTOCOL;
 }
 
 uint64_t okl_nxp_default_deadline(const okl_nxp *d) {

@@ -5,14 +5,16 @@
 #include <stdint.h>
 
 enum { NXP_REPORT_SIZE = 90, NXP_SPI_SIZE = 97, NXP_CONNECTION_SIZE = 9, NXP_NAME_MAX = 64 };
+enum { NXP_ROLE_UNQUALIFIED = 0, NXP_ROLE_SPI_TRIAL = 1, NXP_ROLE_LIGHTING = 2 };
+enum { NXP_CAP_RECOVERY_READY = 1, NXP_CAP_LIGHTING_READY = 2 };
 typedef enum { NXP_OK = 0, NXP_INVALID, NXP_BAD_PACKET, NXP_EXPIRED, NXP_NO_REPLY } nxp_result;
 
 /* Original application state. All commands are RAM-only. */
 typedef struct {
     uint8_t owner[6], claimed, name_size, name[NXP_NAME_MAX], connection_count;
-    uint8_t effect, rgb[3], rgb_brightness, white_brightness, boot_requested, trial_confirmed;
+    uint8_t effect, rgb[3], rgb_brightness, white_brightness, boot_requested, trial_confirmed, image_role;
     uint16_t temperature_k;
-    uint32_t revision, part_id, trial_started_ms;
+    uint32_t revision, part_id, trial_started_ms, capabilities, reset_cause;
 } nxp_state;
 
 typedef struct {
@@ -25,6 +27,16 @@ typedef struct {
  * requests resident recovery, deferred until its entire reply is consumed. */
 void nxp_state_init(nxp_state *state);
 int nxp_state_valid(const nxp_state *state);
+/* Publish actual completed platform setup, never assumed compile-time support.
+ * Boolean inputs must be 0/1. Lighting requires recovery and excludes an SPI
+ * trial. Invalid input leaves state untouched. reset_cause is a sticky hardware
+ * snapshot, not a unique boot identifier. Wire getter 00/FC is documented below. */
+int nxp_state_platform(nxp_state *state, int spi_trial, int recovery_ready,
+                       int lighting_ready, uint32_t reset_cause);
+/* Read-only, owner-exempt 00/FC, no arguments: 24-byte ABI 1.0, big-endian words.
+ * "OKLC", major 1, minor 0, role, flags (confirmed=1, boot-requested=2),
+ * capabilities32, observed part32, uptime_ms32, sticky reset_cause32.
+ * Controllers must never automatically confirm role 1 diagnostic images. */
 /* A kind-0 report request produces a kind-0 reply. A nine-byte kind-11
  * connection event claims an unowned first connection or releases its matching
  * owner. Ownership changes produce a kind-4 notification; other valid events
