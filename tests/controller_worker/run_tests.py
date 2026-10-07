@@ -11,6 +11,11 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 OUT = ROOT / "build/controller-worker-tests"
 OUT.mkdir(parents=True, exist_ok=True)
+# Live native SPI diagnostic reported the SHA of this exact complete90-byte
+# legacy unsupported Info reply. It retains size80/zero request arguments.
+legacy_info = bytes.fromhex("0500000000501080") + bytes(80) + bytes.fromhex("c000")
+legacy_info_sha = hashlib.sha256(legacy_info).hexdigest()
+assert legacy_info_sha == "16f8f84a85ad525ce24865935c6a957e084dfec329e825870296847c6ec4dc26"
 compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
 if not compiler:
     raise SystemExit("Set CC to an AddressSanitizer-capable compiler")
@@ -57,6 +62,7 @@ sources += [ROOT / "firmware/main/controller_worker.c", ROOT / "firmware/main/co
             ROOT / "tests/worker/worker_mocks.h", Path(__file__),
             components / "keylight_loader/include/okl_loader.h", components / "keylight_nxp/include/okl_nxp.h"]
 report = {"status": "pass", "sanitizer": "AddressSanitizer", "device_operations": 0,
+          "live_legacy_unsupported_info_sha256": legacy_info_sha,
           "output": (result.stdout + recovery_result.stdout).strip(), "source_sha256": {
               p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
           "limits": ["SPI, native driver, clock, SHA and durable storage boundaries mocked",

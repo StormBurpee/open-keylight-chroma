@@ -369,8 +369,15 @@ void app_controller_worker_recover(okl_nxp *driver, const app_controller_job *jo
     }
     okl_report report;
     if (!job->allow_legacy_reconcile || okl_report_decode(&report,response,90)!=OKL_OK ||
-        report.transaction || report.command_class!=0x10 || report.opcode!=0x80 || report.size ||
+        report.transaction || report.command_class!=0x10 || report.opcode!=0x80 ||
+        report.size != 80 ||
         (report.status!=5 && report.status!=8)) {
+        result=OKL_PROTOCOL; trace(&c,"recovery.classify",result,NULL); goto finish;
+    }
+    /* The observed legacy unsupported Info reply retains the request's full
+     * 80-byte zero payload. This is not loader success: only this correlated
+     * error permits the independently qualified legacy identity path. */
+    for (unsigned i = 0; i < report.size; ++i) if (report.arguments[i]) {
         result=OKL_PROTOCOL; trace(&c,"recovery.classify",result,NULL); goto finish;
     }
     okl_reply reply; okl_firmware_version version; uint32_t part;

@@ -24,7 +24,7 @@ static const uint8_t mac[6]={2,1,2,3,4,5};
 static struct {
     okl_nxp driver;app_controller_job job;app_controller_worker_outcome out;
     uint64_t now,initialized_at;unsigned init_calls,leased,releases,waits,wires,fail_at;
-    unsigned init_fault,lease_fault,preserve_fault,release_poison,info_kind,info_fault,info_delivery;
+    unsigned init_fault,lease_fault,preserve_fault,release_poison,info_kind,info_fault,info_delivery,info_payload_byte;
     unsigned malformed,read_count,claims,writes,owner_releases,preserves,snapshots,snapshot_fault;
     char sequence[32];uint8_t last_report[90];unsigned has_report;
     okl_light_state state;
@@ -81,16 +81,19 @@ okl_result app_nxp_loader_exchange(okl_nxp *d,uint32_t id,const uint8_t raw[90],
     if(fail) {d->needs_recovery=1;*delivery=OKL_LOADER_MAYBE_SENT;return OKL_TIMEOUT;}
     if(m.info_delivery)*delivery=m.info_delivery==1?OKL_LOADER_NOT_SENT:OKL_LOADER_MAYBE_SENT;
     uint8_t args[80]={3,24,1,2,0,0,0,2,93};
-    CHECK(okl_report_encode(response,0,0x10,0x80,args,m.info_kind?0:80)==OKL_OK);
+    if(m.info_kind)memset(args,0,sizeof(args));
+    if(m.info_payload_byte)args[m.info_payload_byte-1]=1;
+    CHECK(okl_report_encode(response,0,0x10,0x80,args,80)==OKL_OK);
     response[0]=m.info_kind?(uint8_t)m.info_kind:2;
     if(m.info_fault) {
         okl_report r;CHECK(okl_report_decode(&r,response,90)==OKL_OK);
         if(m.info_fault==1)r.transaction=1;
         if(m.info_fault==2)r.command_class=0;
         if(m.info_fault==3)r.opcode=0x81;
-        if(m.info_fault==4)r.size=1;
+        if(m.info_fault==4)r.size=79;
         if(m.info_fault==5)r.arguments[8]^=1;
         if(m.info_fault==6)r.arguments[79]=1;
+        if(m.info_fault==8)r.size=0;
         CHECK(okl_report_encode(response,r.transaction,r.command_class,r.opcode,r.arguments,r.size)==OKL_OK);response[0]=r.status;
         if(m.info_fault==7)response[88]^=1;
     }
@@ -185,7 +188,7 @@ int main(void) {
         if(fault>=6 && fault<=8)CHECK(!m.init_calls && !m.snapshots);
         if(fault==4 || fault==5)CHECK(!strcmp(m.out.stage,"recovery.information_delivery") && m.out.transport_result==OKL_PROTOCOL);
     }
-    for(unsigned fault=1;fault<=7;++fault) {
+    for(unsigned fault=1;fault<=8;++fault) {
         reset();m.info_fault=fault;run();CHECK(!m.out.resident_proof_job_id && !m.claims && m.out.diagnostic_error[0]);
         CHECK(!strcmp(m.out.stage,"recovery.classify") && m.out.transport_result==OKL_PROTOCOL && m.out.raw_reply_received);
     }
@@ -203,10 +206,15 @@ int main(void) {
             CHECK(!m.out.synchronized && m.out.transport_result==OKL_TIMEOUT);
         }
     }
-    for(unsigned fault=1;fault<=7;++fault) {
+    for(unsigned fault=1;fault<=8;++fault) {
         reset();m.info_kind=5;m.info_fault=fault;m.job.allow_legacy_reconcile=true;
-        if(fault==5 || fault==6)continue; /* Zero-sized replies omit these bytes. */
         run();CHECK(m.wires==1 && !m.claims && !m.out.legacy_reconciled);
+    }
+    /* Exact live class10/80 unsupported reply retained all80 request zeros.
+     * Its90-byte SHA256 is pinned independently in the Python runner. */
+    for(unsigned byte=1;byte<=80;++byte) {
+        reset();m.info_kind=5;m.info_payload_byte=byte;m.job.allow_legacy_reconcile=true;
+        run();CHECK(m.wires==1 && !m.claims && !m.writes && !m.out.legacy_reconciled);
     }
     for(unsigned fault=1;fault<=11;++fault) {
         reset();m.info_kind=5;m.job.allow_legacy_reconcile=true;m.malformed=fault;run();
