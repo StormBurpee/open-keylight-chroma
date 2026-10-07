@@ -8,6 +8,7 @@
 #include <string.h>
 
 enum { PIN_READY = 4, PIN_MOSI = 12, PIN_MISO = 13, PIN_CLOCK = 14, PIN_SELECT = 15 };
+enum { BUS_IDLE, LENGTH_PENDING, BODY_PENDING, ZERO_COMPLETE };
 typedef struct {
     spi_device_handle_t spi;
     SemaphoreHandle_t mutex;
@@ -36,13 +37,14 @@ static okl_result wait_level(int level, uint64_t deadline) {
 }
 static okl_result arm_ready(void *context, uint64_t deadline) {
     nxp_bus *b = context;
-    if (b->phase) return OKL_NEEDS_RECOVERY;
+    if (b->phase != BUS_IDLE) return OKL_NEEDS_RECOVERY;
     return wait_level(1, deadline);
 }
 static okl_result wait_ready(void *unused, uint64_t deadline) { (void)unused; return wait_level(0, deadline); }
 
 static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t size, uint64_t deadline) {
     nxp_bus *b = context;
+    if (b->phase == ZERO_COMPLETE) return OKL_NEEDS_RECOVERY;
     if (!size || size > OKL_SPI_LIMIT || !ticks_left(deadline)) return OKL_TIMEOUT;
     spi_transaction_t transaction = {.length = size * 8, .tx_buffer = tx, .rx_buffer = rx};
     esp_err_t result = spi_device_polling_start(b->spi, &transaction, ticks_left(deadline));
@@ -50,9 +52,11 @@ static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t
     /* A hardware transaction is at most 3.84ms. Never return live DMA buffers. */
     result = spi_device_polling_end(b->spi, portMAX_DELAY);
     if (result != ESP_OK) return OKL_IO;
-    if (b->phase == 0) b->phase = 1;
-    else if (b->phase == 1) { b->pending_length = (size_t)rx[0] * 256 + rx[1]; b->phase = 2; }
-    else { b->phase = 0; b->pending_length = 0; }
+    if (b->phase == BUS_IDLE) b->phase = LENGTH_PENDING;
+    else if (b->phase == LENGTH_PENDING) {
+        b->pending_length = (size_t)rx[0] * 256 + rx[1];
+        b->phase = b->pending_length ? BODY_PENDING : ZERO_COMPLETE;
+    } else { b->phase = BUS_IDLE; b->pending_length = 0; }
     return ticks_left(deadline) ? OKL_OK : OKL_TIMEOUT;
 }
 
@@ -60,14 +64,24 @@ static okl_result recover(void *context, uint64_t deadline) {
     nxp_bus *b = context;
     uint8_t tx[OKL_SPI_LIMIT] = {0}, rx[OKL_SPI_LIMIT];
     /* A response can predate ESP startup. READY-low means its length is pending. */
-    if (b->phase == 0 && gpio_get_level(PIN_READY) == 0) b->phase = 1;
-    if (b->phase == 1) {
+    if (b->phase == BUS_IDLE && gpio_get_level(PIN_READY) == 0) b->phase = LENGTH_PENDING;
+    if (b->phase == LENGTH_PENDING) {
+        /* READY-high alone cannot distinguish an expired original-controller
+         * response from a stock response still being prepared. Keep the phase. */
         okl_result result = wait_level(0, deadline);
         if (result != OKL_OK) return result;
         result = transfer(context, tx, rx, 2, deadline);
         if (result != OKL_OK) return result;
     }
-    if (b->phase == 2) {
+    if (b->phase == ZERO_COMPLETE) {
+        /* The length was consumed and there is no body to drain. Wait for the
+         * peer to finish; retain this state on timeout instead of re-clocking
+         * the length or declaring an unobserved idle state. */
+        okl_result result = wait_level(1, deadline);
+        if (result == OKL_OK) b->phase = BUS_IDLE;
+        return result;
+    }
+    if (b->phase == BODY_PENDING) {
         if (b->pending_length < 7 || b->pending_length > OKL_SPI_LIMIT) return OKL_PROTOCOL;
         okl_result result = transfer(context, tx, rx, b->pending_length, deadline);
         if (result != OKL_OK) return result;
