@@ -8,7 +8,7 @@ await build({
   bundle: true,
   platform: "node",
   format: "esm",
-  target: "node24",
+  target: "node20",
   minify: true,
   banner: {
     js: "import {createRequire as __createRequire} from 'node:module'; const require=__createRequire(import.meta.url);",

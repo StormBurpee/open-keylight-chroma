@@ -75,7 +75,23 @@ test(
     let stderr = "";
     wss.on("connection", (ws) => {
       socket = ws;
-      ws.on("message", (data) => messages.push(JSON.parse(data.toString())));
+      ws.on("message", (data) => {
+        const message = JSON.parse(data.toString());
+        messages.push(message);
+        if (message.event === "getSettings")
+          ws.send(JSON.stringify({
+            event: "didReceiveSettings",
+            action: "org.openkeylight.chroma." + message.context,
+            context: message.context,
+            device: "deck",
+            payload: {
+              controller: "Keypad",
+              coordinates: { column: 0, row: 0 },
+              isInMultiAction: false,
+              settings,
+            },
+          }));
+      });
     });
     const info = {
       application: {
@@ -83,7 +99,7 @@ test(
         language: "en",
         platform: "windows",
         platformVersion: "10",
-        version: "7.1.0",
+        version: "7.0.3",
       },
       colors: {},
       devicePixelRatio: 1,
@@ -95,13 +111,13 @@ test(
           size: { columns: 5, rows: 3 },
         },
       ],
-      plugin: { uuid: "org.openkeylight.chroma", version: "0.1.0.0" },
+      plugin: { uuid: "org.openkeylight.chroma", version: "0.1.2.0" },
     };
     const plugin = fileURLToPath(
       new URL("../org.openkeylight.chroma.sdPlugin/", import.meta.url),
     );
     const child = spawn(
-      process.execPath,
+      process.env.OPEN_KEYLIGHT_PLUGIN_NODE || process.execPath,
       [
         "bin/plugin.js",
         "-port",
@@ -264,6 +280,7 @@ test(
       "property inspector connection read",
     );
     assert.equal(mutations.length, afterScene);
+    assert.equal(messages.filter((m) => m.event === "getSettings").length, 1);
     assert.equal(stderr, "");
   },
 );

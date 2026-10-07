@@ -1,5 +1,11 @@
 # Development record
 
+## Stream Deck installation and settings corrections
+
+The initial package required Stream Deck 7.1 and Node 24 while the installed application was 7.0.3. Version 0.1.2 targets Stream Deck 7.0 and Node 20, including the SDK's explicit legacy settings mode. Its compiled-plugin test now exercises settings requests and replies without message identifiers. The owner's app was upgraded to 7.6 during this work; all 25 tests pass using that installation's Node 20.20.0 runtime, and Elgato validation and packaging pass.
+
+The owner's first installed test also exposed a missing action identifier in the property inspector's `setSettings` message. The previous DOM harness incorrectly accepted that incomplete envelope. Save and readback messages now carry both the action type and instance, and the panel reports success only after matching settings return. A valid IPv4 address and mismatched readback have explicit regression coverage. The corrected installer is ready for the owner's live test; automated checks do not establish physical Stream Deck control.
+
 ## ESP control qualification and browser correction
 
 The corrected ESP application booted with controller readiness and passed four fresh native-readback checks: white at 5% and 5300 K, Off, static RGB at 5%, and Off. Each check matched its accepted revision and confirmed fields. The operator explicitly confirmed the trial based on these API/controller checks; optical behavior remains unverified. This is an original ESP application with the working legacy NXP controller.

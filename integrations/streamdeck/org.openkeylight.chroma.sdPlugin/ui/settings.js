@@ -2,6 +2,8 @@
 let socket,
   context,
   actionId,
+  pendingSave,
+  saveTimeout,
   settings = {};
 const $ = (id) => document.getElementById(id);
 function status(text, error = false) {
@@ -21,7 +23,7 @@ function send(event, payload) {
     JSON.stringify({
       event,
       context,
-      ...(event === "sendToPlugin" ? { action: actionId } : {}),
+      action: actionId,
       payload,
     }),
   );
@@ -48,6 +50,8 @@ window.connectElgatoStreamDeckSocket = (
     status("Settings are local to this action.");
   };
   socket.onclose = () => {
+    clearTimeout(saveTimeout);
+    pendingSave = undefined;
     $("save").disabled = true;
     $("check").disabled = true;
     status("Stream Deck connection closed.", true);
@@ -63,6 +67,21 @@ window.connectElgatoStreamDeckSocket = (
     if (data.event === "didReceiveSettings") {
       settings = data.payload.settings;
       fill();
+      if (pendingSave) {
+        const matches = Object.keys(pendingSave).every(
+          (key) => settings[key] === pendingSave[key],
+        );
+        clearTimeout(saveTimeout);
+        pendingSave = undefined;
+        $("save").disabled = false;
+        $("check").disabled = false;
+        status(
+          matches
+            ? "Settings saved and read back from Stream Deck. Ready to check connection."
+            : "Stream Deck returned different settings. Save again before checking connection.",
+          !matches,
+        );
+      }
     }
     if (data.event === "sendToPropertyInspector") {
       $("check").disabled = false;
@@ -90,17 +109,28 @@ $("settings").addEventListener("submit", (event) => {
       throw Error(
         "Use a full light origin, without a path, credentials or query.",
       );
-    settings = {
+    const next = {
       url: u.origin,
       token: $("token").value.trim(),
       step: Number($("step").value),
       scene: Number($("scene").value),
     };
-    send("setSettings", settings);
-    status(
-      "Settings saved. Check connection reads the API without changing output.",
-    );
+    pendingSave = next;
+    $("save").disabled = true;
+    $("check").disabled = true;
+    send("setSettings", next);
+    send("getSettings");
+    status("Saving settings…");
+    saveTimeout = setTimeout(() => {
+      pendingSave = undefined;
+      $("save").disabled = socket?.readyState !== 1;
+      $("check").disabled = socket?.readyState !== 1;
+      status("Stream Deck has not confirmed the saved settings. Reopen this action to check them.", true);
+    }, 4000);
   } catch (error) {
+    pendingSave = undefined;
+    $("save").disabled = socket?.readyState !== 1;
+    $("check").disabled = socket?.readyState !== 1;
     status(error.message, true);
   }
 });

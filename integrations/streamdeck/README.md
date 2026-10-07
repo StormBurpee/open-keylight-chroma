@@ -4,7 +4,7 @@ Local controls for the independent Open Keylight API v1. This plugin does not co
 
 ## Install
 
-1. Install Stream Deck 7.1 or later on Windows 10+ or macOS 12+. The manifest selects Stream Deck's bundled Node 24 runtime.
+1. Install Stream Deck 7.0 or later on Windows 10+ or macOS 12+. The manifest selects Stream Deck's bundled Node 20 runtime.
 2. Open the built `dist/org.openkeylight.chroma.streamDeckPlugin` package to install it. Building this project does **not** install it or modify Stream Deck profiles.
 3. Drag an action from **Open Keylight Chroma** onto a key or compatible dial.
 4. Enter the light's explicit local origin, such as `http://open-keylight.local` or `http://192.168.1.42`, and paste a token obtained from the dashboard's pairing flow. Initial access uses the physical button; an already trusted client can open another pairing window. Save settings.
@@ -37,7 +37,16 @@ npm run validate
 npm run pack
 ```
 
-Dependencies are pinned in the lockfile. The official SDK is `@elgato/streamdeck` 3.0.1 and the local CLI is 1.10.1. These commands were verified with Node 22.16; for SDK development Elgato recommends Node 24+. The shipped manifest runs with Node 24. The build bundles the SDK into the plugin; no npm install is required on the user's machine. Nothing is installed globally.
+Dependencies are pinned in the lockfile. The official SDK is `@elgato/streamdeck` 3.0.1 and the local CLI is 1.10.1. Build and test tools use Node 22.16 or newer; the shipped plugin targets Node 20 and uses Stream Deck's bundled runtime. The build bundles the SDK into the plugin; no npm install is required on the user's machine. Nothing is installed globally.
+
+To exercise the compiled plugin with the runtime from an installed Stream Deck application, set `OPEN_KEYLIGHT_PLUGIN_NODE` to that executable before running the tests. On Windows:
+
+```powershell
+$env:OPEN_KEYLIGHT_PLUGIN_NODE = "$env:APPDATA\Elgato\StreamDeck\NodeJS\20.20.0\node.exe"
+npm test
+```
+
+Use the runtime path from your installed version. The runtime harness covers registration, power, brightness dial, scene recall, recording lock and settings replies without message identifiers. The plugin explicitly enables the SDK's legacy settings behaviour for compatibility with Stream Deck 7.0.
 
 `npm test` includes pure API/queue tests, a DOM harness for the settings panel, and a real compiled-plugin run connected to fake Stream Deck WebSocket events and a loopback HTTP light. It exercises key power, dial brightness, recording lock/unlock, scene recall and a read-only connection check. It never contacts a physical light. A passing harness and package validation do not replace verification in a real Stream Deck application/device; that installation has not been performed as part of this build.
 

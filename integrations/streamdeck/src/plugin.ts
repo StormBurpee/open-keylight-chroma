@@ -235,4 +235,6 @@ setInterval(() => {
     },
   );
 }, 5000).unref();
+// Stream Deck 7.0 predates SDK 3's settings message identifiers.
+streamDeck.settings.useLegacySettingsBehavior = true;
 await streamDeck.connect();

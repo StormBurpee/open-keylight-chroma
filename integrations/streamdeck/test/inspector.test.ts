@@ -55,8 +55,8 @@ async function page(kind = "brightness") {
     $: (id: string) => dom.window.document.getElementById(id),
   };
 }
-test("property inspector registers UI UUID but stores settings under the action context", async () => {
-  const { dom, sent, $ } = await page();
+test("property inspector addresses settings with both action type and instance, then verifies saved values", async () => {
+  const { dom, sent, ws, $ } = await page();
   assert.deepEqual(sent[0], {
     event: "registerPropertyInspector",
     uuid: "pi-uuid",
@@ -67,8 +67,35 @@ test("property inspector registers UI UUID but stores settings under the action 
   assert.deepEqual(sent[1], {
     event: "setSettings",
     context: "key-context",
+    action: "org.openkeylight.chroma.brightness",
     payload: { url: "http://light.local", token: "secret", step: 5, scene: 2 },
   });
+  assert.deepEqual(sent[2], {
+    event: "getSettings",
+    context: "key-context",
+    action: "org.openkeylight.chroma.brightness",
+  });
+  assert.equal($("check").disabled, true);
+  assert.equal($("status").textContent, "Saving settings…");
+  ws.onmessage({ data: JSON.stringify({
+    event: "didReceiveSettings", context: "key-context",
+    payload: { settings: sent[1].payload },
+  }) });
+  assert.match($("status").textContent, /saved and read back/);
+  assert.equal($("check").disabled, false);
+  dom.window.close();
+});
+
+test("a valid IPv4 origin survives save/readback; a rejected save is not labelled successful", async () => {
+  const { dom, sent, ws, $ } = await page();
+  $("url").value = "http://192.168.86.248";
+  $("settings").dispatchEvent(new dom.window.Event("submit", { cancelable: true }));
+  assert.equal((sent[1].payload as any).url, "http://192.168.86.248");
+  ws.onmessage({ data: JSON.stringify({
+    event: "didReceiveSettings", context: "key-context", payload: { settings: {} },
+  }) });
+  assert.match($("status").textContent, /returned different settings/);
+  assert.equal($("status").classList.contains("error"), true);
   dom.window.close();
 });
 test("connection check sends only a read-check request and explicitly avoids claiming token validation", async () => {

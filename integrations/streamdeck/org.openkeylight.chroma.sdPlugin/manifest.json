@@ -1,7 +1,7 @@
 {
   "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
   "Name": "Open Keylight Chroma",
-  "Version": "0.1.0.0",
+  "Version": "0.1.2.0",
   "Author": "Open Keylight contributors",
   "Description": "Local controls for Open Keylight Chroma: power, brightness, scenes and recording lock.",
   "Icon": "imgs/plugin",
@@ -11,7 +11,7 @@
   "UUID": "org.openkeylight.chroma",
   "SDKVersion": 2,
   "Software": {
-    "MinimumVersion": "7.1"
+    "MinimumVersion": "7.0"
   },
   "OS": [
     {
@@ -24,7 +24,7 @@
     }
   ],
   "Nodejs": {
-    "Version": "24"
+    "Version": "20"
   },
   "PropertyInspectorPath": "ui/settings.html",
   "Actions": [

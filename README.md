@@ -46,7 +46,7 @@ The repository contains original application source, interface documentation and
 
 ## Build and test
 
-ESP32 builds are pinned to **ESP-IDF 5.5.5**. Use Node.js 22 or newer for the dashboard and CMake with a C compiler and cJSON development package for portable tests (`libcjson-dev` on Ubuntu). The Stream Deck plugin requests the host application's Node 24 runtime.
+ESP32 builds are pinned to **ESP-IDF 5.5.5**. Use Node.js 22 or newer for the dashboard and CMake with a C compiler and cJSON development package for portable tests (`libcjson-dev` on Ubuntu). The Stream Deck plugin runs on Stream Deck 7.0 or newer using the host application's Node 20 runtime.
 
 ```sh
 cmake -S . -B build/host
