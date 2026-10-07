@@ -3,7 +3,7 @@
 #include <string.h>
 #include "../../firmware/main/app.c"
 
-static unsigned checks, locked, sequence, worker_order, network_order, http_order, trial_order, pairing, buttons, mqtt;
+static unsigned checks, locked, sequence, worker_order, network_order, http_order, trial_order, journal_order, pairing, buttons, mqtt;
 static bool worker_failure;
 #define CHECK(value) do { ++checks; if (!(value)) { fprintf(stderr,"FAIL app line %u: %s\n",__LINE__,#value); exit(1); } } while (0)
 void mock_log(const char *tag,const char *format,...) { CHECK(tag && format); }
@@ -14,6 +14,7 @@ int64_t esp_timer_get_time(void) { return 500000; }
 void esp_read_mac(uint8_t *out,unsigned type) { CHECK(type==ESP_MAC_WIFI_STA);memcpy(out,"ABCDEF",6); }
 const char *esp_err_to_name(esp_err_t result) { (void)result;return "injected"; }
 esp_err_t app_storage_init(void) { return ESP_OK; }
+esp_err_t app_controller_update_init(void) { journal_order=++sequence;return ESP_OK; }
 void app_trial_start(void) { trial_order=++sequence; }
 void app_pair_window(void) { ++pairing; }
 esp_err_t app_worker_start(void) { worker_order=++sequence;return worker_failure?ESP_FAIL:ESP_OK; }
@@ -28,7 +29,7 @@ static void reset(void) {
 int main(void) {
     for(unsigned failure=0;failure<2;++failure) {
         reset();worker_failure=failure!=0;app_main();
-        CHECK(trial_order<worker_order && worker_order<network_order && network_order<http_order);
+        CHECK(journal_order<trial_order && trial_order<worker_order && worker_order<network_order && network_order<http_order);
         CHECK(http_order && pairing==1 && buttons==1 && mqtt==1 && !locked);
         if(failure)CHECK(!strcmp(app.controller_status,"fault") && !app.controller_ready);
     }

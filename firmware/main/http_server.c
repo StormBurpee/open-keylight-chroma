@@ -106,8 +106,8 @@ static cJSON *device_json(void) {
     cJSON_AddNumberToObject(controller, "last_health_ms", app.controller_last_health_ms);
     app_unlock();
     cJSON *capabilities = cJSON_AddObjectToObject(json, "capabilities");
-    const char *names[] = {"white", "color", "transitions", "effects", "scenes", "settings", "ota"};
-    for (unsigned i = 0; i < 7; i++) cJSON_AddBoolToObject(capabilities, names[i], true);
+    const char *names[] = {"white", "color", "transitions", "effects", "scenes", "settings", "ota", "controller_ota"};
+    for (unsigned i = 0; i < sizeof(names) / sizeof(*names); i++) cJSON_AddBoolToObject(capabilities, names[i], true);
     cJSON_AddBoolToObject(capabilities, "white_transitions", false);
     const char *effects[] = {"none", "aurora", "breathe"};
     cJSON_AddItemToObject(capabilities, "effect_names", cJSON_CreateStringArray(effects, 3));
@@ -190,6 +190,11 @@ static esp_err_t route(httpd_req_t *request) {
     if (!strcmp(request->uri, "/api/v1/settings")) return http_settings(request);
     if (!strncmp(request->uri, "/api/v1/scenes", 14)) return http_scenes(request);
     if (!strcmp(request->uri, "/api/v1/update") && request->method == HTTP_POST) return http_update(request);
+    if (!strcmp(request->uri, "/api/v1/controller/update")) {
+        if (request->method == HTTP_GET) return http_json(request, 200, app_controller_update_json());
+        if (request->method == HTTP_POST) return http_controller_update(request);
+        return http_error(request, 405, "Method not allowed");
+    }
     if (api) return http_error(request, 404, "Unknown API route");
     if (request->method != HTTP_GET) return http_error(request, 405, "Method not allowed");
     for (unsigned i = 0; i < WEB_ASSET_COUNT; i++) {

@@ -44,6 +44,33 @@ static uint32_t part_reply;
 static okl_controller_status remote_status;
 static uint64_t boot_at, reset_at;
 static bool reset_done;
+static bool journal_blocked, job_queued, finish_durable, finished_confirmed, off_on_read;
+static unsigned transport_inits, job_runs, job_finishes;
+static okl_loader_result job_result;
+
+bool app_controller_update_blocked(void) { return journal_blocked; }
+bool app_controller_update_take(app_controller_job *out) {
+    if (!job_queued || journal_blocked) return false;
+    CHECK(!locks); job_queued = false; app.updating = true; app.controller_ready = false;
+    memset(out, 0, sizeof(*out)); out->id = 7; out->image.version.component[1] = 1;
+    return true;
+}
+okl_loader_result app_controller_worker_run(okl_nxp *driver, const app_controller_job *job, okl_loader_audit *audit) {
+    CHECK(driver == &nxp && job->id == 7 && !app.controller_ready && app.updating && !locks); ++job_runs;
+    memset(audit, 0, sizeof(*audit));
+    if (job_result == OKL_LOADER_OK) {
+        original = true; boot_at = now; remote_status.trial_confirmed = 0;
+        controller = (okl_light_state){.temperature_kelvin = 5000};
+    }
+    return job_result;
+}
+bool app_controller_update_finish(uint32_t id, const okl_loader_audit *audit, okl_loader_result result, bool confirmed, const char *error) {
+    CHECK(id == 7 && audit && result == job_result && error && !app.controller_ready && !locks); ++job_finishes;
+    finished_confirmed = confirmed; app.updating = false;
+    bool success = finish_durable && confirmed && result == OKL_LOADER_OK;
+    journal_blocked = !success;
+    return success;
+}
 
 uint64_t app_now_ms(void) { return now; }
 static uint64_t transport_now(void *unused) { (void)unused; return now * 1000; }
@@ -61,8 +88,12 @@ void app_mqtt_publish(void) {
         app.desired.rgb = (kl_rgb){10, 180, 90}; app.desired.brightness = 80;
         app.output_revision = 1; snprintf(app.operation, sizeof(app.operation), "queued");
     }
+    if (off_on_read && publications == 1 && app.controller_ready) {
+        CHECK(app.updating); app.desired.power = false; ++app.output_revision;
+    }
 }
 esp_err_t app_nxp_transport_init(okl_nxp *driver, const uint8_t mac[6]) {
+    ++transport_inits;
     CHECK(driver && mac); memset(driver, 0, sizeof(*driver)); driver->transport.now_us = transport_now;
     memcpy(driver->identity, mac, 6); return ESP_OK;
 }
@@ -176,6 +207,8 @@ static void reset(void) {
     part_reply = CONTROLLER_PART_ID;
     remote_status = (okl_controller_status){.role = OKL_ROLE_LIGHTING, .capabilities = 3,
         .part_id = CONTROLLER_PART_ID, .reset_cause = 0x13};
+    journal_blocked = job_queued = finished_confirmed = off_on_read = false; finish_durable = true;
+    transport_inits = job_runs = job_finishes = 0; job_result = OKL_LOADER_OK;
     controller = (okl_light_state){.effect = 1, .color_count = 1, .colors = {255, 0, 32},
                                   .color_brightness = 102, .temperature_kelvin = 4500};
 }
@@ -313,11 +346,31 @@ static void test_health_and_reset_no_replay(void) {
     reset(); delay_step = 1000; stop_after = 3; run();
     CHECK(versions == 3 && status_reads == 3 && !confirmations && app.controller_ready);
 }
+static void test_update_worker_gates(void) {
+    reset(); journal_blocked = true; stop_after = 3; delay_step = 1000; run();
+    CHECK(!transport_inits && !versions && !status_reads && !claims && !writes && !confirmations);
+    reset(); app.updating = true; stop_after = 3; delay_step = 1000; run();
+    CHECK(versions == 3 && status_reads == 3 && !writes); /* Health continues during HTTP reservation. */
+    reset(); app.updating = true; off_on_read = true; run();
+    CHECK(writes == 2 && !controller.effect && !controller.white_brightness && app.completed_revision == 1);
+    for (unsigned failure = 0; failure < 3; ++failure) {
+        reset(); job_queued = true; app.desired.power = true; app.desired.effect = KL_EFFECT_AURORA;
+        app.output_revision = 9; stop_after = 3; delay_step = 1000;
+        if (failure == 1) finish_durable = false;
+        if (failure == 2) job_result = OKL_LOADER_UNRESOLVED;
+        run(); CHECK(job_runs == 1 && job_finishes == 1 && !writes);
+        CHECK(confirmations == (failure == 2 ? 0u : 1u));
+        CHECK(app.controller_ready == (failure == 0));
+        if (!failure) CHECK(!app.desired.power && app.desired.effect == KL_EFFECT_NONE && app.reported_valid && app.output_revision == 10);
+        else CHECK(journal_blocked && app.output_revision == 9 && !app.controller_ready);
+    }
+}
 int main(void) {
     test_startup(); test_startup_queued_transition(); test_setup_and_frame_failures();
     test_transition_completion();
     test_original_bootstrap(); test_original_rejections(); test_confirmation_readback_and_ambiguity();
     test_health_and_reset_no_replay();
+    test_update_worker_gates();
     printf("%u worker assertions passed; actual source, no device I/O.\n", checks);
     return 0;
 }

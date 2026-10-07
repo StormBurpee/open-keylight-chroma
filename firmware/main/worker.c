@@ -1,6 +1,7 @@
 #include "app.h"
 #include "nxp_transport.h"
 #include "output_policy.h"
+#include "controller_worker.h"
 #include "freertos/task.h"
 #include <stdio.h>
 #include <string.h>
@@ -144,7 +145,8 @@ static void lifecycle_observed(const char *status, bool connected) {
     app_unlock();
 }
 
-static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision) {
+static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision, bool publish_ready,
+                            const okl_firmware_version *expected_version) {
     okl_reply reply; okl_firmware_version version;
     okl_controller_status status = {0}; uint32_t part;
     bool mismatch = false;
@@ -156,6 +158,7 @@ static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision) {
     }
     okl_result result = getter(OKL_GET_FIRMWARE, &reply);
     if (result != OKL_OK || (result = okl_reply_decode_firmware(&version, &reply)) != OKL_OK) return result;
+    if (expected_version && memcmp(version.component, expected_version->component, 4)) return OKL_VERIFY;
     app_lock(); snprintf(app.controller_version, sizeof(app.controller_version), "%u.%u.%u.%u",
         version.component[0], version.component[1], version.component[2], version.component[3]); app_unlock();
     result = getter(OKL_GET_CONTROLLER_STATUS, &reply);
@@ -207,14 +210,15 @@ static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision) {
     /* Discard every pre-readiness output revision before opening the gate.
      * A later user mutation is observed normally; a reset cannot replay one. */
     *seen_revision = app.output_revision;
-    app.controller_ready = app.controller_connected = true;
-    snprintf(app.controller_status, sizeof(app.controller_status), "ready");
+    app.controller_connected = true;
+    app.controller_ready = publish_ready;
+    snprintf(app.controller_status, sizeof(app.controller_status), "%s", publish_ready ? "ready" : "starting");
     app.controller_trial_confirmed = lifecycle.backend == CONTROLLER_ORIGINAL && lifecycle.status.trial_confirmed;
     app.controller_last_health_ms = app_now_ms();
     if (app.output_revision == 0) { snprintf(app.operation, sizeof(app.operation), "idle"); app.error[0] = 0; }
-    app_event_locked("controller", "controller.ready", lifecycle.backend == CONTROLLER_LEGACY ?
+    if (publish_ready) app_event_locked("controller", "controller.ready", lifecycle.backend == CONTROLLER_LEGACY ?
         "Legacy 1.3 controller; no original trial confirmation" : "Original controller identity and trial verified");
-    app_unlock(); app_mqtt_publish();
+    app_unlock(); if (publish_ready) app_mqtt_publish();
     return OKL_OK;
 }
 
@@ -244,7 +248,7 @@ static void worker_task(void *unused) {
     bool mismatch = false;
     kl_frame current = {0};
     uint32_t seen_revision = 0;
-    okl_result result = bootstrap(&current, &seen_revision);
+    okl_result result = app_controller_update_blocked() ? OKL_OK : bootstrap(&current, &seen_revision, true, NULL);
     if (result != OKL_OK) {
         app_lock(); bool classified = !strcmp(app.controller_status, "diagnostic") || !strcmp(app.controller_status, "unsupported"); app_unlock();
         if (!classified) fault(result, false);
@@ -253,9 +257,43 @@ static void worker_task(void *unused) {
     kl_transition transition = {0};
     bool rendering = false;
     for (;;) {
+        app_controller_job job;
+        if (app_controller_update_take(&job)) {
+            rendering = false;
+            okl_loader_audit audit;
+            okl_loader_result updated = app_controller_worker_run(&nxp, &job, &audit);
+            bool confirmed = false;
+            if (updated == OKL_LOADER_OK) {
+                lifecycle.confirmation_uncertain = false;
+                result = bootstrap(&current, &seen_revision, false, &job.image.version);
+                confirmed = result == OKL_OK && lifecycle.backend == CONTROLLER_ORIGINAL && lifecycle.status.trial_confirmed;
+            }
+            bool durable = app_controller_update_finish(job.id, &audit, updated, confirmed,
+                "Controller update unresolved; explicit recovery required");
+            app_lock();
+            seen_revision = app.output_revision;
+            app.controller_ready = durable;
+            if (durable) {
+                /* The authorized update leaves dark readback as the desired
+                 * state. Old scenes cannot resume after journal completion. */
+                app.desired = app.reported; ++app.revision; ++app.output_revision;
+                seen_revision = app.output_revision;
+                app.reported_revision = app.completed_revision = app.output_revision;
+                snprintf(app.controller_status, sizeof(app.controller_status), "ready");
+            }
+            app_unlock(); app_mqtt_publish();
+            next_health = app_now_ms() + HEALTH_INTERVAL_MS;
+            continue;
+        }
+        /* A receiving reservation (including ESP OTA) still permits the
+         * already accepted Off command and ordinary health. Only the taken
+         * synchronous controller job excludes all other SPI work. */
+        if (app_controller_update_blocked()) {
+            rendering = false; vTaskDelay(pdMS_TO_TICKS(10)); continue;
+        }
         app_lock(); bool ready = app.controller_ready; app_unlock();
         if (app_now_ms() >= next_health) {
-            result = ready ? health() : bootstrap(&current, &seen_revision);
+            result = ready ? health() : bootstrap(&current, &seen_revision, true, NULL);
             next_health = app_now_ms() + HEALTH_INTERVAL_MS;
             if (result != OKL_OK) {
                 rendering = false;
@@ -326,8 +364,10 @@ static void worker_task(void *unused) {
 
 esp_err_t app_worker_start(void) {
     memset(&lifecycle, 0, sizeof(lifecycle));
-    lifecycle_observed("starting", false);
-    esp_err_t result = app_nxp_transport_init(&nxp, app.mac);
-    if (result != ESP_OK) return result;
+    if (!app_controller_update_blocked()) {
+        lifecycle_observed("starting", false);
+        esp_err_t result = app_nxp_transport_init(&nxp, app.mac);
+        if (result != ESP_OK) return result;
+    }
     return xTaskCreate(worker_task, "lighting", 8192, NULL, 8, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }

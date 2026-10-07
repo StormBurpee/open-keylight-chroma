@@ -7,6 +7,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include <stddef.h>
 
 #define KL_SCENES 8
 #define KL_HISTORY 32
@@ -70,6 +71,12 @@ esp_err_t app_worker_start(void);
 void app_mqtt_start(void);
 void app_mqtt_publish(void);
 void app_button_start(void);
+/* Receiving reservations own app.updating. Submit transfers the immutable
+ * package only on 202; the caller frees it on all other outcomes. */
+int app_controller_update_begin(uint32_t *job_id);
+int app_controller_update_submit(uint32_t job_id, uint8_t *package, size_t size);
+void app_controller_update_cancel_upload(uint32_t job_id);
+cJSON *app_controller_update_json(void);
 
 /* Caller owns returned JSON. submit is atomic and returns an HTTP-style result. */
 cJSON *app_state_json(void);

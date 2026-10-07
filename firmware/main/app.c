@@ -4,6 +4,7 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "http_internal.h"
+#include "controller_job.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -65,6 +66,8 @@ void app_main(void) {
         ESP_LOGE("keylight", "Storage unavailable (%s); shared NVS was not erased", esp_err_to_name(storage));
         snprintf(app.error, sizeof(app.error), "Storage unavailable; shared NVS preserved");
     }
+    /* Journal errors retain diagnostics/HTTP but gate automatic controller I/O. */
+    (void)app_controller_update_init();
     app_trial_start();
     if (!app.token_count) app_pair_window();
     esp_err_t worker = app_worker_start();

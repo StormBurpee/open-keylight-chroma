@@ -8,12 +8,17 @@
 #include <string.h>
 
 enum { PIN_READY = 4, PIN_MOSI = 12, PIN_MISO = 13, PIN_CLOCK = 14, PIN_SELECT = 15 };
-enum { BUS_IDLE, LENGTH_PENDING, BODY_PENDING, ZERO_COMPLETE, BUS_UNKNOWN };
+enum { BUS_IDLE, LENGTH_PENDING, BODY_PENDING, ZERO_COMPLETE, BUS_UNKNOWN, RESET_PENDING };
 typedef struct {
     spi_device_handle_t spi;
     SemaphoreHandle_t mutex;
     unsigned phase;
     size_t pending_length;
+    uint32_t loader_lease;
+    unsigned loader_known;
+    uint8_t reset_opcode;
+    uint64_t reset_completed_us;
+    okl_loader_delivery last_delivery;
 } nxp_bus;
 static nxp_bus bus;
 
@@ -44,7 +49,8 @@ static okl_result wait_ready(void *unused, uint64_t deadline) { (void)unused; re
 
 static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t size, uint64_t deadline) {
     nxp_bus *b = context;
-    if (b->phase == ZERO_COMPLETE || b->phase == BUS_UNKNOWN) return OKL_NEEDS_RECOVERY;
+    b->last_delivery = OKL_LOADER_NOT_SENT;
+    if (b->phase == ZERO_COMPLETE || b->phase == BUS_UNKNOWN || b->phase == RESET_PENDING) return OKL_NEEDS_RECOVERY;
     if (!size || size > OKL_SPI_LIMIT || !ticks_left(deadline)) return OKL_TIMEOUT;
     spi_transaction_t transaction = {.length = size * 8, .tx_buffer = tx, .rx_buffer = rx};
     /* IDF 5.5 only accepts portMAX_DELAY here. This host has one device and
@@ -52,6 +58,7 @@ static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t
      * acquire it. Check the application deadline before and after wire I/O. */
     esp_err_t result = spi_device_polling_start(b->spi, &transaction, portMAX_DELAY);
     if (result != ESP_OK) return result == ESP_ERR_TIMEOUT ? OKL_TIMEOUT : OKL_IO;
+    b->last_delivery = OKL_LOADER_MAYBE_SENT;
     /* At 1MHz the longest wire payload is 3.84ms. Scheduling or hardware
      * failure can exceed that; never return while DMA owns these buffers. */
     result = spi_device_polling_end(b->spi, portMAX_DELAY);
@@ -61,6 +68,7 @@ static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t
         b->phase = BUS_UNKNOWN;
         return OKL_IO;
     }
+    b->last_delivery = OKL_LOADER_SENT_COMPLETE;
     if (b->phase == BUS_IDLE) b->phase = LENGTH_PENDING;
     else if (b->phase == LENGTH_PENDING) {
         b->pending_length = (size_t)rx[0] * 256 + rx[1];
@@ -72,7 +80,7 @@ static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t
 static okl_result recover(void *context, uint64_t deadline) {
     nxp_bus *b = context;
     uint8_t tx[OKL_SPI_LIMIT] = {0}, rx[OKL_SPI_LIMIT];
-    if (b->phase == BUS_UNKNOWN) return OKL_NEEDS_RECOVERY;
+    if (b->phase == BUS_UNKNOWN || b->phase == RESET_PENDING) return OKL_NEEDS_RECOVERY;
     /* A response can predate ESP startup. READY-low means its length is pending. */
     if (b->phase == BUS_IDLE && gpio_get_level(PIN_READY) == 0) b->phase = LENGTH_PENDING;
     if (b->phase == LENGTH_PENDING) {
@@ -97,6 +105,149 @@ static okl_result recover(void *context, uint64_t deadline) {
         if (result != OKL_OK) return result;
     }
     return wait_level(1, deadline);
+}
+
+static int loader_driver(const okl_nxp *driver) {
+    return driver && driver->transport.user == &bus && driver->transport.transfer == transfer;
+}
+
+okl_result app_nxp_loader_acquire(okl_nxp *driver, uint32_t lease_id, uint64_t deadline) {
+    if (!loader_driver(driver) || !lease_id) return OKL_INVALID;
+    okl_result result = lock_bus(&bus, deadline);
+    if (result != OKL_OK) return result;
+    if (bus.loader_lease) result = OKL_BUSY;
+    else if (bus.phase != BUS_IDLE || driver->needs_recovery) result = OKL_NEEDS_RECOVERY;
+    else { bus.loader_lease = lease_id; bus.loader_known = 0; bus.reset_opcode = 0; }
+    unlock_bus(&bus); return result;
+}
+
+void app_nxp_loader_release(okl_nxp *driver, uint32_t lease_id) {
+    /* Called by the sole SPI worker after every in-flight callback returned.
+     * Preserve an unresolved reset/DMA phase for later explicit recovery. */
+    if (!loader_driver(driver) || !lease_id || bus.loader_lease != lease_id) return;
+    bus.loader_lease = 0; bus.loader_known = 0; bus.reset_opcode = 0;
+    if (bus.phase != BUS_IDLE) driver->needs_recovery = 1;
+}
+
+okl_result app_nxp_loader_enter(okl_nxp *driver, uint32_t lease_id,
+                               okl_loader_source source, okl_loader_delivery *delivery, uint64_t deadline) {
+    uint8_t tx[97] = {0}, rx[97], args[2] = {1, 0}; okl_report reply;
+    if (delivery) *delivery = OKL_LOADER_NOT_SENT;
+    if (!loader_driver(driver) || !delivery || !lease_id || bus.loader_lease != lease_id ||
+        (source != OKL_LOADER_FROM_ORIGINAL && source != OKL_LOADER_FROM_LEGACY_1_3)) return OKL_INVALID;
+    okl_result result = lock_bus(&bus, deadline);
+    if (result != OKL_OK) return result;
+    result = arm_ready(&bus, deadline);
+    if (result != OKL_OK) goto finished_entry;
+    memcpy(tx, driver->identity, 6);
+    (void)okl_report_encode(tx + 7, 0, 0, 4, args, source == OKL_LOADER_FROM_ORIGINAL ? 1 : 2);
+    result = transfer(&bus, tx, rx, 97, deadline); *delivery = bus.last_delivery;
+    if (source == OKL_LOADER_FROM_LEGACY_1_3) {
+        /* This exact legacy command resets synchronously; there is no ACK. */
+        if (*delivery == OKL_LOADER_SENT_COMPLETE) goto reset_armed;
+        goto finished_entry;
+    }
+    if (result != OKL_OK) goto finished_entry;
+    result = wait_ready(&bus, deadline);
+    if (result != OKL_OK) goto finished_entry;
+    memset(tx, 0, sizeof(tx)); result = transfer(&bus, tx, rx, 2, deadline);
+    if (result != OKL_OK) goto finished_entry;
+    if (rx[0] || rx[1] != 97) { result = OKL_PROTOCOL; goto finished_entry; }
+    result = transfer(&bus, tx, rx, 97, deadline);
+    if (result != OKL_OK) goto finished_entry;
+    if (rx[6] || memcmp(rx, driver->identity, 6) || okl_report_decode(&reply, rx + 7, 90) != OKL_OK ||
+        reply.status != 2 || reply.transaction || reply.command_class || reply.opcode != 4 ||
+        reply.size != 1 || reply.arguments[0] != 1) { result = OKL_PROTOCOL; goto finished_entry; }
+reset_armed:
+    bus.phase = RESET_PENDING; bus.reset_opcode = 0x84;
+    bus.reset_completed_us = esp_timer_get_time(); bus.loader_known = 0;
+finished_entry:
+    if (result != OKL_OK || bus.phase == RESET_PENDING) driver->needs_recovery = 1;
+    unlock_bus(&bus); return result;
+}
+
+static okl_result loader_request(okl_nxp *driver, uint32_t lease_id, const uint8_t request[90],
+                                okl_loader_delivery *delivery, okl_report *report, int reset) {
+    if (delivery) *delivery = OKL_LOADER_NOT_SENT;
+    if (!loader_driver(driver) || !delivery || !request || !lease_id || bus.loader_lease != lease_id) return OKL_INVALID;
+    if (okl_report_decode(report, request, 90) != OKL_OK || report->status || report->transaction || report->command_class != 0x10)
+        return OKL_INVALID;
+    if (reset) {
+        if ((report->opcode != 4 && report->opcode != 5) || report->size || !bus.loader_known) return OKL_INVALID;
+    } else if (report->opcode != 0x80 && report->opcode != 1 && report->opcode != 2 && report->opcode != 0x83)
+        return OKL_INVALID;
+    return OKL_OK;
+}
+
+okl_result app_nxp_loader_exchange(okl_nxp *driver, uint32_t lease_id, const uint8_t request[90],
+                                  uint8_t response[90], okl_loader_delivery *delivery, uint64_t deadline) {
+    okl_report report; uint8_t tx[97] = {0}, rx[97];
+    okl_result result = loader_request(driver, lease_id, request, delivery, &report, 0);
+    if (result != OKL_OK || !response) return result == OKL_OK ? OKL_INVALID : result;
+    result = lock_bus(&bus, deadline);
+    if (result != OKL_OK) return result;
+    result = arm_ready(&bus, deadline);
+    if (result != OKL_OK) goto finished;
+    memcpy(tx, driver->identity, 6); memcpy(tx + 7, request, 90);
+    result = transfer(&bus, tx, rx, 97, deadline); *delivery = bus.last_delivery;
+    if (result != OKL_OK) goto finished;
+    result = wait_ready(&bus, deadline);
+    if (result != OKL_OK) goto finished;
+    memset(tx, 0, sizeof(tx)); result = transfer(&bus, tx, rx, 2, deadline);
+    if (result != OKL_OK) goto finished;
+    if (rx[0] || rx[1] != 97) { result = OKL_PROTOCOL; goto finished; }
+    result = transfer(&bus, tx, rx, 97, deadline);
+    if (result != OKL_OK) goto finished;
+    if ((rx[6] == 0 && memcmp(rx, driver->identity, 6)) ||
+        (rx[6] == 4 && memcmp(rx, (const uint8_t[6]){0}, 6)) || (rx[6] != 0 && rx[6] != 4)) {
+        result = OKL_PROTOCOL; goto finished;
+    }
+    memcpy(response, rx + 7, 90);
+    if (report.opcode == 0x80 && report.size == 80) {
+        unsigned zero = 1;
+        for (unsigned i = 0; i < 80; ++i) if (report.arguments[i]) zero = 0;
+        if (zero && okl_loader_information_valid(response)) bus.loader_known = 1;
+    }
+finished:
+    if (result != OKL_OK) driver->needs_recovery = 1;
+    unlock_bus(&bus); return result;
+}
+
+okl_result app_nxp_loader_send_only(okl_nxp *driver, uint32_t lease_id, const uint8_t request[90],
+                                   okl_loader_delivery *delivery, uint64_t deadline) {
+    okl_report report; uint8_t tx[97] = {0}, rx[97];
+    okl_result result = loader_request(driver, lease_id, request, delivery, &report, 1);
+    if (result != OKL_OK) return result;
+    result = lock_bus(&bus, deadline);
+    if (result != OKL_OK) return result;
+    result = arm_ready(&bus, deadline);
+    if (result == OKL_OK) {
+        memcpy(tx, driver->identity, 6); memcpy(tx + 7, request, 90);
+        result = transfer(&bus, tx, rx, 97, deadline); *delivery = bus.last_delivery;
+        if (*delivery == OKL_LOADER_SENT_COMPLETE) {
+            bus.phase = RESET_PENDING; bus.reset_opcode = report.opcode;
+            bus.reset_completed_us = esp_timer_get_time(); bus.loader_known = 0;
+        }
+    }
+    if (result != OKL_OK || bus.phase == RESET_PENDING) driver->needs_recovery = 1;
+    unlock_bus(&bus); return result;
+}
+
+okl_result app_nxp_loader_reset_boundary(okl_nxp *driver, uint32_t lease_id, uint8_t opcode,
+                                        okl_loader_delivery delivery, uint64_t deadline) {
+    if (!loader_driver(driver) || !lease_id || bus.loader_lease != lease_id) return OKL_INVALID;
+    okl_result result = lock_bus(&bus, deadline);
+    if (result != OKL_OK) return result;
+    if (bus.phase != RESET_PENDING || bus.reset_opcode != opcode ||
+        delivery != OKL_LOADER_SENT_COMPLETE ||
+        (uint64_t)esp_timer_get_time() - bus.reset_completed_us < OKL_LOADER_QUIET_US) result = OKL_NEEDS_RECOVERY;
+    else if (!ticks_left(deadline)) result = OKL_TIMEOUT;
+    else if (gpio_get_level(PIN_READY) != 1) result = OKL_NEEDS_RECOVERY;
+    else {
+        bus.phase = BUS_IDLE; bus.pending_length = 0; bus.reset_opcode = 0;
+        driver->needs_recovery = 0; result = OKL_OK;
+    }
+    unlock_bus(&bus); return result;
 }
 
 esp_err_t app_nxp_transport_init(okl_nxp *driver, const uint8_t mac[6]) {

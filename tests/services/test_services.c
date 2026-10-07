@@ -11,6 +11,7 @@ typedef struct { char key[32]; unsigned char data[4096]; size_t size; } blob;
 static blob stored[16], pending;
 static unsigned stored_count, locked, writes, commits, closes, random_counter, recovery_requests;
 static unsigned issued_routes, submit_calls, settings_calls, update_calls, confirm_calls, session_closes;
+static unsigned controller_update_calls, controller_status_calls;
 static unsigned request_reads, response_code, server_handlers;
 static uint64_t now_ms, receive_delay;
 static size_t body_used, chunk;
@@ -88,6 +89,8 @@ int app_activate_scene(unsigned index, const char *actor, uint32_t expected, boo
 esp_err_t http_settings(httpd_req_t *request) { ++settings_calls; return http_json(request, 200, cJSON_CreateObject()); }
 esp_err_t http_scenes(httpd_req_t *request) { return http_json(request, 200, cJSON_CreateObject()); }
 esp_err_t http_update(httpd_req_t *request) { ++update_calls; return http_json(request, 202, cJSON_CreateObject()); }
+esp_err_t http_controller_update(httpd_req_t *request) { ++controller_update_calls; return http_json(request, 202, cJSON_CreateObject()); }
+cJSON *app_controller_update_json(void) { ++controller_status_calls; return cJSON_CreateObject(); }
 static const char *header(const char *name) {
     if (!strcmp(name, "Host")) return header_host;
     if (!strcmp(name, "Origin")) return header_origin;
@@ -188,7 +191,7 @@ static void http_tests(void) {
     cJSON *reply = cJSON_Parse(response_body); CHECK(reply); const cJSON *value = cJSON_GetObjectItemCaseSensitive(reply, "token");
     CHECK(cJSON_IsString(value) && strlen(value->valuestring) == 64); memcpy(token, value->valuestring, 65); cJSON_Delete(reply);
     snprintf(auth, sizeof(auth), "Bearer %s", token);
-    const char *write_routes[] = {"/api/v1/state", "/api/v1/settings", "/api/v1/scenes/1", "/api/v1/confirm", "/api/v1/update", "/api/v1/clients/0123456789abcdef"};
+    const char *write_routes[] = {"/api/v1/state", "/api/v1/settings", "/api/v1/scenes/1", "/api/v1/confirm", "/api/v1/update", "/api/v1/controller/update", "/api/v1/clients/0123456789abcdef"};
     for (unsigned i = 0; i < sizeof(write_routes)/sizeof(write_routes[0]); ++i) {
         request_reset("{}"); request.uri = write_routes[i]; request.method = HTTP_POST; request.content_len = 2;
         CHECK(route(&request) == ESP_OK && response_code == 401 && !request_reads);
@@ -215,6 +218,17 @@ static void http_tests(void) {
     CHECK(route(&request) == ESP_OK && response_code == 200);
     request.uri = "/api/v1/confirm"; request.method = HTTP_POST;
     CHECK(route(&request) == ESP_OK && response_code == 200 && confirm_calls == 1);
+    CHECK(!controller_update_calls && !controller_status_calls);
+    request_reset(""); request.uri = "/api/v1/controller/update"; request.method = HTTP_GET;
+    CHECK(route(&request) == ESP_OK && response_code == 200 && controller_status_calls == 1 && !controller_update_calls);
+    request.method = HTTP_POST;
+    CHECK(route(&request) == ESP_OK && response_code == 401 && !controller_update_calls && !request_reads);
+    header_auth = auth; header_origin = "http://evil";
+    CHECK(route(&request) == ESP_OK && response_code == 403 && !controller_update_calls);
+    header_origin = "http://192.0.2.1";
+    CHECK(route(&request) == ESP_OK && response_code == 202 && controller_update_calls == 1);
+    request.method = HTTP_DELETE;
+    CHECK(route(&request) == ESP_OK && response_code == 405 && controller_update_calls == 1);
     request_reset("{\"power\":true}"); header_auth = auth; request.uri = "/api/v1/state"; request.method = HTTP_PATCH; request.content_len = strlen(body);
     CHECK(route(&request) == ESP_OK && response_code == 202 && submit_calls == 1);
     const char *bad_json[] = {"{", "{}{}", "{\"label\":\"a\",\"label\":\"b\"}", "{\"label\":\"\\u0000evil\"}", "[]", "{\"label\":1}", "{\"label\":\"a\",\"extra\":0}"};

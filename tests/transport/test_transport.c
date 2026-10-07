@@ -65,7 +65,11 @@ esp_err_t spi_device_polling_start(spi_device_handle_t device, spi_transaction_t
     if (active_step->request) {
         okl_report report;
         CHECK(active_step->size == 97 && !memcmp(tx, identity, 6) && tx[6] == 0);
-        CHECK(okl_report_decode(&report, tx + 7, 90) == OKL_OK && report.command_class == 0 && report.opcode == 0x87);
+        CHECK(okl_report_decode(&report, tx + 7, 90) == OKL_OK);
+        if (active_step->request == 1) CHECK(report.command_class == 0 && report.opcode == 0x87);
+        else if (active_step->request == 2) CHECK(report.command_class == 0x10 && report.transaction == 0);
+        else CHECK(!report.command_class && report.opcode == 4 && !report.transaction && report.arguments[0] == 1 &&
+            report.size == (active_step->request == 3 ? 1 : 2) && !report.arguments[1]);
     } else for (size_t i = 0; i < active_step->size; ++i) CHECK(tx[i] == 0);
     if (active_step->start_result != ESP_OK) return active_step->start_result;
     in_flight = transaction; ++wire_starts; return ESP_OK;
@@ -271,6 +275,124 @@ static void test_deadline_and_mutex(void) {
     deny_mutex = 0; next_getter_works();
     reset(); fail_allocation = 1; CHECK(app_nxp_transport_init(&driver, identity) == ESP_ERR_NO_MEM && !starts);
 }
+static void loader_report(uint8_t out[90], uint8_t opcode, const uint8_t *args, size_t size) {
+    CHECK(okl_report_encode(out, 0, 0x10, opcode, args, size) == OKL_OK);
+}
+static void known_loader(void) {
+    CHECK(app_nxp_loader_acquire(&driver, 17, time_us + 10000) == OKL_OK);
+    uint8_t request[90], response[90], args[80] = {0}; okl_loader_delivery delivery;
+    loader_report(request, 0x80, args, sizeof(args));
+    step(97, 2, 0); length_step(97, 0);
+    spi_step *body = step(97, 0, 1); memcpy(body->response, identity, 6);
+    const uint8_t info[] = {3,0x18,1,2,0,0,0,2,0x5d}; memcpy(args, info, sizeof(info));
+    loader_report(body->response + 7, 0x80, args, sizeof(args)); body->response[7] = 2;
+    CHECK(app_nxp_loader_exchange(&driver, 17, request, response, &delivery, time_us + 10000) == OKL_OK);
+    CHECK(delivery == OKL_LOADER_SENT_COMPLETE && okl_loader_information_valid(response));
+    CHECK(bus.loader_known && bus.phase == BUS_IDLE && !driver.needs_recovery);
+}
+static void test_loader_lease_and_qualification(void) {
+    reset(); uint8_t request[90]; okl_loader_delivery delivery;
+    loader_report(request, 5, NULL, 0);
+    CHECK(app_nxp_loader_send_only(&driver, 17, request, &delivery, 10000) == OKL_INVALID);
+    CHECK(delivery == OKL_LOADER_NOT_SENT && !starts);
+    CHECK(app_nxp_loader_acquire(&driver, 0, 10000) == OKL_INVALID);
+    CHECK(app_nxp_loader_acquire(&driver, 17, 10000) == OKL_OK);
+    CHECK(app_nxp_loader_acquire(&driver, 18, 10000) != OKL_OK);
+    CHECK(app_nxp_loader_send_only(&driver, 17, request, &delivery, 10000) == OKL_INVALID && !starts);
+    app_nxp_loader_release(&driver, 18); CHECK(bus.loader_lease == 17);
+    app_nxp_loader_release(&driver, 17); CHECK(!bus.loader_lease);
+    reset(); known_loader();
+    CHECK(app_nxp_loader_send_only(&driver, 18, request, &delivery, time_us + 10000) == OKL_INVALID);
+    request[8] ^= 1;
+    CHECK(app_nxp_loader_send_only(&driver, 17, request, &delivery, time_us + 10000) == OKL_INVALID);
+    loader_report(request, 2, NULL, 0);
+    CHECK(app_nxp_loader_send_only(&driver, 17, request, &delivery, time_us + 10000) == OKL_INVALID);
+    CHECK(starts == 3); consumed();
+}
+static void test_expected_reset_is_one_shot(void) {
+    for (uint8_t opcode = 4; opcode <= 5; ++opcode) {
+        reset(); known_loader(); uint8_t request[90]; okl_loader_delivery delivery;
+        loader_report(request, opcode, NULL, 0); step(97, 2, 1);
+        CHECK(app_nxp_loader_send_only(&driver, 17, request, &delivery, time_us + 10000) == OKL_OK);
+        CHECK(delivery == OKL_LOADER_SENT_COMPLETE && bus.phase == RESET_PENDING && driver.needs_recovery && starts == 4);
+        CHECK(recovery(10000) == OKL_NEEDS_RECOVERY && starts == 4);
+        CHECK(execute(10000) == OKL_NEEDS_RECOVERY && starts == 4);
+        CHECK(app_nxp_loader_reset_boundary(&driver, 17, opcode, delivery, time_us + 10000) != OKL_OK);
+        time_us += OKL_LOADER_QUIET_US;
+        CHECK(app_nxp_loader_reset_boundary(&driver, 18, opcode, delivery, time_us + 10000) != OKL_OK);
+        CHECK(app_nxp_loader_reset_boundary(&driver, 17, (uint8_t)(9-opcode), delivery, time_us + 10000) != OKL_OK);
+        CHECK(app_nxp_loader_reset_boundary(&driver, 17, opcode, OKL_LOADER_MAYBE_SENT, time_us + 10000) != OKL_OK);
+        ready = 0;
+        CHECK(app_nxp_loader_reset_boundary(&driver, 17, opcode, delivery, time_us + 10000) != OKL_OK);
+        CHECK(bus.phase == RESET_PENDING && driver.needs_recovery && starts == 4);
+        ready = 1;
+        CHECK(app_nxp_loader_reset_boundary(&driver, 17, opcode, delivery, time_us + 10000) == OKL_OK);
+        CHECK(bus.phase == BUS_IDLE && !driver.needs_recovery && starts == 4);
+        CHECK(app_nxp_loader_reset_boundary(&driver, 17, opcode, delivery, time_us + 10000) != OKL_OK);
+        app_nxp_loader_release(&driver, 17); next_getter_works();
+    }
+}
+static void test_reset_delivery_failures_stay_distinct(void) {
+    for (unsigned failure = 0; failure < 3; ++failure) {
+        reset(); known_loader(); uint8_t request[90]; okl_loader_delivery delivery;
+        loader_report(request, 5, NULL, 0); spi_step *send = step(97, 2, 1);
+        if (failure == 0) send->start_result = ESP_ERR_TIMEOUT;
+        if (failure == 1) send->end_result = ESP_ERR_INVALID_STATE;
+        if (failure == 2) send->duration = 20000;
+        CHECK(app_nxp_loader_send_only(&driver, 17, request, &delivery, time_us + 10000) != OKL_OK);
+        CHECK(delivery == (failure == 0 ? OKL_LOADER_NOT_SENT : failure == 1 ? OKL_LOADER_MAYBE_SENT : OKL_LOADER_SENT_COMPLETE));
+        time_us += OKL_LOADER_QUIET_US;
+        okl_result result = app_nxp_loader_reset_boundary(&driver, 17, 5, OKL_LOADER_SENT_COMPLETE, time_us + 10000);
+        CHECK((result == OKL_OK) == (failure == 2));
+        if (failure == 1) {
+            CHECK(bus.phase == BUS_UNKNOWN && recovery(10000) == OKL_NEEDS_RECOVERY);
+            app_nxp_loader_release(&driver, 17);
+            CHECK(app_nxp_loader_acquire(&driver, 18, time_us + 10000) == OKL_NEEDS_RECOVERY);
+        }
+        CHECK(starts == 4 && !locked && !in_flight);
+    }
+}
+static void test_unqualified_reply_cannot_arm_reset(void) {
+    reset(); known_loader(); app_nxp_loader_release(&driver, 17);
+    CHECK(app_nxp_loader_acquire(&driver, 18, time_us + 10000) == OKL_OK);
+    uint8_t request[90], response[90], args[80] = {0}; okl_loader_delivery delivery;
+    loader_report(request, 0x80, args, sizeof(args));
+    step(97, 2, 0); length_step(97, 0); spi_step *body = step(97, 0, 1);
+    memcpy(body->response, identity, 6); loader_report(body->response+7, 0x80, args, sizeof(args)); body->response[7] = 2;
+    CHECK(app_nxp_loader_exchange(&driver, 18, request, response, &delivery, time_us + 10000) == OKL_OK);
+    CHECK(!bus.loader_known);
+    loader_report(request, 5, NULL, 0);
+    CHECK(app_nxp_loader_send_only(&driver, 18, request, &delivery, time_us + 10000) == OKL_INVALID);
+    CHECK(starts == 6); consumed();
+}
+static void test_typed_entry_boundary(void) {
+    for (unsigned legacy = 0; legacy < 2; ++legacy) {
+        reset(); CHECK(app_nxp_loader_acquire(&driver, 17, 10000) == OKL_OK);
+        step(97, legacy ? 4 : 3, legacy ? 1 : 0);
+        if (!legacy) {
+            length_step(97, 0); spi_step *s = step(97, 0, 1); memcpy(s->response, identity, 6);
+            uint8_t yes = 1; CHECK(okl_report_encode(s->response + 7, 0, 0, 4, &yes, 1) == OKL_OK); s->response[7] = 2;
+        }
+        okl_loader_delivery delivery;
+        CHECK(app_nxp_loader_enter(&driver, 17, legacy ? OKL_LOADER_FROM_LEGACY_1_3 : OKL_LOADER_FROM_ORIGINAL,
+            &delivery, 10000) == OKL_OK);
+        CHECK(delivery == OKL_LOADER_SENT_COMPLETE && bus.phase == RESET_PENDING && bus.reset_opcode == 0x84);
+        CHECK(starts == (legacy ? 1u : 3u)); /* No speculative legacy ACK clocks. */
+        time_us += OKL_LOADER_QUIET_US;
+        CHECK(app_nxp_loader_reset_boundary(&driver, 17, 4, delivery, time_us + 10000) != OKL_OK);
+        CHECK(app_nxp_loader_reset_boundary(&driver, 17, 0x84, delivery, time_us + 10000) == OKL_OK);
+        CHECK(!driver.needs_recovery); consumed();
+    }
+    reset(); CHECK(app_nxp_loader_acquire(&driver, 17, 10000) == OKL_OK);
+    okl_loader_delivery delivery;
+    CHECK(app_nxp_loader_enter(&driver, 17, OKL_LOADER_FROM_FRESH_RESIDENT, &delivery, 10000) == OKL_INVALID && !starts);
+    step(97, 3, 0); length_step(97, 0); spi_step *s = step(97, 0, 1); memcpy(s->response, identity, 6);
+    uint8_t no = 0; CHECK(okl_report_encode(s->response + 7, 0, 0, 4, &no, 1) == OKL_OK); s->response[7] = 2;
+    CHECK(app_nxp_loader_enter(&driver, 17, OKL_LOADER_FROM_ORIGINAL, &delivery, 10000) == OKL_PROTOCOL);
+    time_us += OKL_LOADER_QUIET_US;
+    CHECK(app_nxp_loader_reset_boundary(&driver, 17, 0x84, delivery, time_us + 10000) != OKL_OK && driver.needs_recovery);
+    consumed();
+}
 int main(void) {
     test_normal_and_zero(); test_zero_wait_preserves_boundary(); test_zero_length_crosses_deadline();
     test_startup_zero(); test_zero_completion_does_not_clock(); test_retained_stale_body();
@@ -278,5 +400,8 @@ int main(void) {
     test_deadline_after_consumed_body(); test_deadline_after_consumed_request(); test_retry_length_after_start_rejected();
     test_end_error_keeps_unknown_phase(); test_start_error_has_not_clocked_wire();
     test_idf_rejects_finite_polling_start(); test_deadline_and_mutex();
+    test_loader_lease_and_qualification(); test_expected_reset_is_one_shot();
+    test_reset_delivery_failures_stay_distinct(); test_unqualified_reply_cannot_arm_reset();
+    test_typed_entry_boundary();
     printf("native transport: %u checks across %u cases passed\n", checks, cases); return 0;
 }

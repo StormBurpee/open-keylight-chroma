@@ -24,9 +24,10 @@ exe = OUT / ("test_transport.exe" if os.name == "nt" else "test_transport")
 driver = ROOT / "firmware/components/keylight_nxp"
 command = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wpedantic", "-g", "-O1",
            "-fsanitize=address", "-fno-omit-frame-pointer"]
-for path in (HERE, stubs, ROOT / "firmware/main", driver / "include"):
+loader = ROOT / "firmware/components/keylight_loader"
+for path in (HERE, stubs, ROOT / "firmware/main", driver / "include", loader / "include"):
     command += ["-I", str(path)]
-sources = [HERE / "test_transport.c", driver / "okl_nxp.c"]
+sources = [HERE / "test_transport.c", driver / "okl_nxp.c", loader / "okl_loader.c"]
 command += [str(path) for path in sources] + ["-o", str(exe)]
 subprocess.run(command, check=True)
 env = os.environ.copy()
@@ -38,6 +39,7 @@ if result.returncode:
     result.check_returncode()
 sources += [ROOT / "firmware/main/nxp_transport.c", ROOT / "firmware/main/nxp_transport.h",
             driver / "include/okl_nxp.h", HERE / "transport_mocks.h", Path(__file__)]
+sources += [loader / "include/okl_loader.h"]
 report = {"status": "pass", "sanitizer": "AddressSanitizer", "device_operations": 0,
           "output": result.stdout.strip(), "source_sha256": {
               path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources},

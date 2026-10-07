@@ -8,6 +8,7 @@ esp_err_t http_error(httpd_req_t *request, int status, const char *message);
 esp_err_t http_settings(httpd_req_t *request);
 esp_err_t http_scenes(httpd_req_t *request);
 esp_err_t http_update(httpd_req_t *request);
+esp_err_t http_controller_update(httpd_req_t *request);
 esp_err_t app_trial_confirm(void);
 void app_trial_start(void);
 bool app_trial_pending(void);
