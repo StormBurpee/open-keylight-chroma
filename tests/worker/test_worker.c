@@ -566,7 +566,7 @@ static void test_original_rejections(void) {
 static void test_confirmation_readback_and_ambiguity(void) {
     original_reset(); confirmation_missing = true; delay_step = 1000; stop_after = 3; run();
     CHECK(confirmations == 1 && !writes && !app.controller_ready && lifecycle.confirmation_uncertain);
-    CHECK(faults == 3); /* An ACK without confirmed FC never opens readiness or retries FD. */
+    CHECK(faults == 1); /* Repeated health checks neither retry FD nor flood history. */
     original_reset(); lost_confirmation_ack = true; delay_step = 1000; stop_after = 3; run();
     CHECK(confirmations == 1 && recoveries == 1 && app.controller_ready && app.controller_trial_confirmed);
     CHECK(!writes && faults == 1 && !lifecycle.confirmation_uncertain); /* Fresh FC resolves the uncertain ACK. */
@@ -759,6 +759,14 @@ static void test_brownout_recovery(void) {
     CHECK(writes==2 && confirmations==1 && brownout_verified==1 && app.controller_ready);
 }
 int main(void) {
+    reset();
+    fault(OKL_TIMEOUT, false);
+    for (unsigned i=0;i<100;++i) fault(OKL_TIMEOUT, false);
+    CHECK(faults==1 && !app.controller_ready && !app.reported_valid);
+    fault(OKL_VERIFY, true); CHECK(faults==2);
+    fault(OKL_VERIFY, true); CHECK(faults==2);
+    snprintf(app.operation,sizeof(app.operation),"pending");
+    fault(OKL_VERIFY, true); CHECK(faults==3);
     test_brownout_recovery();
     test_availability_lifecycle();
     test_startup(); test_startup_queued_transition(); test_setup_and_frame_failures();

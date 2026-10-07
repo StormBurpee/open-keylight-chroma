@@ -69,19 +69,24 @@ static void publish_native(const okl_light_state *s, bool adopt, uint32_t revisi
 
 static void fault(okl_result result, bool fresh_mismatch) {
     app_lock();
-    snprintf(app.operation, sizeof(app.operation), "error");
+    char detail[sizeof(app.error)];
     if (fresh_mismatch) {
-        snprintf(app.error, sizeof(app.error), "Controller getter differs from requested output; command was not replayed");
+        snprintf(detail, sizeof(detail), "Controller getter differs from requested output; command was not replayed");
     } else {
-        snprintf(app.error, sizeof(app.error), "Controller exchange failed (%u); command was not replayed", (unsigned)result);
+        snprintf(detail, sizeof(detail), "Controller exchange failed (%u); command was not replayed", (unsigned)result);
         app.controller_connected = false; app.reported_valid = false; app.reported_fields = 0;
         app.controller_ready = false;
         snprintf(app.controller_status, sizeof(app.controller_status), "fault");
     }
     if (brownout_recovery.failed) {
-        snprintf(app.error, sizeof(app.error), "Brownout recovery Off was not verified (%u); no retry this boot", (unsigned)result);
-        app_event_locked("controller", "brownout.recovery_failed", app.error);
-    } else app_event_locked("controller", "command.failed", app.error);
+        snprintf(detail, sizeof(detail), "Brownout recovery Off was not verified (%u); no retry this boot", (unsigned)result);
+    }
+    bool changed = strcmp(app.operation, "error") || strcmp(app.error, detail);
+    snprintf(app.operation, sizeof(app.operation), "error");
+    memcpy(app.error, detail, strlen(detail) + 1);
+    /* Repeated health failures must not evict the event that caused the fault. */
+    if (changed) app_event_locked("controller", brownout_recovery.failed ?
+        "brownout.recovery_failed" : "command.failed", app.error);
     app_unlock();
     app_mqtt_availability();
 }

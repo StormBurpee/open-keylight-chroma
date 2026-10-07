@@ -194,3 +194,16 @@ MQTT availability now follows controller readiness, connectivity and update/reco
 Physical double-click scene selection now advances only after an accepted activation. Recording Lock and busy refusals retain the selection, while empty slots remain skippable. GPIO configuration and task creation errors are returned and recorded without preventing dashboard or MQTT startup.
 
 Actual-source sanitizer tests cover broker events, queue/enqueue failure, publication races, sampled button gestures and startup failures. The worker, controller-job and ESP-update suites verify representative lifecycle notifications outside the application mutex. These are offline changes; MQTT delivery and physical-button behavior have not been requalified on the lamp in this slice.
+
+
+## Brownout startup recovery
+
+A separately scoped startup path now responds to ESP brownout resets by validating controller identity and ownership, sending native Off once, and requiring fresh Off readback before controls become available. It does not adopt or replay the retained high-output state. An uncertain setter, mismatched getter, ownership failure or failed release leaves output unavailable for that boot without a repeated Off attempt; HTTP recovery remains available. Ordinary reset reasons retain the existing startup behavior.
+
+Targeted actual-worker sanitizer cases cover both supported backends, both Off setters and uncertain replies, readback and release failures, unsupported identities, no repeated mutation across later health deadlines, ordinary-restart adoption and fresh original-controller trial confirmation. This is recovery from the demonstrated reset loop, not a root-cause fix. Brownout protection and Wi-Fi power settings remain unchanged; no hardware validation was performed by this implementation slice.
+
+## ESP update interruption with the original controller
+
+The first attempt to install ESP 0.1.6 from 0.1.5 with the original lighting controller did not complete. Off was getter-confirmed before the upload; the HTTP client timed out waiting for its response. The ESP later returned with its original version and monotonically increasing uptime, while its NXP exchange was faulted. This was not another ESP reset. A whole-light power cycle restored both original applications, controller readiness and confirmed Off.
+
+ESP-IDF's bulk application erase can suspend the host longer than the original controller's 100 ms pending-reply window. The update indicator currently shares that interval without flash/SPI exclusion. This establishes a missing coordination mechanism; the exact upload duration was not captured, so it does not by itself explain every part of the timeout. Sequential erase and transaction exclusion are being developed before another attempt. Repeated identical controller faults now keep the first history entry rather than evicting the initiating event; actual-source tests verify that a changed failure or new operation still records a new event.
