@@ -1,7 +1,7 @@
 #include "update_indicator_output.h"
 #include <string.h>
 
-enum { FRAME_MS = 20, GUARD_MS = 250, PURPLE_MS = 300, RESTORE_BEFORE_MS = 1400,
+enum { FRAME_MS = 20, GUARD_MS = 250, VERIFIED_HOLD_MS = 300, RESTORE_BEFORE_MS = 1400,
        FAILURE_MS = 1600, HANDOFF_MS = 1200 };
 
 static uint64_t clock_us(const okl_nxp *d) { return d->transport.now_us(d->transport.user); }
@@ -222,7 +222,7 @@ kl_update_output_result kl_update_output_step(kl_update_output *o, okl_nxp *d,
         o->failure_seen = true; o->failure_ms = now; o->next_frame_ms = 0;
     }
     bool verified = e->phase == KL_UPDATE_VERIFIED;
-    if ((verified && now >= plus(e->verified_ms, PURPLE_MS)) ||
+    if ((verified && now >= plus(e->verified_ms, VERIFIED_HOLD_MS)) ||
         (o->failure_seen && now >= plus(o->failure_ms, FAILURE_MS))) return restore(o, d, verified);
     if (now >= o->next_guard_ms) {
         r = coherent(o, d);

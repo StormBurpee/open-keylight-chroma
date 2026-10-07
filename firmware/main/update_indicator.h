@@ -18,7 +18,8 @@ typedef struct {
 
 enum { KL_UPDATE_INDICATOR_MASTER = 12 }; /* Native 0..255 scale, about 4.7%. */
 enum { KL_UPDATE_PROGRESS_RECEIVED = 990, KL_UPDATE_PROGRESS_VERIFIED = 1000 };
-/* RGB before byte rounding, with a required low native master. Full-range
+/* Blue at zero, cyan in between, green at verified completion.
+ * RGB before byte rounding, with a required low native master. Full-range
  * channel modulation avoids an unnecessarily coarse 12-step byte stream.
  * The worker must keep white zero, mute before setup, install the first custom
  * frame, then enable exactly this master; never expose these RGB values with

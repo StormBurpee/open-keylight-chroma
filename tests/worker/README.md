@@ -8,7 +8,7 @@ Canonical colour tests cover zero-duration frame-to-Static ordering, no master m
 
 ESP upload indication uses this same worker and suspends the ordinary renderer.
 The actual coordinator is compiled into the worker harness: tests exercise blue
-upload frames, verified purple, two red failure pulses, exact native restoration,
+upload frames, verified green, two red failure pulses, exact native restoration,
 an interrupted custom renderer, Recording Lock, pending/new Off, poisoned setup
 and journal exclusion. Its own periodic lease/mode checks and per-frame ACKs run
 while indication is active; the ordinary health/bootstrap loop resumes afterward.

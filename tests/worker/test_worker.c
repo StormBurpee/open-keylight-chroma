@@ -667,12 +667,15 @@ static void test_update_indicator_worker(void) {
         run();CHECK(upload.generation==1 && upload.phase==(success?KL_UPDATE_VERIFIED:KL_UPDATE_FAILED));
         CHECK(same(&saved,&controller) && app.reported_valid && app.controller_ready && !claimed && !faults);
         CHECK(claims==2 && releases==2 && writes>10 && !app.output_revision && !app.completed_revision);
-        bool blue=false,purple=false,red=false;
+        bool blue=false,green=false,red=false;
         for(unsigned n=0;n<writes;++n)if(sent[n].command==OKL_SET_FRAME){
             const uint8_t *a=sent[n].arguments;
-            CHECK(!a[6]);blue|=!a[5] && a[7]!=0;purple|=a[5]!=0 && a[7]!=0;red|=a[5]!=0 && !a[7];
+            CHECK(!a[5] || (!a[6] && !a[7]));
+            blue|=!a[5] && !a[6] && a[7]!=0;
+            green|=!a[5] && a[6]!=0 && !a[7];
+            red|=a[5]!=0 && !a[6] && !a[7];
         }
-        CHECK(blue && (success?purple && !red:red));
+        CHECK(blue && (success?green && !red:red));
     }
     /* A new Off cancels the generation, runs once, and no later progress or
      * verified notification can restart the cosmetic animation. */

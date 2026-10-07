@@ -55,7 +55,7 @@ static void lifecycle(void) {
     CHECK(kl_update_indicator_progress(&s) == 990);
     CHECK(kl_update_indicator_verify(&s, UINT64_MAX));
     CHECK(kl_update_indicator_sample(&s, UINT64_MAX, &color));
-    CHECK(color.b >= 43 && color.b <= 255 && color.master == 12);
+    CHECK(color.g >= 43 && color.g <= 255 && !color.b && !color.r && color.master == 12);
     CHECK(!kl_update_indicator_advance(NULL, 1) && !kl_update_indicator_verify(NULL, 1));
     kl_update_indicator_fail(NULL);
     CHECK(!kl_update_indicator_progress(NULL));
@@ -65,7 +65,7 @@ static void lifecycle(void) {
 static void breathing(void) {
     kl_update_indicator s = {0};
     kl_update_indicator_color c, previous, repeat, symmetric;
-    bool blue_levels[256] = {0};
+    bool breath_levels[256] = {0};
     CHECK(kl_update_indicator_begin(&s, 1000, 10000));
     CHECK(kl_update_indicator_sample(&s, 10000, &c) && c.r == 0 && c.g == 0 && c.b == 43);
     CHECK(kl_update_indicator_sample(&s, 11600, &c) && c.r == 0 && c.g == 0 && c.b == 255);
@@ -75,40 +75,41 @@ static void breathing(void) {
         CHECK(kl_update_indicator_sample(&s, 10000, &previous));
         for (uint32_t ms = 0; ms <= 3200; ++ms) {
             CHECK(kl_update_indicator_sample(&s, 10000+ms, &c));
-            CHECK(c.r >= 0 && c.r <= 170 && c.g == 0 && c.b >= 43 && c.b <= 255);
-            CHECK(c.master == 12 && c.r*c.master/255.0f <= 8 && c.b*c.master/255.0f <= 12);
-            blue_levels[(unsigned)(c.b+.5f)] = true;
-            CHECK(isfinite(c.r) && isfinite(c.b));
-            CHECK(fabsf(c.b-previous.b) < .21f); /* No discontinuity at turnaround/wrap. */
-            if (ms && ms <= 1600) CHECK(c.b >= previous.b);
-            if (ms > 1600) CHECK(c.b <= previous.b);
+            float level = c.g + c.b, last = previous.g + previous.b;
+            CHECK(c.r == 0 && c.g >= 0 && c.b >= 0 && level >= 43 && level <= 255);
+            CHECK(c.master == 12 && level*c.master/255.0f <= 12);
+            breath_levels[(unsigned)(level+.5f)] = true;
+            CHECK(isfinite(c.g) && isfinite(c.b));
+            CHECK(fabsf(level-last) < .21f); /* No discontinuity at turnaround/wrap. */
+            if (ms && ms <= 1600) CHECK(level >= last);
+            if (ms > 1600) CHECK(level <= last);
             CHECK(kl_update_indicator_sample(&s, 10000+ms+3200, &repeat));
             CHECK(c.r == repeat.r && c.g == repeat.g && c.b == repeat.b);
             CHECK(kl_update_indicator_sample(&s, 10000+3200-ms, &symmetric));
-            CHECK(c.r == symmetric.r && c.b == symmetric.b);
+            CHECK(c.g == symmetric.g && c.b == symmetric.b);
             /* Fixed-point rounding may change the ratio by less than one
-             * sub-byte quantum, never amplify the bounded blue channel. */
-            float ideal = c.b * kl_update_indicator_progress(&s) / 1500.0f;
-            CHECK(c.r <= ideal+.00001f && c.r > ideal-1.0f/256.0f-.00001f);
+             * sub-byte quantum, never amplify the combined channel level. */
+            float ideal = level * kl_update_indicator_progress(&s) / 1000.0f;
+            CHECK(c.g <= ideal+.00002f && c.g > ideal-1.0f/256.0f-.00002f);
             previous = c;
         }
     }
     unsigned distinct = 0;
-    for (unsigned n=0; n<256; ++n) if (blue_levels[n]) ++distinct;
+    for (unsigned n=0; n<256; ++n) if (breath_levels[n]) ++distinct;
     CHECK(distinct == 213); /* Hardware appearance still depends on controller PWM. */
     CHECK(kl_update_indicator_verify(&s, 15000));
-    CHECK(kl_update_indicator_sample(&s, 11600, &c) && c.r == 170 && c.b == 255 && c.g == 0);
+    CHECK(kl_update_indicator_sample(&s, 11600, &c) && c.r == 0 && c.b == 0 && c.g == 255);
     CHECK(kl_update_indicator_sample(&s, UINT64_MAX, &c));
-    CHECK(c.r <= 170 && c.b <= 255 && c.g == 0 && c.master == 12);
+    CHECK(c.r == 0 && c.b == 0 && c.g <= 255 && c.master == 12);
     /* Progress affects hue only. A fixed breath phase never moves toward blue
      * as accepted bytes increase, including a single-chunk upload. */
     memset(&s, 0, sizeof(s)); CHECK(kl_update_indicator_begin(&s, 65535, 0));
-    float red = 0;
+    float green = 0, blue = 255;
     for (uint32_t n = 0; n <= 65535; ++n) {
         CHECK(kl_update_indicator_advance(&s, n));
         CHECK(kl_update_indicator_sample(&s, 1600, &c));
-        CHECK(c.r >= red && c.r < 170 && c.b == 255);
-        red = c.r;
+        CHECK(c.r == 0 && c.g >= green && c.g < 255 && c.b <= blue && c.b > 0 && c.g+c.b == 255);
+        green = c.g; blue = c.b;
     }
 }
 

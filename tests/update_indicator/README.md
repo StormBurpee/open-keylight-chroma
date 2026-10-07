@@ -22,7 +22,7 @@ backlog. Ownership, mode, white-off and master settings are rechecked every
 250ms; frame acceptance is an ACK, not a framebuffer or optical measurement.
 
 Progress is capped at 99% until SHA, application validation and boot-slot
-selection all succeed. Verified uploads have a 300ms purple dwell, followed by
+selection all succeed. Verified uploads have a 300ms green dwell, followed by
 bounded restoration ending no later than 1400ms after verification. The separate
 reboot task still runs after its 1500ms grace and never depends on animation.
 Failed accepted uploads get two low red pulses over 1600ms, including a failure
@@ -47,7 +47,7 @@ have a hard admission/wire cutoff; tests cover verification published while an
 older receiving snapshot waits behind flash and preservation of stricter caller
 deadlines. The native transport suite separately tests the real admission path.
 `tests/worker/run_tests.py` additionally exercises the actual worker integration,
-including pending Off, lock, failure red, verified purple and renderer resume.
+including pending Off, lock, failure red, verified green and renderer resume.
 
 Hard crashes, power loss, unknown transport state and deadline exhaustion can
 prevent the indication or restoration. They do not cause retries or delay boot.

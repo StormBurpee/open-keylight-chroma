@@ -1,7 +1,7 @@
 #include "update_indicator.h"
 #include <string.h>
 
-enum { BREATH_HALF_MS = 1600, BLUE_MIN = 43, BLUE_MAX = 255, CHANNEL_SCALE = 256 };
+enum { BREATH_HALF_MS = 1600, CHANNEL_MIN = 43, CHANNEL_MAX = 255, CHANNEL_SCALE = 256 };
 
 bool kl_update_indicator_begin(kl_update_indicator *state, uint32_t bytes, uint64_t now_ms) {
     if (!state || !bytes || state->phase == KL_UPDATE_RECEIVING || state->phase == KL_UPDATE_VERIFIED)
@@ -54,12 +54,12 @@ bool kl_update_indicator_sample(const kl_update_indicator *state, uint64_t now_m
     uint32_t x = position <= BREATH_HALF_MS ? position : 2u * BREATH_HALF_MS - position;
     uint64_t eased = (uint64_t)x * x * (3u * BREATH_HALF_MS - 2u * x);
     uint64_t denominator = (uint64_t)BREATH_HALF_MS * BREATH_HALF_MS * BREATH_HALF_MS;
-    uint32_t blue_q8 = BLUE_MIN * CHANNEL_SCALE +
-        (uint32_t)((BLUE_MAX-BLUE_MIN) * CHANNEL_SCALE * eased / denominator);
-    uint32_t red_q8 = (uint32_t)((uint64_t)blue_q8 * kl_update_indicator_progress(state) * 2u /
-                                (3u * KL_UPDATE_PROGRESS_VERIFIED));
-    color->r = (float)red_q8 / CHANNEL_SCALE;
-    color->b = (float)blue_q8 / CHANNEL_SCALE;
+    uint32_t level_q8 = CHANNEL_MIN * CHANNEL_SCALE +
+        (uint32_t)((CHANNEL_MAX-CHANNEL_MIN) * CHANNEL_SCALE * eased / denominator);
+    uint32_t green_q8 = (uint32_t)((uint64_t)level_q8 * kl_update_indicator_progress(state) /
+                                  KL_UPDATE_PROGRESS_VERIFIED);
+    color->g = (float)green_q8 / CHANNEL_SCALE;
+    color->b = (float)(level_q8 - green_q8) / CHANNEL_SCALE;
     color->master = KL_UPDATE_INDICATOR_MASTER;
     return true;
 }
@@ -71,8 +71,8 @@ bool kl_update_indicator_failure_sample(uint64_t elapsed_ms, kl_update_indicator
     uint32_t position = (uint32_t)(elapsed_ms % 800);
     uint32_t x = position <= 400 ? position : 800 - position;
     uint64_t eased = (uint64_t)x * x * (1200 - 2 * x);
-    color->r = (float)(BLUE_MIN * CHANNEL_SCALE +
-        (uint32_t)((BLUE_MAX - BLUE_MIN) * CHANNEL_SCALE * eased / UINT64_C(64000000))) / CHANNEL_SCALE;
+    color->r = (float)(CHANNEL_MIN * CHANNEL_SCALE +
+        (uint32_t)((CHANNEL_MAX - CHANNEL_MIN) * CHANNEL_SCALE * eased / UINT64_C(64000000))) / CHANNEL_SCALE;
     color->master = KL_UPDATE_INDICATOR_MASTER;
     return true;
 }
