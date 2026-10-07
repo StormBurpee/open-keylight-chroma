@@ -89,3 +89,5 @@ The first command needs clang and uses C99, strict warnings and AddressSanitizer
 The second needs clang, lld and llvm-objcopy supporting `arm-none-eabi`. It produces ELF, application binary, map, stack-usage records and a manifest under ignored `build/`. No dependency or device tool is downloaded or executed. The image is explicitly marked non-deployable, with source hashes and limitations. Builds emit current compiler stack-usage records; the off-profile compiled emulator also reports observed stack consumption and static RAM. ROM IAP, exception frames and physical interrupt behavior need separate qualified bounds. The linker reserves at least 1024 stack bytes.
 
 The separate [LOW1 diagnostic](LOW-TRIAL.md) provides a fixed five-channel, low-duty qualification sequence. Select `--pwm-low-trial`; it is role 1, cannot be confirmed, and does not enable production lighting.
+
+The [reference-board lighting profile](PRODUCTION.md) is built with `--reference-lighting` after the target's diagnostic qualification. It remains dark until typed confirmation and preserves the stock-derived duty envelope.

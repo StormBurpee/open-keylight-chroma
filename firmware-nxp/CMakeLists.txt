@@ -51,3 +51,17 @@ if(NOT MSVC)
   target_compile_options(test_nxp_pwm_low PRIVATE -Wall -Wextra -Werror -Wpedantic)
 endif()
 add_test(NAME nxp_pwm_low COMMAND test_nxp_pwm_low)
+
+# Reference lighting has independent fail-dark/update-order tests; its macro
+# cannot alter either frozen diagnostic binary.
+foreach(name pwm_production power_handoff)
+  add_executable(test_nxp_${name} tests/test_${name}.c src/nxp_app.c src/nxp_board.c)
+  target_compile_definitions(test_nxp_${name} PRIVATE NXP_PRODUCTION_LIGHTING=1)
+  target_include_directories(test_nxp_${name} PRIVATE include)
+  set_property(TARGET test_nxp_${name} PROPERTY C_STANDARD 99)
+  set_property(TARGET test_nxp_${name} PROPERTY C_STANDARD_REQUIRED ON)
+  if(NOT MSVC)
+    target_compile_options(test_nxp_${name} PRIVATE -Wall -Wextra -Werror -Wpedantic)
+  endif()
+  add_test(NAME nxp_${name} COMMAND test_nxp_${name})
+endforeach()

@@ -128,7 +128,24 @@ static int gpio_dark(nxp_board *b) {
     b->pwm_started = 0; return 1;
 }
 static int stop_pwm(nxp_board *b) {
+#if defined(NXP_PRODUCTION_LIGHTING) && NXP_PRODUCTION_LIGHTING
+    if (!gpio_dark(b)) {
+        /* Keep timers running: stopping a HIGH latch after a failed pad mux
+         * would preserve its output. Best-effort all-off matches provide an
+         * independent path to darkness at the next PWM reset boundary. */
+        if ((read_reg(b, SYSCON + 0x80) & TIMER_CLOCKS) == TIMER_CLOCKS) {
+            write_reg(b, COLOR + 0x24, 25500); write_reg(b, COLOR + 0x1c, 25500);
+            write_reg(b, COLOR + 0x18, 25500); write_reg(b, WHITE + 0x18, 255);
+            write_reg(b, WHITE + 0x1c, 255);
+            /* Failure is sticky even if this fallback is readable. */
+            (void)off_matches_valid(b, COLOR, 25500);
+            (void)off_matches_valid(b, WHITE, 255);
+        }
+        return 0;
+    }
+#else
     if (!gpio_dark(b)) return 0;
+#endif
     if ((read_reg(b, SYSCON + 0x80) & TIMER_CLOCKS) == TIMER_CLOCKS) {
         write_reg(b, WHITE + 4, 2); write_reg(b, COLOR + 4, 2);
         if (read_reg(b, WHITE + 4) != 2 || read_reg(b, COLOR + 4) != 2) {
@@ -184,12 +201,34 @@ int nxp_board_stop_pwm_off_trial(nxp_board *b) { return off_trial_permitted(b) &
 int nxp_board_apply_pwm(nxp_board *b, const nxp_pwm_frame *f) {
     if (!b || !b->pwm_started || b->pwm_fault || !qualified(b, NXP_QUAL_PWM_REQUIRED) || !f ||
         f->red_match > 25500 || f->green_match > 25500 || f->blue_match > 25500 ||
+#if defined(NXP_PRODUCTION_LIGHTING) && NXP_PRODUCTION_LIGHTING
+        f->cool_match > 255 || f->warm_match > 255 ||
+        ((f->red_match < 25500 || f->green_match < 25500 || f->blue_match < 25500) &&
+         (f->cool_match < 217 || f->warm_match < 217))) return 0;
+#else
         f->cool_match > 255 || f->warm_match > 255) return 0;
+#endif
     if ((read_reg(b, SYSCON + 0x80) & TIMER_CLOCKS) != TIMER_CLOCKS || !pwm_mux_valid(b) ||
         !timer_valid(b, WHITE, 47, 254, 3) || !timer_valid(b, COLOR, 0, 25499, 11)) goto failed;
+#if defined(NXP_PRODUCTION_LIGHTING) && NXP_PRODUCTION_LIGHTING
+    /* Reduce commanded duty before increasing another channel. With inverse
+     * PWM, a larger match is a lower duty. This preserves the bounded white
+     * sum and mixed-mode envelope at every register write during handoff.
+     * Timer latches still change at their hardware match/reset boundaries. */
+    static const uint32_t address[5] = {COLOR + 0x24, COLOR + 0x1c, COLOR + 0x18, WHITE + 0x18, WHITE + 0x1c};
+    const uint32_t target[5] = {f->red_match, f->green_match, f->blue_match, f->cool_match, f->warm_match};
+    uint32_t previous[5];
+    unsigned i;
+    for (i = 0; i < 5; ++i) previous[i] = read_reg(b, address[i]);
+    for (i = 0; i < 5; ++i) if (target[i] >= previous[i]) write_reg(b, address[i], target[i]);
+    for (i = 0; i < 5; ++i)
+        if (target[i] >= previous[i] && read_reg(b, address[i]) != target[i]) goto failed;
+    for (i = 0; i < 5; ++i) if (target[i] < previous[i]) write_reg(b, address[i], target[i]);
+#else
     write_reg(b, COLOR + 0x24, f->red_match); write_reg(b, COLOR + 0x1c, f->green_match);
     write_reg(b, COLOR + 0x18, f->blue_match); write_reg(b, WHITE + 0x18, f->cool_match);
     write_reg(b, WHITE + 0x1c, f->warm_match);
+#endif
     if (read_reg(b, COLOR + 0x24) != f->red_match || read_reg(b, COLOR + 0x1c) != f->green_match ||
         read_reg(b, COLOR + 0x18) != f->blue_match || read_reg(b, WHITE + 0x18) != f->cool_match ||
         read_reg(b, WHITE + 0x1c) != f->warm_match) goto failed;

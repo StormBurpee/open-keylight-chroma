@@ -173,3 +173,9 @@ The next build adds the separate LOW1 procedure to verify red, green, blue, warm
 The complete 21-suite host run passes with AddressSanitizer and UndefinedBehaviorSanitizer, including the new LOW1 suite. The fixed diagnostic schema boundary tests pass, and ESP 0.1.5-dev builds with 23% application-slot space free. Independent compiled-controller tests reproduce the exact OFF1 and LOW1 banks; live LOW1 qualification is next.
 
 ESP 0.1.5-dev has now been installed and explicitly confirmed on Storm Rim. The running ELF, all four served dashboard assets and saved settings/scenes match the pinned candidate. The completed OFF1 journal survived the restart, retaining its target and 448 verified blocks while discarding volatile recovery proof as designed. An independent manager test also reproduces the full OFF1 → ESP restart → cold recovery → LOW1 → production-upload admission sequence without granting diagnostic images production confirmation.
+
+## Five original lighting channels observed
+
+After an acknowledged whole-light power cycle, native recovery established the resident loader from the retained OFF1 job. The LOW1 installation then verified all 448 blocks, booted the expected original application, and completed its single fixed sequence. Both the ESP validator and a separate host validator accepted all 256 recorded words, including five 100 ms pulses, dark handoffs, the complete channel mask and zero reported errors. The protected return to the resident loader also passed without another physical reset.
+
+The owner observed red, green, blue, warm-white and cool-white flashes in order and explicitly confirmed darkness between them. This supports channel mapping and low-duty output on the reference board. It does not measure current, temperature or calibrated colour. Full lighting will retain the existing duty envelope; its first installation and API control checks are next.

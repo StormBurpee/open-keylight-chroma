@@ -19,6 +19,12 @@
 #if NXP_PWM_OFF_TRIAL && !NXP_SPI_ONLY_TRIAL
 #error "The off-only experiment must remain an unconfirmable SPI diagnostic"
 #endif
+#ifndef NXP_PRODUCTION_LIGHTING
+#define NXP_PRODUCTION_LIGHTING 0
+#endif
+#if NXP_PRODUCTION_LIGHTING && NXP_SPI_ONLY_TRIAL
+#error "Production lighting must not share a diagnostic image profile"
+#endif
 #ifndef NXP_APPROVED_PART_ID
 #define NXP_APPROVED_PART_ID 0u
 #endif
