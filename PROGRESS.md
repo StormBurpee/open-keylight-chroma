@@ -45,3 +45,9 @@ The next bounded trial returned the original application's version and the expec
 This is partial communication evidence, not reliable control. The existing ESP bridge can forward a zero-filled body after reading a nonzero reply length; it does not validate the controller report. A private trace-only trial will record controller-local reply phases and expiration without enabling PWM or changing the timeout policy. Explicit claim/readback/release will test ownership separately from asynchronous connection notifications.
 
 The implemented HTTP surface now has an OpenAPI 3.1 contract covering 15 operations, checked against handlers and 98 schema/example/boundary checks. The Home Assistant guide documents the implemented MQTT interface and its reporting limits. No live Home Assistant test or independent ESP deployment is claimed. GitHub CI passed all jobs for the worker and reply-handoff changes.
+
+## Receive-boundary race measured
+
+A private trace-only image retained its last 116 events and aggregate counters through the 30-second return to the loader. Five retained failures cancelled the length phase with only one byte counted, then treated the master's subsequent body clocks as a new invalid request. The five command selectors match the corresponding empty network replies in order. The complete trace recorded zero reply expirations and zero receive overruns.
+
+A host reproduction injects the final length byte and chip-select rising edge after an empty RX status sample but before the later select check. The master receives the expected length while the adapter clears the body. The fix must drain again after observing deselect and defer finalization if a new transfer starts. The known working controller image was restored and its static blue output verified through getters. Explicit claim/readback succeeded in the diagnostic, but the release guard failed, so the observer sent no release and made no full ownership-success claim.

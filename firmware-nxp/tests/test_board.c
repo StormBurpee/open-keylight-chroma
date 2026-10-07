@@ -59,6 +59,91 @@ static void clocks_without_poll(bus *b, nxp_board *board, const uint8_t *in, uin
 static void clocks(bus *b, nxp_board *board, const uint8_t *in, uint8_t *out, unsigned count, uint32_t now) {
     clocks_without_poll(b, board, in, out, count); nxp_board_poll(board, now);
 }
+static unsigned late_armed, late_delivered, late_gpio_at, late_gpio_reads, late_keep_selected;
+static uint8_t late_input, late_output;
+static void late_clock(bus *b) {
+    unsigned i;
+    CHECK(b->tx_count && b->rx_count < 8);
+    late_output = b->tx[0];
+    for (i = 1; i < b->tx_count; ++i) b->tx[i - 1] = b->tx[i];
+    --b->tx_count;
+    b->rx[(b->rx_read + b->rx_count) & 7] = late_input; ++b->rx_count;
+    b->selected = late_keep_selected; late_armed = 0; ++late_delivered;
+}
+static uint32_t asynchronous_read(void *user, uint32_t address) {
+    bus *b = user;
+    uint32_t sampled = read_reg(user, address);
+    if (address == 0x50002100) ++late_gpio_reads;
+    /* Advance hardware after the CPU sampled its register, rather than only
+     * between calls to the driver. The return value remains the earlier sample. */
+    if (late_armed && ((late_gpio_at && address == 0x50002100 && late_gpio_reads == late_gpio_at) ||
+        (!late_gpio_at && address == 0x4005800c && !(sampled & 4u) && b->selected))) late_clock(b);
+    return sampled;
+}
+static void arm_late_byte(nxp_board *board, uint8_t value, unsigned gpio_at, unsigned keep_selected) {
+    late_armed = 1; late_delivered = late_gpio_reads = 0;
+    late_gpio_at = gpio_at; late_keep_selected = keep_selected; late_input = value;
+    board->io.read = asynchronous_read;
+}
+static void asynchronous_boundary_tests(void) {
+    bus b; nxp_board board; nxp_state state; nxp_link link;
+    uint8_t q[97], output[97], length[2], dummy[97] = {0}; unsigned kind, gap;
+    /* Final request, short connection, response length and response body bytes
+     * can arrive after an empty RX sample but before main samples CS high. */
+    for (kind = 0; kind < 5; ++kind) {
+        initialize(&b, &board, &state, &link, NXP_QUAL_SPI_REQUIRED);
+        CHECK(nxp_board_start_spi(&board)); make_version(q);
+        if (kind == 0 || kind == 1) {
+            unsigned count = kind ? 9 : 97;
+            if (kind) { memset(q, 0, 97); q[0] = 2; q[5] = 1; q[6] = 11; q[7] = q[8] = 1; }
+            clocks_without_poll(&b, &board, q, output, count - 1);
+            b.selected = 1; arm_late_byte(&board, q[count - 1], 0, 0);
+            nxp_board_poll(&board, 2);
+            CHECK(late_delivered == 1 && !board.errors && link.phase == NXP_LINK_LENGTH);
+            CHECK(kind ? state.claimed : link.response[14] == 0x87);
+        } else {
+            if (kind == 4) { memset(q, 0, 97); q[0] = 2; q[5] = 1; q[6] = 11; }
+            clocks(&b, &board, q, output, kind == 4 ? 9 : 97, 1);
+            if (kind == 3) {
+                clocks_without_poll(&b, &board, dummy, length, 2);
+                clocks_without_poll(&b, &board, dummy, output, 96);
+            } else clocks_without_poll(&b, &board, dummy, length, 1);
+            b.selected = 1; arm_late_byte(&board, 0, 0, 0);
+            nxp_board_poll(&board, 2);
+            CHECK(late_delivered == 1 && !board.errors);
+            if (kind == 2) {
+                CHECK(length[0] == 0 && late_output == 97 && link.phase == NXP_LINK_BODY);
+                clocks(&b, &board, dummy, output, 97, 3);
+                CHECK(output[7] == 2 && output[14] == 0x87 && !board.errors && !nxp_link_ready(&link));
+            } else CHECK(!nxp_link_ready(&link) && late_output == 0);
+        }
+    }
+    /* New body clocks can begin during the second drain. Neither this poll
+     * nor the next selected poll may discard the prepared reply. */
+    for (gap = 3; gap <= 4; ++gap) {
+        initialize(&b, &board, &state, &link, NXP_QUAL_SPI_REQUIRED);
+        CHECK(nxp_board_start_spi(&board)); make_version(q);
+        clocks(&b, &board, q, output, 97, 1);
+        clocks_without_poll(&b, &board, dummy, length, 2);
+        arm_late_byte(&board, 0, gap, 1);
+        nxp_board_poll(&board, 2);
+        CHECK(late_delivered == 1 && !board.errors && nxp_link_ready(&link) && b.selected);
+        output[0] = late_output;
+        clocks_without_poll(&b, &board, dummy, output + 1, 96);
+        nxp_board_poll(&board, 3);
+        CHECK(!board.errors && !nxp_link_ready(&link) && !memcmp(output, link.response, 97));
+    }
+    /* A byte still pending after the final CS sample must be drained on the
+     * next poll, not mistaken for a completed one-byte length transaction. */
+    initialize(&b, &board, &state, &link, NXP_QUAL_SPI_REQUIRED);
+    CHECK(nxp_board_start_spi(&board)); make_version(q);
+    clocks(&b, &board, q, output, 97, 1);
+    clocks_without_poll(&b, &board, dummy, length, 1);
+    arm_late_byte(&board, 0, 4, 0); nxp_board_poll(&board, 2);
+    CHECK(late_delivered == 1 && !board.errors && nxp_link_ready(&link));
+    nxp_board_poll(&board, 3);
+    CHECK(!board.errors && link.phase == NXP_LINK_BODY && late_output == 97);
+}
 static void response_handoff_tests(void) {
     bus b; nxp_board board; nxp_state state; nxp_link link;
     uint8_t q[97], length[2], rx[97], dummy[97] = {0}; unsigned i, before, gap, cut;
@@ -198,4 +283,4 @@ static void tests(void) {
         CHECK((b.log_address[i] < 0x40014000 || b.log_address[i] >= 0x40015000) &&
               (b.log_address[i] < 0x40018000 || b.log_address[i] >= 0x40019000));
 }
-int main(void) { response_handoff_tests(); tests(); printf("%u checks passed; gated register/FIFO adapter simulation; no hardware I/O.\n", checks); return 0; }
+int main(void) { asynchronous_boundary_tests(); response_handoff_tests(); tests(); printf("%u checks passed; gated register/FIFO adapter simulation; no hardware I/O.\n", checks); return 0; }

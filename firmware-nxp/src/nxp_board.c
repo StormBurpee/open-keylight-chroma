@@ -153,6 +153,12 @@ void nxp_board_poll(nxp_board *b, uint32_t now_ms) {
         if (nxp_link_expire(b->link, now_ms) == NXP_EXPIRED) { b->fault = 1; ready(b, 0); }
         return;
     }
+    /* CS may rise just after the first drain sampled an empty RX FIFO. Its
+     * final byte is then still pending even though this select sample is idle.
+     * Drain again after observing deselect, before judging a packet's length.
+     * A new transfer may start meanwhile: leave it for the next bounded poll. */
+    nxp_board_spi_irq(b);
+    if (selected(b) || (read_reg(b, SSP + 0xc) & 4u)) return;
     if (b->active || b->fault) {
         result = NXP_BAD_PACKET;
         if (!b->fault) {
