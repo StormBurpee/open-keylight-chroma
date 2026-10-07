@@ -280,13 +280,32 @@ static okl_result deadline_check(okl_nxp *d, uint64_t deadline) {
     return d->transport.now_us(d->transport.user)>=deadline?OKL_TIMEOUT:OKL_OK;
 }
 
-static okl_result take_lock(okl_nxp *d, uint64_t deadline) {
+static okl_result take_lock(okl_nxp *d, uint64_t *deadline) {
     okl_result result;
+    uint64_t before, after, original, credit;
     if(!d || !d->transport.now_us || !d->transport.lock) return OKL_INVALID;
-    if(deadline_check(d,deadline)!=OKL_OK) return OKL_TIMEOUT;
-    result=d->transport.lock(d->transport.user,deadline);
-    if(result==OKL_OK && deadline_check(d,deadline)!=OKL_OK) {
-        d->transport.unlock(d->transport.user); return OKL_TIMEOUT;
+    d->last_admission_wait_us=0;
+    if(d->admission_deadline_us && *deadline>d->admission_deadline_us)
+        *deadline=d->admission_deadline_us;
+    if(deadline_check(d,*deadline)!=OKL_OK) return OKL_TIMEOUT;
+    before=d->transport.now_us(d->transport.user); original=*deadline;
+    result=d->transport.lock_with_admission?
+        d->transport.lock_with_admission(d->transport.user,deadline,d->admission_deadline_us):
+        d->transport.lock(d->transport.user,*deadline);
+    after=d->transport.now_us(d->transport.user);
+    if(result==OKL_OK) {
+        /* Admission may discover a newly published hard cutoff. Tightening
+         * the budget is valid and earns no excluded-wait credit. */
+        credit=*deadline>original?*deadline-original:0;
+        if(after<before || credit>after-before || credit>OKL_MAX_ADMISSION_WAIT_US) {
+            d->transport.unlock(d->transport.user);return OKL_INVALID;
+        }
+        if(d->admission_deadline_us && *deadline>d->admission_deadline_us)
+            *deadline=d->admission_deadline_us;
+        d->last_admission_wait_us=*deadline>original?*deadline-original:0;
+    }
+    if(result==OKL_OK && deadline_check(d,*deadline)!=OKL_OK) {
+        d->last_admission_wait_us=0;d->transport.unlock(d->transport.user); return OKL_TIMEOUT;
     }
     return result;
 }
@@ -346,10 +365,11 @@ failed:
 okl_result okl_nxp_execute(okl_nxp *d, const okl_request *request,
                            okl_reply *reply, uint64_t deadline) {
     okl_result result;
+    if(d) d->last_admission_wait_us=0;
     if(!reply) return OKL_INVALID;
     memset(reply,0,sizeof(*reply));
     if(valid_request(request)!=OKL_OK) return OKL_INVALID;
-    result=take_lock(d,deadline);
+    result=take_lock(d,&deadline);
     if(result!=OKL_OK) return result;
     result=exchange_locked(d,request,reply,deadline);
     d->transport.unlock(d->transport.user);
@@ -357,7 +377,7 @@ okl_result okl_nxp_execute(okl_nxp *d, const okl_request *request,
 }
 
 okl_result okl_nxp_recover(okl_nxp *d, uint64_t deadline) {
-    okl_result result=take_lock(d,deadline);
+    okl_result result=take_lock(d,&deadline);
     if(result!=OKL_OK) return result;
     if(!d->transport.recover) result=OKL_NEEDS_RECOVERY;
     else result=d->transport.recover(d->transport.user,deadline);
@@ -392,16 +412,18 @@ static okl_result owner_locked(okl_nxp *d, okl_owner *owner, uint64_t deadline) 
 
 okl_result okl_nxp_get_owner(okl_nxp *d, okl_owner *owner, uint64_t deadline) {
     okl_result result;
+    if(d) d->last_admission_wait_us=0;
     if(!owner) return OKL_INVALID;
-    result=take_lock(d,deadline);
+    result=take_lock(d,&deadline);
     if(result!=OKL_OK) return result;
     result=owner_locked(d,owner,deadline);d->transport.unlock(d->transport.user);return result;
 }
 
 okl_result okl_nxp_claim(okl_nxp *d, const uint8_t *name, size_t size, uint64_t deadline) {
     uint8_t args[72];okl_reply reply;okl_owner owner;okl_result result;
+    if(d) d->last_admission_wait_us=0;
     if(size>64 || (size && !name)) return OKL_INVALID;
-    result=take_lock(d,deadline);if(result!=OKL_OK) return result;
+    result=take_lock(d,&deadline);if(result!=OKL_OK) return result;
     memset(args,0,sizeof(args));args[0]=1;memcpy(args+1,d->identity,6);args[7]=(uint8_t)size;
     if(size) memcpy(args+8,name,size);
     result=perform(d,OKL_SET_OWNER,args,sizeof(args),&reply,deadline);
@@ -411,7 +433,7 @@ okl_result okl_nxp_claim(okl_nxp *d, const uint8_t *name, size_t size, uint64_t 
 }
 
 okl_result okl_nxp_release(okl_nxp *d, uint64_t deadline) {
-    uint8_t args[72];okl_reply reply;okl_owner owner;okl_result result=take_lock(d,deadline);
+    uint8_t args[72];okl_reply reply;okl_owner owner;okl_result result=take_lock(d,&deadline);
     if(result!=OKL_OK) return result;
     result=owner_locked(d,&owner,deadline);
     if(result==OKL_OK && owner.claimed) {
@@ -429,8 +451,9 @@ okl_result okl_nxp_release(okl_nxp *d, uint64_t deadline) {
 okl_result okl_nxp_read_state(okl_nxp *d, okl_light_state *state, uint64_t deadline) {
     static const uint8_t color[]={0,0},white[]={0,32,0};
     okl_light_state value;okl_reply reply;okl_result result;const uint8_t *a;
+    if(d) d->last_admission_wait_us=0;
     if(!state) return OKL_INVALID;
-    result=take_lock(d,deadline);if(result!=OKL_OK) return result;
+    result=take_lock(d,&deadline);if(result!=OKL_OK) return result;
     memset(&value,0,sizeof(value));
     result=perform(d,OKL_GET_EFFECT,color,2,&reply,deadline);if(result!=OKL_OK) goto done;
     a=reply.report.arguments;

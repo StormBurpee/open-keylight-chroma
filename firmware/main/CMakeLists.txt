@@ -1,4 +1,4 @@
-idf_component_register(SRCS "app.c" "storage.c" "scene_store.c" "network.c" "state_json.c" "http_server.c"
+idf_component_register(SRCS "app.c" "flash_guard.c" "storage.c" "scene_store.c" "network.c" "state_json.c" "http_server.c"
     "config_api.c" "update.c" "update_indicator.c" "update_indicator_output.c" "controller_update.c" "controller_job.c" "controller_worker.c"
     "worker.c" "output_policy.c" "nxp_transport.c" "button.c" "mqtt.c"
     INCLUDE_DIRS "." "${CMAKE_CURRENT_BINARY_DIR}"

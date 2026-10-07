@@ -63,6 +63,7 @@ static bool job_read_only_rejection;
 static kl_update_indicator upload;
 static unsigned upload_at, upload_terminal_at, off_at;
 static bool upload_success;
+static uint64_t published_reboot_deadline;
 static unsigned queued_duration, frame_latency, encoding_at, stolen_at, corrupt_read, owner_reads;
 static okl_result owner_result;
 static bool brightness_only_on_read;
@@ -72,6 +73,7 @@ static unsigned brownout_started, brownout_verified, brownout_failed, brownout_b
 int esp_reset_reason(void) { return boot_reason; }
 
 void app_update_indicator_snapshot(kl_update_indicator *out) { CHECK(!locks); *out = upload; }
+uint64_t app_update_reboot_deadline_us(void) { CHECK(!locks); return published_reboot_deadline; }
 
 bool app_controller_update_blocked(void) { return journal_blocked; }
 bool app_controller_update_take(app_controller_job *out) {
@@ -187,7 +189,11 @@ void vTaskDelay(unsigned ticks) {
     if (delays == stolen_at) claimed = false;
     if (delays == upload_at) { CHECK(kl_update_indicator_begin(&upload,1000,now)); app.updating=true; }
     if (delays == upload_terminal_at) {
-        if (upload_success) { CHECK(kl_update_indicator_advance(&upload,1000)); CHECK(kl_update_indicator_verify(&upload,now)); }
+        if (upload_success) {
+            CHECK(kl_update_indicator_advance(&upload,1000));
+            published_reboot_deadline = (now + 1400) * 1000;
+            CHECK(kl_update_indicator_verify(&upload,now));
+        }
         else { kl_update_indicator_fail(&upload); app.updating=false; }
     }
     if (delays == off_at) { app.desired.power=false; ++app.output_revision; }
@@ -331,6 +337,7 @@ static void reset(void) {
     recovery_job=recovery_clear=false;recovery_jobs=recovery_finishes=0;
     job_read_only_rejection=false;
     memset(&upload,0,sizeof(upload));upload_at=upload_terminal_at=off_at=0;upload_success=false;
+    published_reboot_deadline=0;
     queued_duration=600;frame_latency=encoding_at=stolen_at=corrupt_read=owner_reads=0;owner_result=OKL_OK;
     brightness_only_on_read=false;
     boot_reason=ESP_RST_SW;brownout_started=brownout_verified=brownout_failed=brownout_bad_read=0;
@@ -646,6 +653,14 @@ static void test_update_worker_gates(void) {
     run();CHECK(!writes && app.controller_ready); /* Already consumed Off is not a new request. */
 }
 static void test_update_indicator_worker(void) {
+    reset();
+    kl_update_output stale={.deadline_us=9000000};
+    app.controller_ready=true;
+    CHECK(indicator_guard(&stale,0) && !stale.fixed_deadline);
+    published_reboot_deadline=2400000;
+    CHECK(indicator_guard(&stale,0) && stale.fixed_deadline && stale.deadline_us==2400000);
+    stale.deadline_us=2300000;app.desired.recording_lock=true;
+    CHECK(!indicator_guard(&stale,0) && stale.deadline_us==2300000);
     for(unsigned success=0;success<2;++success) {
         reset();okl_light_state saved=controller;
         upload_at=1;upload_terminal_at=8;upload_success=success!=0;stop_after=110;delay_step=20;

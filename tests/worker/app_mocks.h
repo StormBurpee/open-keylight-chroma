@@ -8,7 +8,8 @@
 #define ESP_FAIL -1
 #define pdTRUE 1
 #define portMAX_DELAY UINT32_MAX
-#define ESP_ERROR_CHECK(value) do { if ((value) != ESP_OK) abort(); } while (0)
+#define ESP_ERROR_CHECK(value) mock_error_check(value)
+void mock_error_check(esp_err_t);
 #define ESP_LOGE(...) mock_log(__VA_ARGS__)
 void mock_log(const char *, const char *, ...);
 SemaphoreHandle_t xSemaphoreCreateMutex(void);

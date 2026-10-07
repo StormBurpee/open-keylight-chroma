@@ -26,23 +26,48 @@ static okl_nxp driver;
 static kl_update_output output;
 static kl_update_indicator evidence;
 static okl_light_state state, initial;
-static uint64_t now, latency;
+static uint64_t now, latency, admission_wait;
+static unsigned admission_call, wire_calls;
+static uint64_t published_deadline;
+static unsigned publish_call;
 static uint32_t current_revision;
 static unsigned calls, claim_calls, release_calls, read_calls, frames, writes;
 static unsigned fail_call, cancel_call, steal_call, lose_call;
-static bool claimed, different_name, corrupt_read;
+static bool claimed, different_name, corrupt_read, slow_compound;
 static uint8_t framebuffer[3];
 static okl_request history[4096];
 
 static uint64_t time_us(void *user) { CHECK(user == &driver); return now; }
-static bool guard(void *user, uint32_t revision) { CHECK(user == &output); return revision == current_revision; }
+static bool guard(void *user, uint32_t revision) {
+    CHECK(user == &output);
+    kl_update_output_limit(&output,published_deadline);
+    return revision == current_revision;
+}
 static okl_result boundary(uint64_t deadline, uint64_t maximum) {
     CHECK(deadline > now && deadline <= now + maximum); ++calls;
+    driver.last_admission_wait_us=0;
     if (calls == cancel_call) ++current_revision;
     if (calls == steal_call) claimed = false;
     if (calls == lose_call) driver.needs_recovery = 1;
-    if (latency > deadline - now) { now = deadline; driver.needs_recovery = 1; return OKL_TIMEOUT; }
-    now += latency;
+    if (calls==publish_call) published_deadline=now+1400000;
+    uint64_t hard=driver.admission_deadline_us;
+    if (published_deadline && (!hard || published_deadline<hard)) hard=published_deadline;
+    if (hard && now>=hard) return OKL_TIMEOUT;
+    if (hard && deadline>hard) deadline=hard;
+    uint64_t original=deadline;
+    if (admission_wait && (!admission_call || calls == admission_call)) {
+        if (hard && admission_wait >= hard-now) {
+            now=hard;return OKL_TIMEOUT;
+        }
+        now += admission_wait;
+        deadline += admission_wait;
+    }
+    if (hard && deadline>hard) deadline=hard;
+    driver.last_admission_wait_us=deadline>original?deadline-original:0;
+    ++wire_calls;
+    uint64_t elapsed=latency+(slow_compound && maximum>150000?51000:0);
+    if (elapsed > deadline - now) { now = deadline; driver.needs_recovery = 1; return OKL_TIMEOUT; }
+    now += elapsed;
     return calls == fail_call ? OKL_REMOTE : OKL_OK;
 }
 static okl_result mock_claim(okl_nxp *d,const uint8_t *name,size_t size,uint64_t end) {
@@ -85,8 +110,9 @@ static okl_result mock_execute(okl_nxp *d,const okl_request *q,okl_reply *reply,
 static void reset(void) {
     memset(&driver,0,sizeof(driver));memset(&output,0,sizeof(output));memset(&evidence,0,sizeof(evidence));
     driver.identity[0]=2;driver.transport.now_us=time_us;driver.transport.user=&driver;
-    now=latency=0;current_revision=7;calls=claim_calls=release_calls=read_calls=frames=writes=0;
-    fail_call=cancel_call=steal_call=lose_call=0;claimed=different_name=corrupt_read=false;
+    now=latency=admission_wait=published_deadline=0;admission_call=wire_calls=publish_call=0;
+    current_revision=7;calls=claim_calls=release_calls=read_calls=frames=writes=0;
+    fail_call=cancel_call=steal_call=lose_call=0;claimed=different_name=corrupt_read=slow_compound=false;
     memset(framebuffer,0,sizeof(framebuffer));memset(history,0,sizeof(history));
     state=(okl_light_state){.effect=1,.color_count=1,.colors={30,80,140},.color_brightness=51,.temperature_kelvin=5300};
     initial=state;CHECK(kl_update_indicator_begin(&evidence,1000,0));
@@ -199,8 +225,86 @@ static void deadlines_and_generations(void) {
     reset();begin();now=10000000;prior=frames;CHECK(step(NULL)==KL_INDICATOR_ACTIVE && frames==prior+1);
     CHECK(step(NULL)==KL_INDICATOR_ACTIVE && frames==prior+1); /* No catch-up loop. */
 }
+static void flash_admission_budgets(void) {
+    /* Every driver boundary may queue behind a different flash operation.
+     * Credit it once, including compound claim/read/owner/release operations. */
+    reset();admission_wait=2000000;latency=1000;begin();
+    CHECK(calls==7 && now==14007000 && output.deadline_us==15200000);
+    CHECK(driver.last_admission_wait_us==0 && !output.fixed_deadline);
+    unsigned before=calls;uint64_t started=now;
+    now+=250000;CHECK(step(NULL)==KL_INDICATOR_ACTIVE);
+    CHECK(calls==before+3 && now==started+6253000);
+    CHECK(output.deadline_us==started+7450000);
+    CHECK(driver.last_admission_wait_us==0);
+    kl_update_indicator_fail(&evidence);CHECK(step(NULL)==KL_INDICATOR_ACTIVE);
+    now+=1600000;before=calls;started=now;
+    CHECK(step(NULL)==KL_INDICATOR_RESTORED && same(&state,&initial));
+    CHECK(calls==before+8 && now==started+16008000);
+    CHECK(output.deadline_us==started+17200000 && release_calls==1);
+
+    /* A credit from an earlier API cannot be reused by a later one. */
+    reset();admission_wait=2000000;admission_call=1;latency=1000;begin();
+    CHECK(now==2007000 && output.deadline_us==3200000);
+    CHECK(driver.last_admission_wait_us==0);
+
+    /* A credited admission does not turn a wire failure into success or retry
+     * it. One guarded release is still allowed within the credited budget. */
+    reset();admission_wait=2000000;admission_call=3;fail_call=3;
+    CHECK(step(NULL)==KL_INDICATOR_ERROR && output.error==OKL_REMOTE);
+    CHECK(calls==4 && writes==1 && release_calls==1 && !claimed);
+    CHECK(driver.last_admission_wait_us==0 && output.deadline_us==3200000);
+    before=calls;CHECK(step(NULL)==KL_INDICATOR_NONE && calls==before);
+
+    /* Actual wire time remains charged. Seven slow operations exceed the
+     * handoff budget despite a valid unrelated flash wait before each one. */
+    reset();admission_wait=2000000;latency=149000;slow_compound=true;
+    CHECK(step(NULL)==KL_INDICATOR_ACTIVE);
+    kl_update_indicator_fail(&evidence);latency=0;CHECK(step(NULL)==KL_INDICATOR_ACTIVE);
+    now+=1600000;latency=149000;
+    CHECK(step(NULL)==KL_INDICATOR_ERROR && output.error==OKL_TIMEOUT);
+    CHECK(output.finished && !output.active && driver.last_admission_wait_us==0);
+
+    /* A verified upload's 1400 ms deadline remains absolute. Waiting behind
+     * flash cannot start a late output exchange or postpone reboot cleanup. */
+    reset();begin();CHECK(kl_update_indicator_advance(&evidence,1000));
+    CHECK(kl_update_indicator_verify(&evidence,0));now=300000;
+    admission_wait=2000000;before=wire_calls;
+    CHECK(step(NULL)==KL_INDICATOR_ERROR && output.error==OKL_TIMEOUT);
+    CHECK(now==1400000 && wire_calls==before && output.deadline_us==1400000);
+    CHECK(driver.admission_deadline_us==0 && driver.last_admission_wait_us==0);
+    CHECK(!driver.needs_recovery && !release_calls);
+
+    /* Preserve a stricter ceiling imposed by the caller, then restore it on
+     * failure instead of leaking the indicator's temporary limit. */
+    reset();begin();CHECK(kl_update_indicator_advance(&evidence,1000));
+    CHECK(kl_update_indicator_verify(&evidence,0));now=300000;
+    driver.admission_deadline_us=900000;admission_wait=1000000;before=wire_calls;
+    CHECK(step(NULL)==KL_INDICATOR_ERROR && output.error==OKL_TIMEOUT);
+    CHECK(now==900000 && wire_calls==before && driver.admission_deadline_us==900000);
+    CHECK(output.deadline_us==1400000 && driver.last_admission_wait_us==0);
+
+    /* A worker guard refreshes an older RECEIVING snapshot before admission;
+     * a success published during admission is independently enforced by the
+     * native gate, with no app mutex taken inside that gate. */
+    reset();published_deadline=1400000;admission_wait=2000000;
+    CHECK(step(NULL)==KL_INDICATOR_ERROR && output.error==OKL_TIMEOUT);
+    CHECK(now==1400000 && !wire_calls && output.fixed_deadline);
+    CHECK(output.deadline_us==1400000 && driver.admission_deadline_us==0);
+    reset();publish_call=1;admission_wait=2000000;
+    CHECK(step(NULL)==KL_INDICATOR_ERROR && output.error==OKL_TIMEOUT);
+    CHECK(now==1400000 && !wire_calls && frames==0);
+    reset();publish_call=1;admission_call=1;admission_wait=1000000;latency=1000;
+    begin();CHECK(output.fixed_deadline && output.deadline_us==1400000);
+    CHECK(now==1007000 && driver.last_admission_wait_us==0 && !driver.admission_deadline_us);
+
+    uint64_t ceiling=output.deadline_us;
+    kl_update_output_limit(&output,0);CHECK(output.deadline_us==ceiling);
+    kl_update_output_limit(&output,ceiling+1000);CHECK(output.deadline_us==ceiling);
+    kl_update_output_limit(&output,ceiling-1000);CHECK(output.deadline_us==ceiling-1000);
+}
 int main(void) {
     native_restoration();custom_restoration();cancellation_and_failures();deadlines_and_generations();
+    flash_admission_budgets();
     printf("%u indicator output assertions passed; actual coordinator, bounded mocked driver, no device I/O\n",checks);
     return 0;
 }

@@ -20,13 +20,17 @@ An accepted command advances the desired-state revision. The worker separately r
 
 Manual Off cancels all animation immediately. New commands replace older transitions. A recording lock blocks output changes except Off until explicitly unlocked. Actor attribution cannot bypass it. No client obtains a permanent controller lock.
 
-The first application starts by reading NXP state, leaving output unchanged. Wi-Fi failures preserve the light state and saved credentials. Recovery networking is independent of controller health.
+The ESP first checks controller identity and readiness. Ordinary restarts adopt readable controller state. After an ESP brownout, startup instead requests Off once and requires fresh Off readback before enabling controls. An uncertain recovery stays unavailable for that boot; it cannot repeatedly replay a potentially ambiguous mutation. Wi-Fi failures preserve the light state and saved credentials. Recovery networking is independent of controller health.
 
 ## Persistent data and updates
 
 Keep the installed bootloader and partition table. Use application-only OTA within the existing 1,572,864-byte slots. Do not burn security eFuses, repartition, or erase shared NVS. Import known vendor Wi-Fi strings locally into our own versioned namespace without returning them over the API.
 
 Authenticated updates validate the image, target, length and digest before selecting the next boot partition. A/B slots alone do not establish automatic rollback: that depends on the installed bootloader. The public installer must say which recovery paths were actually exercised.
+
+The ESP flash and NXP transport share an exclusion gate. Erasing ESP flash can suspend execution long enough for a pending NXP reply to expire, so an entire request/reply exchange must finish before a flash mutation begins. OTA erases sequentially while receiving; NVS writes hold the same gate from read-write open through close. The SPI holder never takes the application mutex. Existing configuration writes may hold the application mutex while waiting for the gate, giving the lock graph a single direction.
+
+A known-idle transport may account for a measured wait before transmission separately from its response deadline. This allowance is bounded, checked against elapsed time, and unavailable to an unresolved response. It cannot extend an in-flight transaction or the fixed restart cutoff for the update indicator. A failed exchange still records an uncertain outcome without blindly replaying commands.
 
 ## Initial scope
 

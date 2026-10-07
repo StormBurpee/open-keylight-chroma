@@ -42,5 +42,9 @@ bool kl_update_indicator_failure_sample(uint64_t elapsed_ms, kl_update_indicator
  * Terminal generations remain observable until the next accepted ESP upload.
  * NXP controller updates do not create or advance an ESP indicator. */
 void app_update_indicator_snapshot(kl_update_indicator *out);
+/* Lock-free fixed controller-I/O cutoff, in esp_timer microseconds. Zero until
+ * an accepted ESP image has selected its boot slot; then immutable until reboot.
+ * Safe inside the transport/flash guard and independent of a stale UI snapshot. */
+uint64_t app_update_reboot_deadline_us(void);
 
 #endif

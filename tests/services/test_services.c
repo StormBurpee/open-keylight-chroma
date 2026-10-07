@@ -24,6 +24,8 @@ static int failure, sha_failure, recv_failure;
 static const char *read_failure_key;
 static bool commit_persists_on_failure;
 static bool namespace_absent;
+static unsigned flash_depth, flash_entries;
+static bool flash_failure, write_handle;
 static const char *header_host, *header_origin, *header_auth, *header_type, *body;
 static char response_body[16384];
 static bool connection_close;
@@ -34,9 +36,17 @@ void app_lock(void) { CHECK(!locked); locked = 1; }
 void app_unlock(void) { CHECK(locked); locked = 0; }
 void app_event_locked(const char *actor, const char *event, const char *detail) { CHECK(locked && actor && event && detail); }
 void app_network_recovery_request(void) { CHECK(!locked); ++recovery_requests; }
-esp_err_t nvs_flash_init(void) { return failure == 5 ? ESP_FAIL : ESP_OK; }
+uint64_t app_flash_guard_deadline(void) { return now_ms * 1000 + APP_FLASH_GUARD_WAIT_US; }
+esp_err_t app_flash_guard_enter(uint64_t deadline) {
+    CHECK(!flash_depth && deadline == app_flash_guard_deadline()); ++flash_entries;
+    if (flash_failure) return ESP_FAIL;
+    flash_depth = 1; return ESP_OK;
+}
+void app_flash_guard_leave(void) { CHECK(flash_depth == 1 && !write_handle); flash_depth = 0; }
+esp_err_t nvs_flash_init(void) { CHECK(flash_depth == 1); return failure == 5 ? ESP_FAIL : ESP_OK; }
 esp_err_t nvs_open(const char *name, int mode, nvs_handle_t *out) {
     CHECK(!strcmp(name, "openkeylight") || (!strcmp(name, "nvskvinfo0") && mode == NVS_READONLY));
+    if (mode == NVS_READWRITE) { CHECK(flash_depth == 1 && !write_handle); write_handle = failure != 1; }
     *out = !strcmp(name, "openkeylight") ? 1 : 2;
     if (namespace_absent && !stored_count && mode == NVS_READONLY && *out == 1) return ESP_ERR_NVS_NOT_FOUND;
     return failure == 1 ? ESP_FAIL : ESP_OK;
@@ -54,7 +64,7 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *out, size_t *
     memcpy(out, entry->data, entry->size); *size = entry->size; return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *data, size_t size) {
-    CHECK(handle == 1 && size <= sizeof(pending.data)); ++writes;
+    CHECK(handle == 1 && size <= sizeof(pending.data) && flash_depth == 1 && write_handle); ++writes;
     if (failure == 2) return ESP_FAIL;
     snprintf(pending.key, sizeof(pending.key), "%s", key); memcpy(pending.data, data, size); pending.size = size;
     return ESP_OK;
@@ -72,12 +82,16 @@ esp_err_t nvs_get_str(nvs_handle_t handle, const char *key, char *out, size_t *s
     memcpy(out, value, strlen(value) + 1); *size = strlen(value) + 1; return ESP_OK;
 }
 esp_err_t nvs_commit(nvs_handle_t handle) {
-    CHECK(handle == 1); ++commits; if (failure == 3 && !commit_persists_on_failure) return ESP_FAIL;
+    CHECK(handle == 1 && flash_depth == 1 && write_handle); ++commits; if (failure == 3 && !commit_persists_on_failure) return ESP_FAIL;
     blob *entry = find_blob(pending.key);
     if (!entry) { CHECK(stored_count < 16); entry = &stored[stored_count++]; }
     *entry = pending; return failure == 3 ? ESP_FAIL : ESP_OK;
 }
-void nvs_close(nvs_handle_t handle) { CHECK(handle == 1 || handle == 2); ++closes; }
+void nvs_close(nvs_handle_t handle) {
+    CHECK(handle == 1 || handle == 2);
+    if (write_handle) { CHECK(flash_depth == 1); write_handle = false; }
+    ++closes;
+}
 void esp_fill_random(void *out, size_t size) {
     ++random_counter;
     for (size_t i = 0; i < size; ++i) ((unsigned char *)out)[i] = (unsigned char)(random_counter + i);
@@ -152,7 +166,9 @@ static void request_reset(const char *data) {
     response_code = request_reads = session_closes = 0; connection_close = false; response_body[0] = 0;
 }
 static void reset(void) {
-    CHECK(!locked); memset(&app, 0, sizeof(app)); memset(stored, 0, sizeof(stored)); memset(&pending, 0, sizeof(pending));
+    CHECK(!locked && !flash_depth && !write_handle);
+    flash_entries=0;flash_failure=false;
+    memset(&app, 0, sizeof(app)); memset(stored, 0, sizeof(stored)); memset(&pending, 0, sizeof(pending));
     snprintf(app.ip, sizeof(app.ip), "192.0.2.1"); snprintf(app.hostname, sizeof(app.hostname), "keylight-test");
     now_ms = 100; stored_count = writes = commits = closes = random_counter = recovery_requests = 0;
     issued_routes = submit_calls = settings_calls = update_calls = confirm_calls = server_handlers = 0;
@@ -480,4 +496,17 @@ static void controller_json_tests(void) {
     CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(controller,"status")->valuestring,"diagnostic"));
     cJSON_Delete(document);
 }
-int main(void) { storage_tests(); scene_tests(); encoding_storage_tests(); http_tests(); controller_json_tests(); printf("PASS %u assertions against actual storage.c/scene_store.c/http_server.c\n", assertions); return 0; }
+static void flash_admission_tests(void) {
+    reset(); flash_failure=true;
+    CHECK(app_storage_init()!=ESP_OK && flash_entries==1 && !writes && !commits && !closes && !flash_depth);
+    reset(); flash_failure=true;
+    CHECK(app_config_save(&app.config)!=ESP_OK && flash_entries==1 && !writes && !closes && !flash_depth);
+    CHECK(app_output_encoding_save(KL_OUTPUT_LINEAR)!=ESP_OK && flash_entries==2 && !writes && !closes && !flash_depth);
+    reset(); CHECK(app_storage_init()==ESP_OK);
+    app_scene prior=app.scenes[0], edited=custom_scene("No admission");
+    unsigned before=writes;
+    flash_failure=true;
+    CHECK(app_scene_save(0,&edited)!=ESP_OK && writes==before && !memcmp(&app.scenes[0],&prior,sizeof(prior)));
+    CHECK(!flash_depth && !write_handle);
+}
+int main(void) { flash_admission_tests(); storage_tests(); scene_tests(); encoding_storage_tests(); http_tests(); controller_json_tests(); printf("PASS %u assertions against actual storage.c/scene_store.c/http_server.c\n", assertions); return 0; }

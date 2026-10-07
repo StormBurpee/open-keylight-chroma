@@ -384,11 +384,13 @@ static okl_result health(void) {
     return OKL_OK;
 }
 
-static bool indicator_guard(void *unused, uint32_t revision) {
-    (void)unused;
+static bool indicator_guard(void *user, uint32_t revision) {
+    kl_update_output *indicator = user;
+    kl_update_output_limit(indicator, app_update_reboot_deadline_us());
     app_lock();
     bool unchanged = app.controller_ready && !app.desired.recording_lock && app.output_revision == revision;
     app_unlock();
+    kl_update_output_limit(indicator, app_update_reboot_deadline_us());
     return unchanged;
 }
 
@@ -485,7 +487,7 @@ static void worker_task(void *unused) {
         }
         uint8_t known_rgb[3] = {kl_byte(current.r), kl_byte(current.g), kl_byte(current.b)};
         kl_update_output_result indicated = kl_update_output_step(&indicator, &nxp, &upload,
-            upload_revision, rendering ? known_rgb : NULL, indicator_guard, NULL);
+            upload_revision, rendering ? known_rgb : NULL, indicator_guard, &indicator);
         if (indicated == KL_INDICATOR_ACTIVE) {
             rendering = false;
             app_lock(); app.reported_valid = false; app.rgb_confirmed = false; app.reported_fields = 0; app_unlock();

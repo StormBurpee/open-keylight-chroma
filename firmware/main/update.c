@@ -1,5 +1,6 @@
 #include "http_internal.h"
 #include "update_indicator.h"
+#include "flash_guard.h"
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
@@ -19,6 +20,15 @@ static enum trial_state trial_state;
 static uint64_t trial_deadline_ms;
 static atomic_bool trial_pending = true;
 static kl_update_indicator update_indicator;
+/* Publish the immutable 64-bit value through a lock-free flag; ESP32 need not
+ * provide lock-free 64-bit atomics. Only the accepted upload writes it, once. */
+_Static_assert(ATOMIC_BOOL_LOCK_FREE == 2, "Reboot cutoff requires lock-free publication");
+static uint64_t reboot_io_deadline_us;
+static atomic_bool reboot_io_deadline_published;
+
+uint64_t app_update_reboot_deadline_us(void) {
+    return atomic_load_explicit(&reboot_io_deadline_published, memory_order_acquire) ? reboot_io_deadline_us : 0;
+}
 
 void app_update_indicator_snapshot(kl_update_indicator *out) {
     if (!out) return;
@@ -33,11 +43,19 @@ void app_update_indicator_snapshot(kl_update_indicator *out) {
 
 bool app_trial_pending(void) { return atomic_load(&trial_pending); }
 
+static esp_err_t select_boot_partition(const esp_partition_t *partition) {
+    esp_err_t result = app_flash_guard_enter(app_flash_guard_deadline());
+    if (result != ESP_OK) return result;
+    result = esp_ota_set_boot_partition(partition);
+    app_flash_guard_leave();
+    return result;
+}
+
 /* Called only by the winner of the PENDING -> REVERTING transition. The
  * installed older bootloader provides no automatic trial rollback. */
 static void trial_revert(void) {
     const esp_partition_t *previous = esp_ota_get_next_update_partition(NULL);
-    if (previous && esp_ota_set_boot_partition(previous) == ESP_OK) esp_restart();
+    if (previous && select_boot_partition(previous) == ESP_OK) esp_restart();
     app_lock();
     trial_state = TRIAL_FAILED;
     app_event_locked("update", "rollback.failed", "Fallback could not restart; trial confirmation and OTA remain blocked");
@@ -61,12 +79,16 @@ esp_err_t app_trial_confirm(void) {
     app_config config = app.config;
     app_unlock();
     nvs_handle_t handle;
-    esp_err_t result = nvs_open("openkeylight", NVS_READWRITE, &handle);
+    esp_err_t result = app_flash_guard_enter(app_flash_guard_deadline());
     if (result == ESP_OK) {
-        result = nvs_set_blob(handle, "config_v1", &config, sizeof(config));
-        if (result == ESP_OK) result = nvs_set_blob(handle, "accepted_elf", esp_app_get_description()->app_elf_sha256, 32);
-        if (result == ESP_OK) result = nvs_commit(handle);
-        nvs_close(handle);
+        result = nvs_open("openkeylight", NVS_READWRITE, &handle);
+        if (result == ESP_OK) {
+            result = nvs_set_blob(handle, "config_v1", &config, sizeof(config));
+            if (result == ESP_OK) result = nvs_set_blob(handle, "accepted_elf", esp_app_get_description()->app_elf_sha256, 32);
+            if (result == ESP_OK) result = nvs_commit(handle);
+            nvs_close(handle);
+        }
+        app_flash_guard_leave();
     }
     app_lock();
     if (result == ESP_OK) {
@@ -133,6 +155,22 @@ static bool upload_expired(uint64_t started_ms) {
     return app_now_ms() - started_ms >= UPLOAD_DURATION_MS;
 }
 
+static esp_err_t upload_guard(uint64_t started_ms) {
+    if (upload_expired(started_ms)) return ESP_ERR_TIMEOUT;
+    if (started_ms > UINT64_MAX / 1000 - UPLOAD_DURATION_MS) return ESP_ERR_TIMEOUT;
+    uint64_t upload_deadline = (started_ms + UPLOAD_DURATION_MS) * 1000;
+    uint64_t admission = app_flash_guard_deadline();
+    /* Both clocks use esp_timer_get_time. Limit admission by the remaining
+     * upload budget and recheck after scheduling, before any flash mutation. */
+    if (upload_deadline < admission) admission = upload_deadline;
+    esp_err_t result = app_flash_guard_enter(admission);
+    if (result == ESP_OK && upload_expired(started_ms)) {
+        app_flash_guard_leave();
+        result = ESP_ERR_TIMEOUT;
+    }
+    return result;
+}
+
 esp_err_t http_update(httpd_req_t *request) {
     char digest_header[65], content_type[64]; uint8_t expected[32];
     if (httpd_req_get_hdr_value_str(request, "Content-Type", content_type, sizeof(content_type)) != ESP_OK
@@ -167,7 +205,14 @@ esp_err_t http_update(httpd_req_t *request) {
     app_mqtt_availability();
     uint64_t started_ms = app_now_ms();
     esp_ota_handle_t ota = 0; bool began = false;
-    esp_err_t result = esp_ota_begin(partition, request->content_len, &ota);
+    esp_err_t result = upload_guard(started_ms);
+    if (result == ESP_OK) {
+        /* Receive first, then erase sectors as writes reach them. Bulk erase
+         * before receiving can exceed the client's send timeout and pause an
+         * in-flight controller reply; the gate excludes every SPI exchange. */
+        result = esp_ota_begin(partition, OTA_WITH_SEQUENTIAL_WRITES, &ota);
+        app_flash_guard_leave();
+    }
     if (result == ESP_OK) began = true;
     mbedtls_sha256_context sha; mbedtls_sha256_init(&sha);
     if (mbedtls_sha256_starts(&sha, 0) != 0 && result == ESP_OK) result = ESP_FAIL;
@@ -183,7 +228,12 @@ esp_err_t http_update(httpd_req_t *request) {
         int length = httpd_req_recv(request, (char *)buffer, size);
         if (length <= 0 || (size_t)length > size || upload_expired(started_ms)) { result = ESP_ERR_TIMEOUT; break; }
         if (mbedtls_sha256_update(&sha, buffer, (size_t)length) != 0) { result = ESP_FAIL; break; }
-        result = esp_ota_write(ota, buffer, length); received += length;
+        result = upload_guard(started_ms);
+        if (result == ESP_OK) {
+            result = esp_ota_write(ota, buffer, length);
+            app_flash_guard_leave();
+        }
+        received += length;
         if (result == ESP_OK) {
             app_lock();
             (void)kl_update_indicator_advance(&update_indicator, (uint32_t)received);
@@ -195,13 +245,25 @@ esp_err_t http_update(httpd_req_t *request) {
     if (setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &old_timeout, sizeof(old_timeout)) != 0 && result == ESP_OK) result = ESP_FAIL;
     if (result == ESP_OK && upload_expired(started_ms)) result = ESP_ERR_TIMEOUT;
     if (result == ESP_OK && memcmp(digest, expected, sizeof(digest))) result = ESP_ERR_INVALID_CRC;
-    if (result == ESP_OK) { result = esp_ota_end(ota); began = false; }
+    if (result == ESP_OK) {
+        result = upload_guard(started_ms);
+        if (result == ESP_OK) {
+            result = esp_ota_end(ota); began = false;
+            app_flash_guard_leave();
+        }
+    }
     if (began) esp_ota_abort(ota);
     TaskHandle_t reboot = NULL;
     if (result == ESP_OK && upload_expired(started_ms)) result = ESP_ERR_TIMEOUT;
     if (result == ESP_OK && xTaskCreate(reboot_task, "update_reboot", 2048, NULL, 4, &reboot) != pdPASS) result = ESP_ERR_NO_MEM;
     if (result == ESP_OK && upload_expired(started_ms)) result = ESP_ERR_TIMEOUT;
-    if (result == ESP_OK) result = esp_ota_set_boot_partition(partition);
+    if (result == ESP_OK) {
+        result = upload_guard(started_ms);
+        if (result == ESP_OK) {
+            result = esp_ota_set_boot_partition(partition);
+            app_flash_guard_leave();
+        }
+    }
     if (result != ESP_OK && reboot) vTaskDelete(reboot);
     app_lock();
     if (result != ESP_OK) {
@@ -210,7 +272,11 @@ esp_err_t http_update(httpd_req_t *request) {
     } else {
         /* Full progress requires SHA/image validation and accepted boot-slot
          * selection. Receiving the last network chunk is not verification. */
-        (void)kl_update_indicator_verify(&update_indicator, app_now_ms());
+        uint64_t verified_ms = app_now_ms();
+        reboot_io_deadline_us = verified_ms > UINT64_MAX / 1000 - 1400 ?
+            UINT64_MAX : (verified_ms + 1400) * 1000;
+        atomic_store_explicit(&reboot_io_deadline_published, true, memory_order_release);
+        (void)kl_update_indicator_verify(&update_indicator, verified_ms);
         app_event_locked("update", "upload.verified", "Application verified; restarting into trial");
     }
     app_unlock();

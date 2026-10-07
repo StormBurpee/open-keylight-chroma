@@ -1,10 +1,14 @@
 #include "app_mocks.h"
 #include <stdio.h>
 #include <string.h>
+#include <setjmp.h>
 #include "../../firmware/main/app.c"
 
 static unsigned checks, locked, sequence, worker_order, network_order, http_order, trial_order, journal_order, pairing, buttons, mqtt;
 static bool worker_failure, button_failure;
+static bool guard_failure;
+static unsigned guard_order, storage_order;
+static jmp_buf startup_failed;
 #define CHECK(value) do { ++checks; if (!(value)) { fprintf(stderr,"FAIL app line %u: %s\n",__LINE__,#value); exit(1); } } while (0)
 void mock_log(const char *tag,const char *format,...) { CHECK(tag && format); }
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return &locked; }
@@ -13,7 +17,9 @@ void xSemaphoreGive(SemaphoreHandle_t handle) { CHECK(handle==&locked && locked)
 int64_t esp_timer_get_time(void) { return 500000; }
 void esp_read_mac(uint8_t *out,unsigned type) { CHECK(type==ESP_MAC_WIFI_STA);memcpy(out,"ABCDEF",6); }
 const char *esp_err_to_name(esp_err_t result) { (void)result;return "injected"; }
-esp_err_t app_storage_init(void) { return ESP_OK; }
+void mock_error_check(esp_err_t result) { if (result != ESP_OK) longjmp(startup_failed, 1); }
+esp_err_t app_flash_guard_init(void) { guard_order=++sequence; return guard_failure ? ESP_ERR_NO_MEM : ESP_OK; }
+esp_err_t app_storage_init(void) { storage_order=++sequence;return ESP_OK; }
 esp_err_t app_controller_update_init(void) { journal_order=++sequence;return ESP_OK; }
 void app_trial_start(void) { trial_order=++sequence; }
 void app_pair_window(void) { ++pairing; }
@@ -24,12 +30,17 @@ esp_err_t app_button_start(void) { ++buttons; return button_failure ? ESP_ERR_NO
 void app_mqtt_start(void) { ++mqtt; }
 static void reset(void) {
     memset(&app,0,sizeof(app));locked=sequence=worker_order=network_order=http_order=trial_order=pairing=buttons=mqtt=0;
-    worker_failure=button_failure=false;app.mutex=&locked;app.desired=kl_state_default();
+    worker_failure=button_failure=guard_failure=false;guard_order=storage_order=journal_order=0;
+    app.mutex=&locked;app.desired=kl_state_default();
 }
 int main(void) {
+    reset();guard_failure=true;
+    if (!setjmp(startup_failed)) { app_main(); CHECK(false); }
+    CHECK(guard_order && !storage_order && !worker_order && !network_order && !http_order);
     for(unsigned failure=0;failure<2;++failure) {
         reset();worker_failure=failure!=0;app_main();
-        CHECK(journal_order<trial_order && trial_order<worker_order && worker_order<network_order && network_order<http_order);
+        CHECK(guard_order<storage_order && storage_order<journal_order && journal_order<trial_order
+            && trial_order<worker_order && worker_order<network_order && network_order<http_order);
         CHECK(http_order && pairing==1 && buttons==1 && mqtt==1 && !locked);
         if(failure)CHECK(!strcmp(app.controller_status,"fault") && !app.controller_ready);
     }

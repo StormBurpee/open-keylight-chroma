@@ -1,4 +1,5 @@
 #include "app.h"
+#include "flash_guard.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -73,7 +74,12 @@ esp_err_t app_network_start(void) {
     esp_netif_t *station = esp_netif_create_default_wifi_sta();
     ESP_ERROR_CHECK(esp_netif_set_hostname(station, app.hostname));
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&init));
+    /* Wi-Fi initialization may touch NVS before RAM-only storage is selected. */
+    esp_err_t result = app_flash_guard_enter(app_flash_guard_deadline());
+    if (result != ESP_OK) return result;
+    result = esp_wifi_init(&init);
+    app_flash_guard_leave();
+    if (result != ESP_OK) return result;
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, network_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, network_event, NULL));
@@ -89,7 +95,13 @@ esp_err_t app_network_start(void) {
         ESP_ERROR_CHECK(start_setup_ap(false));
         snprintf(app.ip, sizeof(app.ip), "192.168.4.1");
     }
-    ESP_ERROR_CHECK(esp_wifi_start());
+    /* IDF 5.5.5 waits for wifi_start_process, including first PHY calibration
+     * and its NVS store. Keep that synchronous flash writer outside SPI replies. */
+    result = app_flash_guard_enter(app_flash_guard_deadline());
+    if (result != ESP_OK) return result;
+    result = esp_wifi_start();
+    app_flash_guard_leave();
+    if (result != ESP_OK) return result;
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     if (mdns_init() == ESP_OK) {
         mdns_hostname_set(app.hostname);

@@ -19,6 +19,7 @@ typedef int esp_err_t;
 #define pdMS_TO_TICKS(value) (value)
 #define NVS_READONLY 0
 #define NVS_READWRITE 1
+#define OTA_WITH_SEQUENTIAL_WRITES ((size_t)-2)
 #define SOL_SOCKET 1
 #define SO_RCVTIMEO 2
 

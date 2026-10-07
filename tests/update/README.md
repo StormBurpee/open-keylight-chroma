@@ -46,3 +46,22 @@ if this application reaches and continues running its trial task. A valid
 image that crashes before startup can still require external recovery. These
 tests do not remove that limitation or make NVS writes power-loss atomic across
 multiple keys.
+
+OTA uses `OTA_WITH_SEQUENTIAL_WRITES`: the handler receives a body chunk before
+the IDF write erases its required sectors, instead of bulk-erasing the image
+before receiving. A shared flash/controller guard covers begin, each write,
+finalization, boot selection (including fallback), and the complete trial
+confirmation NVS transaction. Network receive and progress publication occur
+outside that guard. The actual-source mocks assert ownership at each flash
+boundary and inject failure at every admission point, including finalization
+where the still-live OTA handle must be aborted. They verify no repeated write,
+no early full-progress result, balanced releases and preservation of the total
+upload deadline during admission waits. Actual flash timing and cross-core
+interrupt/cache behavior still require the device trial; the portable guard
+and native transport suites separately test exclusion and deadline admission.
+Successful boot selection also publishes an immutable, lock-free controller-I/O
+cutoff at the verified timestamp plus 1400 ms. Tests check that no receive,
+digest, finalization or selection failure publishes it, that it handles a
+64-bit clock, and that a lost response or rejected second upload cannot move it.
+The transport checks this live cutoff even when the worker's phase snapshot
+still says receiving; the scheduled 1500 ms reboot remains independent.

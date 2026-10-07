@@ -1,5 +1,6 @@
 #include "app.h"
 #include "controller_job.h"
+#include "flash_guard.h"
 #include "controller_diagnostic.h"
 #include "mbedtls/sha256.h"
 #include "nvs.h"
@@ -112,12 +113,16 @@ static bool decode_journal(const uint8_t record[JOURNAL_BYTES]) {
 }
 static esp_err_t write_journal(const uint8_t *record) {
     nvs_handle_t handle;
-    esp_err_t result = nvs_open("openkeylight", NVS_READWRITE, &handle);
+    esp_err_t result = app_flash_guard_enter(app_flash_guard_deadline());
     if (result != ESP_OK) return result;
-    result = record ? nvs_set_blob(handle, journal_key, record, JOURNAL_BYTES) : nvs_erase_key(handle, journal_key);
-    if (!record && result == ESP_ERR_NVS_NOT_FOUND) result = ESP_OK;
-    if (result == ESP_OK) result = nvs_commit(handle);
-    nvs_close(handle);
+    result = nvs_open("openkeylight", NVS_READWRITE, &handle);
+    if (result == ESP_OK) {
+        result = record ? nvs_set_blob(handle, journal_key, record, JOURNAL_BYTES) : nvs_erase_key(handle, journal_key);
+        if (!record && result == ESP_ERR_NVS_NOT_FOUND) result = ESP_OK;
+        if (result == ESP_OK) result = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    app_flash_guard_leave();
     return result;
 }
 

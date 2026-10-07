@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../../firmware/main/nxp_transport.c"
+#include "../../firmware/main/flash_guard.c"
 
 static unsigned checks, cases;
 #define CHECK(value) do { ++checks; if (!(value)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #value); exit(1); } } while (0)
@@ -17,6 +18,9 @@ typedef struct {
 static spi_step script[SCRIPT_LIMIT];
 static unsigned count, used, locked, starts, ends, delays, start_calls, wire_starts, gpio_reads;
 static unsigned deny_mutex, fail_allocation;
+static unsigned flash_locked, concurrent_flash, flash_blocked;
+static uint64_t flash_wait_us;
+static uint64_t reboot_deadline, reboot_publish_at;
 static uint64_t time_us, ready_change;
 static int ready, future_ready;
 static spi_transaction_t *in_flight;
@@ -25,13 +29,27 @@ static okl_nxp driver;
 static const uint8_t identity[6] = {2, 1, 2, 3, 4, 5};
 
 int64_t esp_timer_get_time(void) { return (int64_t)time_us; }
-SemaphoreHandle_t xSemaphoreCreateMutex(void) { return fail_allocation ? NULL : &locked; }
+uint64_t app_update_reboot_deadline_us(void) {
+    return time_us >= reboot_publish_at ? reboot_deadline : 0;
+}
+SemaphoreHandle_t xSemaphoreCreateMutex(void) { return fail_allocation ? NULL : guard ? &locked : &flash_locked; }
 int xSemaphoreTake(SemaphoreHandle_t handle, TickType_t ticks) {
+    if (handle == &flash_locked) {
+        CHECK(ticks && ticks != portMAX_DELAY);
+        if (flash_locked) { ++flash_blocked; return 0; } /* Other task remains blocked while SPI progresses. */
+        if (flash_wait_us >= (uint64_t)ticks * 1000) {
+            time_us += (uint64_t)ticks * 1000; flash_wait_us -= (uint64_t)ticks * 1000; return 0;
+        }
+        time_us += flash_wait_us; flash_wait_us = 0; flash_locked = 1; return pdTRUE;
+    }
     CHECK(handle == &locked && !locked && ticks && ticks != portMAX_DELAY);
     if (deny_mutex) { time_us += (uint64_t)ticks * 1000; return 0; }
     locked = 1; return pdTRUE;
 }
-void xSemaphoreGive(SemaphoreHandle_t handle) { CHECK(handle == &locked && locked == 1); locked = 0; }
+void xSemaphoreGive(SemaphoreHandle_t handle) {
+    if (handle == &flash_locked) { CHECK(flash_locked && !in_flight); flash_locked = 0; return; }
+    CHECK(handle == &locked && locked == 1); locked = 0;
+}
 void vTaskDelay(TickType_t ticks) { CHECK(locked && ticks == 1); ++delays; time_us += 1000; CHECK(delays < 1000); }
 int gpio_get_level(unsigned pin) {
     CHECK(pin == 4 && locked);
@@ -59,6 +77,8 @@ esp_err_t spi_device_polling_start(spi_device_handle_t device, spi_transaction_t
     /* Installed Espressif IDF 5.5.5 rejects finite waits before wire setup. */
     if (ticks != portMAX_DELAY) return ESP_ERR_INVALID_ARG;
     CHECK(device == &script && locked && !in_flight && used < count);
+    CHECK(flash_locked);
+    if (concurrent_flash) CHECK(app_flash_guard_enter(time_us + 1) == ESP_ERR_TIMEOUT);
     active_step = &script[used++]; ++starts;
     CHECK(transaction->length == active_step->size * 8 && transaction->tx_buffer && transaction->rx_buffer);
     const uint8_t *tx = transaction->tx_buffer;
@@ -76,6 +96,7 @@ esp_err_t spi_device_polling_start(spi_device_handle_t device, spi_transaction_t
 }
 esp_err_t spi_device_polling_end(spi_device_handle_t device, TickType_t ticks) {
     CHECK(device == &script && locked && ticks == portMAX_DELAY && in_flight);
+    CHECK(flash_locked);
     ++ends; time_us += active_step->duration;
     memcpy(in_flight->rx_buffer, active_step->response, active_step->size);
     in_flight = NULL;
@@ -90,8 +111,11 @@ esp_err_t spi_device_polling_end(spi_device_handle_t device, TickType_t ticks) {
 static void reset(void) {
     ++cases; memset(&bus, 0, sizeof(bus)); memset(&driver, 0, sizeof(driver)); memset(script, 0, sizeof(script));
     count = used = locked = starts = ends = delays = deny_mutex = fail_allocation = 0;
+    guard = NULL; flash_locked = concurrent_flash = flash_blocked = 0; flash_wait_us = 0;
+    reboot_deadline = 0; reboot_publish_at = UINT64_MAX;
     start_calls = wire_starts = gpio_reads = 0;
     time_us = 0; ready = 1; ready_change = UINT64_MAX; in_flight = NULL; active_step = NULL;
+    CHECK(app_flash_guard_init() == ESP_OK);
     CHECK(app_nxp_transport_init(&driver, identity) == ESP_OK);
 }
 static spi_step *step(size_t size, unsigned request, int level) {
@@ -532,6 +556,123 @@ static void test_diagnostic_snapshot_never_clocks_or_clears(void) {
     for (unsigned i = 0; i < sizeof(snapshot.report); ++i) CHECK(!snapshot.report[i]);
     consumed();
 }
+static void test_flash_admission_and_whole_exchange_exclusion(void) {
+    /* Execute the actual guard and transport. A competing flash caller is
+     * denied at request, length and body boundaries until the full exchange
+     * releases its lock; no request is left pending across a flash mutation. */
+    reset(); valid_getter(); flash_wait_us = 4000000; concurrent_flash = 1;
+    CHECK(execute(150000) == OKL_OK);
+    CHECK(time_us == 4000300 && driver.last_admission_wait_us == 4000000);
+    CHECK(flash_blocked == 3 && !flash_locked); consumed();
+    CHECK(app_flash_guard_enter(time_us + 1000) == ESP_OK);
+    app_flash_guard_leave();
+
+    /* In-flight time retains the original response budget, even after long
+     * successful admission. Timeout remains an unresolved wire phase. */
+    reset(); valid_getter(); flash_wait_us = 4000000; script[0].duration = 150000;
+    CHECK(execute(150000) == OKL_TIMEOUT && driver.needs_recovery);
+    CHECK(time_us == 4150000 && bus.phase == LENGTH_PENDING && used == 1 && !flash_locked);
+
+    reset(); valid_getter(); flash_wait_us = 6000000;
+    CHECK(execute(150000) == OKL_TIMEOUT && !starts && !driver.needs_recovery);
+    CHECK(time_us == 5000000 && !locked && !flash_locked && !driver.last_admission_wait_us);
+    reset(); valid_getter(); guard = NULL;
+    CHECK(execute(150000) == OKL_IO && !starts && !locked && !flash_locked);
+
+    reset(); valid_getter(); flash_wait_us = 4000000; driver.admission_deadline_us = 500000;
+    CHECK(execute(150000) == OKL_TIMEOUT && !starts && !driver.needs_recovery);
+    CHECK(time_us == 500000 && !flash_locked && !driver.last_admission_wait_us);
+    reset(); valid_getter(); flash_wait_us = 100000; driver.admission_deadline_us = 200000;
+    CHECK(execute(150000) == OKL_OK && driver.last_admission_wait_us == 50000);
+    CHECK(time_us == 100300 && !flash_locked); consumed();
+    reset(); valid_getter(); flash_wait_us = 100000; driver.admission_deadline_us = 200000;
+    script[0].duration = 100000;
+    CHECK(execute(150000) == OKL_TIMEOUT && time_us == 200000 && driver.needs_recovery);
+    CHECK(used == 1 && !flash_locked);
+
+    /* Pending and uncertain peer phases never earn admission extension. */
+    for (unsigned phase = LENGTH_PENDING; phase <= RESET_PENDING; ++phase) {
+        reset(); bus.phase = phase; driver.needs_recovery = 1; flash_wait_us = 20000;
+        CHECK(recovery(10000) == OKL_TIMEOUT);
+        CHECK(time_us == 10000 && bus.phase == phase && driver.needs_recovery && !starts);
+        CHECK(!locked && !flash_locked && !driver.last_admission_wait_us);
+    }
+    reset(); ready = 0; flash_wait_us = 20000;
+    CHECK(recovery(10000) == OKL_TIMEOUT && time_us == 10000 && !starts);
+    CHECK(!driver.last_admission_wait_us && !flash_locked);
+
+    /* Lease-scoped loader operations also hold the guard over all three CS
+     * windows and typed reset entry, not only portable application getters. */
+    reset(); flash_wait_us = 4000000; concurrent_flash = 1; known_loader();
+    CHECK(time_us == 4000300 && flash_blocked == 3 && !flash_locked);
+    uint8_t request[90]; okl_loader_delivery delivery;
+    loader_report(request, 5, NULL, 0); step(97, 2, 1); flash_wait_us = 4000000;
+    CHECK(app_nxp_loader_send_only(&driver, 17, request, &delivery, time_us + 150000) == OKL_OK);
+    CHECK(delivery == OKL_LOADER_SENT_COMPLETE && bus.phase == RESET_PENDING);
+    CHECK(flash_blocked == 4 && !flash_locked && !locked);
+
+    reset(); CHECK(app_nxp_loader_acquire(&driver, 17, 10000) == OKL_OK);
+    flash_wait_us = 4000000; concurrent_flash = 1; step(97, 4, 1);
+    CHECK(app_nxp_loader_enter(&driver, 17, OKL_LOADER_FROM_LEGACY_1_3, &delivery, 150000) == OKL_OK);
+    CHECK(delivery == OKL_LOADER_SENT_COMPLETE && bus.phase == RESET_PENDING);
+    CHECK(flash_blocked == 1 && time_us == 4000100 && !flash_locked);
+}
+static void test_reboot_cutoff_published_during_admission(void) {
+    /* The worker's snapshot still says RECEIVING, but OTA publishes VERIFIED
+     * while its final flash operation holds the gate. No stale request may
+     * begin after the immutable reboot cutoff. */
+    reset(); valid_getter(); flash_wait_us = 100000;
+    reboot_publish_at = 10000; reboot_deadline = 50000;
+    CHECK(execute(150000) == OKL_TIMEOUT && !starts && !driver.needs_recovery);
+    CHECK(time_us == 100000 && bus.phase == BUS_IDLE && !locked && !flash_locked);
+    CHECK(!driver.last_admission_wait_us);
+
+    /* A newly shorter, still-live deadline is valid, but gives no credit. */
+    reset(); valid_getter(); flash_wait_us = 100000;
+    reboot_publish_at = 10000; reboot_deadline = 120000;
+    CHECK(execute(150000) == OKL_OK && !driver.last_admission_wait_us);
+    CHECK(time_us == 100300 && !flash_locked); consumed();
+    reset(); valid_getter(); flash_wait_us = 100000; script[0].duration = 20000;
+    reboot_publish_at = 10000; reboot_deadline = 120000;
+    CHECK(execute(150000) == OKL_TIMEOUT && driver.needs_recovery && used == 1);
+    CHECK(time_us == 120000 && bus.phase == LENGTH_PENDING && !flash_locked);
+
+    /* If some budget survives above the original deadline, only that net
+     * extension is reported. The explicit caller ceiling remains tighter. */
+    reset(); valid_getter(); flash_wait_us = 100000;
+    reboot_publish_at = 10000; reboot_deadline = 200000;
+    CHECK(execute(150000) == OKL_OK && driver.last_admission_wait_us == 50000);
+    consumed();
+    reset(); valid_getter(); flash_wait_us = 100000; driver.admission_deadline_us = 110000;
+    reboot_publish_at = 10000; reboot_deadline = 200000;
+    CHECK(execute(150000) == OKL_OK && !driver.last_admission_wait_us);
+    consumed();
+
+    /* Recheck every completed DMA phase. A cutoff published in flight never
+     * authorizes the next CS window or invents an idle/recovered peer. */
+    for (unsigned phase = 1; phase <= 3; ++phase) {
+        reset(); valid_getter(); reboot_publish_at = phase * 100; reboot_deadline = phase * 100;
+        CHECK(execute(150000) == OKL_TIMEOUT && driver.needs_recovery && used == phase);
+        CHECK(bus.phase == (phase == 1 ? LENGTH_PENDING : phase == 2 ? BODY_PENDING : BUS_IDLE));
+        CHECK(!flash_locked && !locked && !in_flight);
+        unsigned previous = starts;
+        CHECK(recovery(150000) == OKL_TIMEOUT && starts == previous && driver.needs_recovery);
+    }
+    reset(); valid_getter(); script[0].ready_delay = 10000;
+    reboot_publish_at = 500; reboot_deadline = 1500;
+    CHECK(execute(150000) == OKL_TIMEOUT && used == 1 && bus.phase == LENGTH_PENDING);
+    CHECK(time_us == 2100 && !locked && !flash_locked);
+
+    /* Raw loader operations share the same cutoff and must not arm a reset
+     * token for a request which never entered the wire. */
+    reset(); known_loader();
+    uint8_t request[90]; okl_loader_delivery delivery;
+    loader_report(request, 5, NULL, 0); step(97, 2, 1);
+    flash_wait_us = 100000; reboot_publish_at = time_us + 10000; reboot_deadline = time_us + 50000;
+    CHECK(app_nxp_loader_send_only(&driver, 17, request, &delivery, time_us + 150000) == OKL_TIMEOUT);
+    CHECK(delivery == OKL_LOADER_NOT_SENT && bus.phase == BUS_IDLE && used == 3);
+    CHECK(!locked && !flash_locked);
+}
 int main(void) {
     test_normal_and_zero(); test_zero_wait_preserves_boundary(); test_zero_length_crosses_deadline();
     test_startup_zero(); test_zero_completion_does_not_clock(); test_retained_stale_body();
@@ -545,5 +686,7 @@ int main(void) {
     test_typed_entry_boundary();
     test_resident_proof_is_scoped_and_consumed();
     test_diagnostic_snapshot_never_clocks_or_clears();
+    test_flash_admission_and_whole_exchange_exclusion();
+    test_reboot_cutoff_published_during_admission();
     printf("native transport: %u checks across %u cases passed\n", checks, cases); return 0;
 }

@@ -40,6 +40,8 @@ if result.returncode:
 sources += [ROOT / "firmware/main/nxp_transport.c", ROOT / "firmware/main/nxp_transport.h",
             driver / "include/okl_nxp.h", HERE / "transport_mocks.h", Path(__file__)]
 sources += [loader / "include/okl_loader.h"]
+sources += [ROOT / "firmware/main/flash_guard.c", ROOT / "firmware/main/flash_guard.h"]
+sources += [ROOT / "firmware/main/update_indicator.h"]
 report = {"status": "pass", "sanitizer": "AddressSanitizer", "device_operations": 0,
           "output": result.stdout.strip(), "source_sha256": {
               path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources},

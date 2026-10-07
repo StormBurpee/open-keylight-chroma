@@ -7,6 +7,7 @@
 /* Original implementation of a documented device interface. No vendor code. */
 enum { OKL_REPORT_BYTES = 90, OKL_ARGUMENT_BYTES = 80, OKL_SPI_LIMIT = 480 };
 #define OKL_DEFAULT_TIMEOUT_US UINT64_C(150000)
+#define OKL_MAX_ADMISSION_WAIT_US UINT64_C(5000000)
 
 typedef enum {
     OKL_OK = 0, OKL_INVALID, OKL_BUSY, OKL_TIMEOUT, OKL_IO,
@@ -66,6 +67,15 @@ typedef struct {
      * peer and discard stale replies. It must not silently flash/reset state.
      * Simply clearing a software event is NOT sufficient recovery. */
     okl_result (*recover)(void *user, uint64_t deadline_us);
+    /* Optional replacement for lock, before any wire operation. A platform
+     * may exclude a measured external flash-admission wait from this call's
+     * local deadline, only for an established idle peer. Mutex/wire time and
+     * unresolved response time remain charged. Extension must not exceed
+     * elapsed callback time or OKL_MAX_ADMISSION_WAIT_US. Failure owns no lock;
+     * success is released by unlock. A newly observed hard cutoff may tighten
+     * the deadline; that earns zero credit. Never extend in-flight DMA. */
+    /* A nonzero hard_deadline_us caps admission and the resulting deadline. */
+    okl_result (*lock_with_admission)(void *user, uint64_t *deadline_us, uint64_t hard_deadline_us);
 } okl_transport;
 
 typedef struct {
@@ -73,6 +83,15 @@ typedef struct {
     uint8_t identity[6];   /* Fixed per initialized driver; normally ESP MAC. */
     uint8_t transaction;
     uint8_t needs_recovery;
+    /* Verified net pre-wire deadline extension for the latest API call; zero
+     * without successful admission or when a ceiling removes all extension.
+     * Later wire failure does not erase this credit. A caller
+     * may consume/reset it once for its own budget, never for a fixed reboot
+     * deadline or already in-flight work. */
+    uint64_t last_admission_wait_us;
+    /* Optional fixed wall-clock ceiling (zero disables), including admission
+     * and all wire work. A scoped caller must restore it after its operation. */
+    uint64_t admission_deadline_us;
 } okl_nxp;
 
 typedef struct {

@@ -1,4 +1,5 @@
 #include "scene_store.h"
+#include "flash_guard.h"
 #include "nvs.h"
 #include <stdio.h>
 #include <string.h>
@@ -67,11 +68,15 @@ static bool decode_scenes(const uint8_t in[SCENE_RECORD_BYTES], app_scene scenes
 static esp_err_t persist_scenes(const app_scene scenes[KL_SCENES]) {
     uint8_t record[SCENE_RECORD_BYTES]; encode_scenes(scenes, record);
     nvs_handle_t handle;
-    esp_err_t result = nvs_open("openkeylight", NVS_READWRITE, &handle);
+    esp_err_t result = app_flash_guard_enter(app_flash_guard_deadline());
     if (result != ESP_OK) return result;
-    result = nvs_set_blob(handle, scene_key, record, sizeof(record));
-    if (result == ESP_OK) result = nvs_commit(handle);
-    nvs_close(handle);
+    result = nvs_open("openkeylight", NVS_READWRITE, &handle);
+    if (result == ESP_OK) {
+        result = nvs_set_blob(handle, scene_key, record, sizeof(record));
+        if (result == ESP_OK) result = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    app_flash_guard_leave();
     return result;
 }
 

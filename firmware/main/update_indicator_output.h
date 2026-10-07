@@ -13,11 +13,13 @@ typedef enum {
 /* Volatile, single-worker state. No task, storage, recovery or command retry.
  * A guard is checked before every output request, so a newer Off interrupts a
  * multi-command handoff. Aggregate driver reads/lease operations have one
- * guard and their own bounded deadline. The caller owns renderer suspension. */
+ * guard and their own bounded deadline. Validated pre-wire flash waits extend
+ * receiving/failure handoff budgets once; verified reboot grace is a hard
+ * admission/wire deadline and never extended. The caller owns renderer suspension. */
 typedef struct {
     uint32_t generation, revision;
     bool active, finished, resume_custom;
-    bool failure_seen, release_attempted;
+    bool failure_seen, release_attempted, fixed_deadline;
     uint64_t failure_ms, next_frame_ms, next_guard_ms, deadline_us;
     okl_light_state saved, restored;
     uint8_t saved_rgb[3];
@@ -25,6 +27,11 @@ typedef struct {
     kl_update_output_guard guard;
     void *user;
 } kl_update_output;
+
+/* Tighten a handoff to an externally published reboot deadline. The worker's
+ * guard may call this outside the SPI lock to refresh a stale upload snapshot.
+ * Zero means no published deadline; an existing fixed limit never increases. */
+void kl_update_output_limit(kl_update_output *out, uint64_t deadline_us);
 
 /* known_rgb is the caller's last ACKed custom frame, or NULL. An unknown
  * external custom framebuffer cannot be restored, so it is left untouched.

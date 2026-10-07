@@ -7,6 +7,11 @@ enum { FRAME_MS = 20, GUARD_MS = 250, PURPLE_MS = 300, RESTORE_BEFORE_MS = 1400,
 static uint64_t clock_us(const okl_nxp *d) { return d->transport.now_us(d->transport.user); }
 static uint64_t clock_ms(const okl_nxp *d) { return clock_us(d) / 1000; }
 static uint64_t plus(uint64_t a, uint64_t b) { return UINT64_MAX - a < b ? UINT64_MAX : a + b; }
+void kl_update_output_limit(kl_update_output *o, uint64_t deadline_us) {
+    if (!o || !deadline_us) return;
+    if (!o->fixed_deadline || deadline_us < o->deadline_us) o->deadline_us = deadline_us;
+    o->fixed_deadline = true;
+}
 static uint64_t bounded(kl_update_output *o, const okl_nxp *d, uint64_t amount) {
     uint64_t end = plus(clock_us(d), amount);
     return end < o->deadline_us ? end : o->deadline_us;
@@ -16,9 +21,30 @@ static okl_result allowed(kl_update_output *o, const okl_nxp *d) {
     if (d->needs_recovery) return OKL_NEEDS_RECOVERY;
     return clock_us(d) < o->deadline_us ? OKL_OK : OKL_TIMEOUT;
 }
+static uint64_t before_call(const kl_update_output *o, okl_nxp *d) {
+    uint64_t saved = d->admission_deadline_us;
+    if (o->fixed_deadline && (!saved || o->deadline_us < saved))
+        d->admission_deadline_us = o->deadline_us;
+    return saved;
+}
+static okl_result after_call(kl_update_output *o, okl_nxp *d, okl_result result, uint64_t saved_ceiling) {
+    /* The driver validates this one admission before beginning wire work.
+     * Compound reads/lease calls hold that admission for their whole operation.
+     * Consume only that wait, never wire latency or a previous call's credit. */
+    uint64_t credit = d->last_admission_wait_us;
+    d->last_admission_wait_us = 0;
+    d->admission_deadline_us = saved_ceiling;
+    if (!o->fixed_deadline) o->deadline_us = plus(o->deadline_us, credit);
+    return result;
+}
 static okl_result send(kl_update_output *o, okl_nxp *d, const okl_request *request) {
     okl_result r = allowed(o, d); okl_reply reply;
-    return r == OKL_OK ? okl_nxp_execute(d, request, &reply, bounded(o, d, OKL_DEFAULT_TIMEOUT_US)) : r;
+    if (r == OKL_OK) {
+        uint64_t ceiling = before_call(o, d);
+        r = after_call(o, d,
+            okl_nxp_execute(d, request, &reply, bounded(o, d, OKL_DEFAULT_TIMEOUT_US)), ceiling);
+    }
+    return r;
 }
 static okl_result level(kl_update_output *o, okl_nxp *d, uint8_t value) {
     okl_request q; okl_result r = okl_request_color_brightness(&q, value);
@@ -40,7 +66,11 @@ static okl_result rgb(kl_update_output *o, okl_nxp *d, const uint8_t value[3]) {
 }
 static okl_result read_state(kl_update_output *o, okl_nxp *d, okl_light_state *state) {
     okl_result r = allowed(o, d);
-    return r == OKL_OK ? okl_nxp_read_state(d, state, bounded(o, d, 800000)) : r;
+    if (r == OKL_OK) {
+        uint64_t ceiling = before_call(o, d);
+        r = after_call(o, d, okl_nxp_read_state(d, state, bounded(o, d, 800000)), ceiling);
+    }
+    return r;
 }
 static okl_result release(kl_update_output *o, okl_nxp *d) {
     /* Guarded driver release cannot release a different identity. Even after
@@ -49,12 +79,17 @@ static okl_result release(kl_update_output *o, okl_nxp *d) {
     o->release_attempted = true;
     if (d->needs_recovery) return OKL_NEEDS_RECOVERY;
     if (clock_us(d) >= o->deadline_us) return OKL_TIMEOUT;
-    return okl_nxp_release(d, bounded(o, d, 600000));
+    uint64_t ceiling = before_call(o, d);
+    return after_call(o, d, okl_nxp_release(d, bounded(o, d, 600000)), ceiling);
 }
 static okl_result coherent(kl_update_output *o, okl_nxp *d) {
     okl_owner owner; okl_light_state s;
     okl_result r = allowed(o, d);
-    if (r == OKL_OK) r = okl_nxp_get_owner(d, &owner, bounded(o, d, OKL_DEFAULT_TIMEOUT_US));
+    if (r == OKL_OK) {
+        uint64_t ceiling = before_call(o, d);
+        r = after_call(o, d,
+            okl_nxp_get_owner(d, &owner, bounded(o, d, OKL_DEFAULT_TIMEOUT_US)), ceiling);
+    }
     if (r != OKL_OK) return r;
     if (!owner.claimed || memcmp(owner.identity, d->identity, 6) || owner.name_size != 13 ||
         memcmp(owner.name, "Open Keylight", 13)) return OKL_NOT_OWNER;
@@ -98,7 +133,9 @@ static kl_update_output_result start(kl_update_output *o, okl_nxp *d,
     }
     okl_result r = allowed(o, d);
     if (r != OKL_OK) { o->finished = true; return KL_INDICATOR_NONE; }
-    r = okl_nxp_claim(d, (const uint8_t *)"Open Keylight", 13, bounded(o, d, 600000));
+    uint64_t ceiling = before_call(o, d);
+    r = after_call(o, d,
+        okl_nxp_claim(d, (const uint8_t *)"Open Keylight", 13, bounded(o, d, 600000)), ceiling);
     if (r == OKL_OK) r = read_state(o, d, &o->saved);
     if (r != OKL_OK) return terminate(o, d, r);
     /* Validate the saved state's restoration requests before changing output.
@@ -174,6 +211,7 @@ kl_update_output_result kl_update_output_step(kl_update_output *o, okl_nxp *d,
     if (!o->active) return KL_INDICATOR_NONE;
     uint64_t now = clock_ms(d);
     o->deadline_us = plus(clock_us(d), HANDOFF_MS * 1000u);
+    o->fixed_deadline = e->phase == KL_UPDATE_VERIFIED;
     if (e->phase == KL_UPDATE_VERIFIED) {
         uint64_t end_ms = plus(e->verified_ms, RESTORE_BEFORE_MS);
         o->deadline_us = end_ms > UINT64_MAX / 1000 ? UINT64_MAX : end_ms * 1000;

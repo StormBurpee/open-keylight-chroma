@@ -6,6 +6,7 @@
 #include <string.h>
 
 static unsigned checks, frees, locked, nvs_calls, availability_calls;
+static unsigned flash_held, flash_enters, flash_leaves, fail_flash, nvs_write_handles;
 static bool availability_ready;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "line %u: %s\n", __LINE__, #x); exit(1); } } while (0)
 static void job_free(void *pointer) { CHECK(pointer != NULL); ++frees; free(pointer); }
@@ -31,6 +32,15 @@ void app_mqtt_availability(void) {
     availability_ready=app.controller_ready && app.controller_connected && !app.updating && !app_controller_update_blocked();
 }
 uint64_t app_now_ms(void) { return elapsed_ms; }
+uint64_t app_flash_guard_deadline(void) { return elapsed_ms * 1000u + UINT64_C(5000000); }
+esp_err_t app_flash_guard_enter(uint64_t deadline) {
+    CHECK(deadline == app_flash_guard_deadline() && !flash_held); ++flash_enters;
+    if (fail_flash) return ESP_FAIL;
+    flash_held = 1; return ESP_OK;
+}
+void app_flash_guard_leave(void) {
+    CHECK(flash_held == 1 && nvs_write_handles == 0); ++flash_leaves; flash_held = 0;
+}
 int esp_reset_reason(void) { return reset_reason; }
 void app_event_locked(const char *actor, const char *event, const char *detail) {
     CHECK(locked == 1); CHECK(actor && event && detail);
@@ -50,11 +60,17 @@ int mbedtls_sha256(const unsigned char *data, size_t size, unsigned char *out, i
 }
 esp_err_t nvs_open(const char *name, int mode, nvs_handle_t *handle) {
     ++nvs_calls; CHECK(!strcmp(name, "openkeylight")); CHECK(locked);
+    if (mode == NVS_READWRITE) CHECK(flash_held);
     if (fail_open) return ESP_FAIL;
+    if (mode == NVS_READWRITE) ++nvs_write_handles;
     *handle = mode + 1;
     return ESP_OK;
 }
-void nvs_close(nvs_handle_t handle) { CHECK(handle == 1 || handle == 2); dirty = false; }
+void nvs_close(nvs_handle_t handle) {
+    CHECK(handle == 1 || handle == 2);
+    if (handle == 2) { CHECK(flash_held && nvs_write_handles == 1); --nvs_write_handles; }
+    dirty = false;
+}
 esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *out, size_t *size) {
     ++nvs_calls; CHECK(handle == 1); CHECK(!strcmp(key, journal_key));
     if (fail_read) return ESP_FAIL;
@@ -63,18 +79,21 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *out, size_t *
     memcpy(out, disk, disk_size); *size = disk_size; return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *data, size_t size) {
+    CHECK(flash_held && nvs_write_handles == 1);
     ++nvs_calls; CHECK(handle == 2); CHECK(!strcmp(key, journal_key)); CHECK(size == JOURNAL_BYTES);
     if (fail_set) return ESP_FAIL;
     memcpy(pending, data, size); pending_size = size; pending_present = true; dirty = true;
     return ESP_OK;
 }
 esp_err_t nvs_erase_key(nvs_handle_t handle, const char *key) {
+    CHECK(flash_held && nvs_write_handles == 1);
     ++nvs_calls; CHECK(handle == 2); CHECK(!strcmp(key, journal_key));
     if (fail_erase) return ESP_FAIL;
     if (!disk_present) return ESP_ERR_NVS_NOT_FOUND;
     pending_present = false; pending_size = 0; dirty = true; return ESP_OK;
 }
 esp_err_t nvs_commit(nvs_handle_t handle) {
+    CHECK(flash_held && nvs_write_handles == 1);
     ++nvs_calls; CHECK(handle == 2);
     if ((!fail_commit || commit_despite_error) && dirty) {
         memcpy(disk, pending, pending_size); disk_size = pending_size; disk_present = pending_present;
@@ -86,12 +105,13 @@ static void ready(void) {
     strcpy(app.controller_backend, "original");
 }
 static void reset(bool retain_disk) {
-    CHECK(!locked);
+    CHECK(!locked && !flash_held && !nvs_write_handles);
     if (job.package) free(job.package); /* Simulated reset discards volatile ownership. */
     memset(&job, 0, sizeof(job)); memset(&app, 0, sizeof(app));
     availability_calls=0;availability_ready=false;
     atomic_store(&blocked, true); ready(); frees = 0; nvs_calls = 0;
     fail_open = fail_read = fail_set = fail_erase = fail_commit = fail_hash = 0;
+    flash_enters = flash_leaves = fail_flash = 0;
     dirty = false; commit_despite_error = false;
     reset_reason = ESP_RST_POWERON; elapsed_ms = 0;
     if (!retain_disk) { memset(disk, 0, sizeof(disk)); disk_present = false; disk_size = 0; }
@@ -626,7 +646,41 @@ static void availability_tests(void) {
     CHECK(!app_controller_update_finish(active.id,&a,OKL_LOADER_IO,false,"injected"));
     CHECK(availability_calls==before+1 && !availability_ready && !app.updating);
 }
+static void flash_exclusion_tests(void) {
+    /* Admission failure precedes even NVS open; never claim durable intent. */
+    initialize(); app_controller_job active = running(); okl_loader_audit a = audit_for(&active);
+    unsigned calls = nvs_calls; fail_flash = 1;
+    CHECK(app_controller_update_persist(active.id, &a) == -1);
+    CHECK(nvs_calls == calls && flash_enters == 1 && !flash_leaves && !flash_held);
+    CHECK(app_controller_update_blocked() && !disk_present);
+    CHECK(!app_controller_update_finish(active.id, &a, OKL_LOADER_PERSIST, false, "guard admission failed"));
+    CHECK(frees == 1 && !app.updating);
+
+    /* After complete device evidence, a failed clear admission still retains
+     * the journal and quarantines; no false success or second free. */
+    initialize(); active = running(); a = audit_for(&active);
+    CHECK(app_controller_update_persist(active.id, &a) == 0 && disk_present);
+    calls = nvs_calls; fail_flash = 1; a = complete_for(&active);
+    CHECK(!app_controller_update_finish(active.id, &a, OKL_LOADER_OK, true, NULL));
+    CHECK(nvs_calls == calls && disk_present && app_controller_update_blocked());
+    CHECK(flash_enters == 2 && flash_leaves == 1 && !flash_held && frees == 1);
+    CHECK(!app_controller_update_finish(active.id, &a, OKL_LOADER_OK, true, NULL) && frees == 1);
+
+    /* Every failure inside an admitted NVS span closes before releasing it. */
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        initialize(); active = running(); a = audit_for(&active);
+        if (failure == 0) fail_open = 1;
+        if (failure == 1) fail_set = 1;
+        if (failure >= 2) fail_commit = 1;
+        if (failure == 3) commit_despite_error = true;
+        CHECK(app_controller_update_persist(active.id, &a) == -1);
+        CHECK(flash_enters == 1 && flash_leaves == 1 && !flash_held && !nvs_write_handles);
+        CHECK(app_controller_update_blocked());
+        CHECK(!app_controller_update_finish(active.id, &a, OKL_LOADER_PERSIST, false, "NVS failed"));
+    }
+}
 int main(void) {
+    flash_exclusion_tests();
     availability_tests();
     admission_tests(); package_tests(); persistence_tests(); reboot_tests(); finish_tests(); rejection_tests(); diagnostic_tests();low_diagnostic_tests();
     recovery_tests();reset(false); CHECK(!locked);

@@ -17,6 +17,8 @@ typedef struct {
     uint8_t effect[12], effect_size, rgb, white;
     uint16_t temperature;
     okl_result recovery_result;
+    uint64_t admission_elapsed, admission_credit;
+    unsigned admission_shrink;
 } mock;
 
 static uint8_t xor_bytes(const uint8_t *report) {
@@ -51,6 +53,14 @@ static okl_result lock_bus(void *user,uint64_t deadline) {
     CHECK(deadline>m->now);m->locked=1;++m->locks;m->deadline=deadline;return OKL_OK;
 }
 static void unlock_bus(void *user) {mock *m=user;CHECK(m->locked);m->locked=0;++m->unlocks;}
+static okl_result admitted_lock(void *user,uint64_t *deadline,uint64_t hard_deadline) {
+    mock *m=user;okl_result result=lock_bus(user,*deadline);
+    (void)hard_deadline; /* Deliberately ignore it: driver must still enforce it. */
+    if(result!=OKL_OK)return result;
+    m->now+=m->admission_elapsed;
+    if(m->admission_shrink)--*deadline;else *deadline+=m->admission_credit;
+    m->deadline=*deadline;return OKL_OK;
+}
 static okl_result step(mock *m,uint64_t deadline) {
     CHECK(m->locked);CHECK(deadline==m->deadline);++m->calls;
     if(m->fail_at==m->calls)return OKL_TIMEOUT;
@@ -280,6 +290,47 @@ static void test_owner_and_state(void) {
 static unsigned sample(okl_button *b,int pressed,uint64_t now) {
     unsigned events=999;CHECK(okl_button_sample(b,pressed,now,&events)==0);return events;
 }
+
+static void test_admission_budget(void) {
+    mock m;okl_nxp d;okl_request request;okl_reply reply;okl_light_state state;
+    CHECK(okl_request_get(&request,OKL_GET_FIRMWARE)==OKL_OK);
+    setup(&m,&d);d.transport.lock_with_admission=admitted_lock;
+    m.admission_elapsed=m.admission_credit=4000000;
+    CHECK(okl_nxp_execute(&d,&request,&reply,150000)==OKL_OK);
+    CHECK(d.last_admission_wait_us==4000000 && m.deadline==4150000);
+    m.admission_elapsed=m.admission_credit=0;
+    CHECK(okl_nxp_execute(&d,&request,&reply,m.now+150000)==OKL_OK);
+    CHECK(!d.last_admission_wait_us);
+    for(unsigned kind=0;kind<4;++kind) {
+        setup(&m,&d);d.transport.lock_with_admission=admitted_lock;
+        m.admission_elapsed=4000000;m.admission_credit=4000000;
+        if(kind==0)m.admission_credit++;
+        if(kind==1)m.admission_elapsed=m.admission_credit=OKL_MAX_ADMISSION_WAIT_US+1;
+        if(kind==2)m.admission_shrink=1;
+        if(kind==3){m.admission_elapsed+=200000;}
+        CHECK(okl_nxp_execute(&d,&request,&reply,150000)==(kind>=2?OKL_TIMEOUT:OKL_INVALID));
+        CHECK(!m.requests&&!m.calls&&!m.locked&&m.locks==m.unlocks&&!d.last_admission_wait_us);
+    }
+    setup(&m,&d);d.transport.lock_with_admission=admitted_lock;
+    m.admission_shrink=1;
+    CHECK(okl_nxp_execute(&d,&request,&reply,150000)==OKL_OK);
+    CHECK(m.deadline==149999&&!d.last_admission_wait_us&&m.requests==1);
+    setup(&m,&d);d.transport.lock_with_admission=admitted_lock;
+    m.admission_elapsed=m.admission_credit=4000000;m.late_at=2;
+    CHECK(okl_nxp_execute(&d,&request,&reply,150000)==OKL_TIMEOUT&&d.needs_recovery);
+    CHECK(m.now==4150000&&m.requests==1&&m.locks==m.unlocks);
+    setup(&m,&d);d.transport.lock_with_admission=admitted_lock;
+    m.admission_elapsed=m.admission_credit=4000000;
+    CHECK(okl_nxp_read_state(&d,&state,150000)==OKL_OK&&m.requests==4&&m.locks==1);
+    CHECK(d.last_admission_wait_us==4000000);
+    CHECK(okl_nxp_execute(&d,NULL,&reply,m.now+150000)==OKL_INVALID&&!d.last_admission_wait_us);
+    setup(&m,&d);d.transport.lock_with_admission=admitted_lock;
+    CHECK(okl_nxp_execute(&d,&request,&reply,0)==OKL_TIMEOUT&&!m.locks&&!m.calls);
+    setup(&m,&d);d.transport.lock_with_admission=admitted_lock;
+    d.admission_deadline_us=100000;m.admission_elapsed=m.admission_credit=200000;
+    CHECK(okl_nxp_execute(&d,&request,&reply,150000)==OKL_TIMEOUT&&!m.calls);
+    CHECK(!m.locked&&!d.last_admission_wait_us&&!d.needs_recovery);
+}
 static void test_button(void) {
     okl_button b,previous;unsigned events=999;
     okl_button_init(&b,0,0);
@@ -305,7 +356,7 @@ static void test_button(void) {
 }
 
 int main(void) {
-    test_codec();test_requests();test_controller_status();test_exchange();test_owner_and_state();test_button();
+    test_codec();test_requests();test_controller_status();test_exchange();test_owner_and_state();test_button();test_admission_budget();
     printf("%u checks passed; original C99 codec/driver/gesture tests; no hardware I/O.\n",checks);
     return 0;
 }

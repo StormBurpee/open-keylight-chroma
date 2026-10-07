@@ -1,4 +1,6 @@
 #include "nxp_transport.h"
+#include "flash_guard.h"
+#include "update_indicator.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_timer.h"
@@ -26,23 +28,67 @@ typedef struct {
     okl_loader_delivery last_delivery;
     unsigned has_report;
     uint8_t last_body[97];
+    bool flash_held;
 } nxp_bus;
 static nxp_bus bus;
 
 static uint64_t now_us(void *unused) { (void)unused; return esp_timer_get_time(); }
+static uint64_t wire_deadline(uint64_t deadline) {
+    /* Published without app.mutex: an OTA may finish while admission waits.
+     * Its reboot cutoff cannot be extended by a stale RECEIVING snapshot. */
+    uint64_t reboot = app_update_reboot_deadline_us();
+    return reboot && reboot < deadline ? reboot : deadline;
+}
 static TickType_t ticks_left(uint64_t deadline) {
     uint64_t now = esp_timer_get_time();
     return now >= deadline ? 0 : pdMS_TO_TICKS((deadline - now + 999) / 1000);
 }
 static okl_result lock_bus(void *context, uint64_t deadline) {
     nxp_bus *b = context;
-    return xSemaphoreTake(b->mutex, ticks_left(deadline)) == pdTRUE ? OKL_OK : OKL_TIMEOUT;
+    TickType_t ticks = ticks_left(deadline);
+    return ticks && xSemaphoreTake(b->mutex, ticks) == pdTRUE ? OKL_OK : OKL_TIMEOUT;
 }
-static void unlock_bus(void *context) { xSemaphoreGive(((nxp_bus *)context)->mutex); }
+static void unlock_bus(void *context) {
+    nxp_bus *b = context;
+    if (b->flash_held) { b->flash_held = false; app_flash_guard_leave(); }
+    xSemaphoreGive(b->mutex);
+}
+
+static okl_result lock_bus_admitted(void *context, uint64_t *deadline, uint64_t hard_deadline) {
+    nxp_bus *b = context;
+    *deadline = wire_deadline(*deadline);
+    if (hard_deadline && *deadline > hard_deadline) *deadline = hard_deadline;
+    okl_result result = lock_bus(context, *deadline);
+    if (result != OKL_OK) return result;
+    /* This order is acyclic: flash writers never take the bus mutex; no SPI
+     * callback acquires app.mutex while either lock is held. Only a new idle
+     * exchange may exclude flash admission from its response-time budget. */
+    bool idle = b->phase == BUS_IDLE && gpio_get_level(PIN_READY) == 1;
+    uint64_t before = esp_timer_get_time();
+    uint64_t admission = idle ? app_flash_guard_deadline() : *deadline;
+    admission = wire_deadline(admission);
+    if (hard_deadline && admission > hard_deadline) admission = hard_deadline;
+    esp_err_t entered = app_flash_guard_enter(admission);
+    if (entered != ESP_OK) {
+        unlock_bus(context);
+        return entered == ESP_ERR_TIMEOUT ? OKL_TIMEOUT : OKL_IO;
+    }
+    b->flash_held = true;
+    uint64_t after = esp_timer_get_time();
+    if (after < before || after - before > OKL_MAX_ADMISSION_WAIT_US ||
+        (idle && *deadline > UINT64_MAX - (after - before))) {
+        unlock_bus(context); return OKL_TIMEOUT;
+    }
+    if (idle) *deadline += after - before;
+    if (hard_deadline && *deadline > hard_deadline) *deadline = hard_deadline;
+    *deadline = wire_deadline(*deadline);
+    if (!ticks_left(*deadline)) { unlock_bus(context); return OKL_TIMEOUT; }
+    return OKL_OK;
+}
 
 static okl_result wait_level(int level, uint64_t deadline) {
     while (gpio_get_level(PIN_READY) != level) {
-        if (!ticks_left(deadline)) return OKL_TIMEOUT;
+        if (!ticks_left(wire_deadline(deadline))) return OKL_TIMEOUT;
         vTaskDelay(1);
     }
     return OKL_OK;
@@ -56,6 +102,7 @@ static okl_result wait_ready(void *unused, uint64_t deadline) { (void)unused; re
 
 static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t size, uint64_t deadline) {
     nxp_bus *b = context;
+    deadline = wire_deadline(deadline);
     b->resident_proof_job_id = 0;
     b->resident_information_seen = false;
     b->last_delivery = OKL_LOADER_NOT_SENT;
@@ -91,7 +138,7 @@ static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t
         b->pending_length = (size_t)rx[0] * 256 + rx[1];
         b->phase = b->pending_length ? BODY_PENDING : ZERO_COMPLETE;
     } else { b->phase = BUS_IDLE; b->pending_length = 0; }
-    return ticks_left(deadline) ? OKL_OK : OKL_TIMEOUT;
+    return ticks_left(wire_deadline(deadline)) ? OKL_OK : OKL_TIMEOUT;
 }
 
 static okl_result recover(void *context, uint64_t deadline) {
@@ -205,7 +252,7 @@ okl_result app_nxp_loader_enter(okl_nxp *driver, uint32_t lease_id,
     if (delivery) *delivery = OKL_LOADER_NOT_SENT;
     if (!loader_driver(driver) || !delivery || !lease_id || bus.loader_lease != lease_id ||
         (source != OKL_LOADER_FROM_ORIGINAL && source != OKL_LOADER_FROM_LEGACY_1_3)) return OKL_INVALID;
-    okl_result result = lock_bus(&bus, deadline);
+    okl_result result = lock_bus_admitted(&bus, &deadline, 0);
     if (result != OKL_OK) return result;
     result = arm_ready(&bus, deadline);
     if (result != OKL_OK) goto finished_entry;
@@ -254,7 +301,7 @@ okl_result app_nxp_loader_exchange(okl_nxp *driver, uint32_t lease_id, const uin
     okl_report report; uint8_t tx[97] = {0}, rx[97];
     okl_result result = loader_request(driver, lease_id, request, delivery, &report, 0);
     if (result != OKL_OK || !response) return result == OKL_OK ? OKL_INVALID : result;
-    result = lock_bus(&bus, deadline);
+    result = lock_bus_admitted(&bus, &deadline, 0);
     if (result != OKL_OK) return result;
     result = arm_ready(&bus, deadline);
     if (result != OKL_OK) goto finished;
@@ -296,7 +343,7 @@ okl_result app_nxp_loader_send_only(okl_nxp *driver, uint32_t lease_id, const ui
     okl_report report; uint8_t tx[97] = {0}, rx[97];
     okl_result result = loader_request(driver, lease_id, request, delivery, &report, 1);
     if (result != OKL_OK) return result;
-    result = lock_bus(&bus, deadline);
+    result = lock_bus_admitted(&bus, &deadline, 0);
     if (result != OKL_OK) return result;
     result = arm_ready(&bus, deadline);
     if (result == OKL_OK) {
@@ -347,6 +394,7 @@ esp_err_t app_nxp_transport_init(okl_nxp *driver, const uint8_t mac[6]) {
     result = spi_bus_add_device(SPI2_HOST, &device, &bus.spi);
     if (result != ESP_OK) return result;
     okl_transport transport = {.user = &bus, .now_us = now_us, .lock = lock_bus, .unlock = unlock_bus,
-        .arm_ready = arm_ready, .wait_ready = wait_ready, .transfer = transfer, .recover = recover};
+        .arm_ready = arm_ready, .wait_ready = wait_ready, .transfer = transfer, .recover = recover,
+        .lock_with_admission = lock_bus_admitted};
     return okl_nxp_init(driver, &transport, mac) == OKL_OK ? ESP_OK : ESP_FAIL;
 }

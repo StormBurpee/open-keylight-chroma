@@ -25,12 +25,34 @@ static mock_timeval last_timeout;
 static esp_partition_t partition = {1572864};
 static esp_app_desc_t descriptor = {{0x42}};
 static cJSON response_json;
+static bool flash_owned;
+static unsigned flash_calls, flash_releases, flash_failure_at, excluded_spi;
+static uint64_t flash_wait_ms;
+static unsigned flash_wait_at;
+
+uint64_t app_flash_guard_deadline(void) { return now_ms * 1000 + APP_FLASH_GUARD_WAIT_US; }
+esp_err_t app_flash_guard_enter(uint64_t deadline) {
+    CHECK(!flash_owned && !locked);
+    CHECK(deadline <= now_ms * 1000 + APP_FLASH_GUARD_WAIT_US && deadline > now_ms * 1000);
+    ++flash_calls;
+    if (!flash_wait_at || flash_calls == flash_wait_at) now_ms += flash_wait_ms;
+    if (flash_calls == flash_failure_at || now_ms * 1000 >= deadline) return ESP_ERR_TIMEOUT;
+    flash_owned = true;
+    return ESP_OK;
+}
+void app_flash_guard_leave(void) { CHECK(flash_owned && !locked); flash_owned = false; ++flash_releases; }
+static void flash_mutation(void) {
+    /* A competing complete SPI exchange is unable to enter while an actual
+     * OTA/NVS boundary is executing. Admission timing is tested separately. */
+    CHECK(flash_owned); ++excluded_spi;
+}
 
 static kl_update_indicator indicator_snapshot(void) {
     kl_update_indicator snapshot;
     CHECK(!locked);
     app_update_indicator_snapshot(&snapshot);
     CHECK(!locked);
+    if (snapshot.phase != KL_UPDATE_VERIFIED) CHECK(app_update_reboot_deadline_us() == 0);
     return snapshot;
 }
 static void indicator_receiving(unsigned bytes) {
@@ -38,6 +60,7 @@ static void indicator_receiving(unsigned bytes) {
     CHECK(snapshot.phase == KL_UPDATE_RECEIVING && snapshot.generation != 0);
     CHECK(snapshot.received_bytes == bytes);
     CHECK(kl_update_indicator_progress(&snapshot) <= KL_UPDATE_PROGRESS_RECEIVED);
+    CHECK(app_update_reboot_deadline_us() == 0);
 }
 
 void app_mqtt_availability(void) { CHECK(!locked); ++availability_calls; availability_updating=app.updating; }
@@ -51,6 +74,7 @@ void app_event_locked(const char *actor, const char *event, const char *detail) 
 const char *esp_err_to_name(esp_err_t error) { (void)error; return "mock failure"; }
 const esp_app_desc_t *esp_app_get_description(void) { return &descriptor; }
 esp_err_t nvs_open(const char *name, int mode, nvs_handle_t *out) {
+    if (mode == NVS_READWRITE) flash_mutation();
     CHECK(!strcmp(name, "openkeylight")); ++nvs_calls; *out = mode + 1;
     return nvs_failure == 1 ? ESP_FAIL : ESP_OK;
 }
@@ -63,13 +87,13 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *out, size_t *
     return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *value, size_t size) {
-    (void)handle; ++nvs_calls; CHECK(trial_state == TRIAL_CONFIRMING);
+    (void)handle; flash_mutation(); ++nvs_calls; CHECK(trial_state == TRIAL_CONFIRMING);
     if (!strcmp(key, "accepted_elf")) { CHECK(size == 32); CHECK(!memcmp(value, descriptor.app_elf_sha256, 32)); }
     else CHECK(!strcmp(key, "config_v1") && size == sizeof(app_config));
     return nvs_failure == (!strcmp(key, "config_v1") ? 2 : 3) ? ESP_FAIL : ESP_OK;
 }
 esp_err_t nvs_commit(nvs_handle_t handle) {
-    (void)handle; ++commit_calls;
+    (void)handle; flash_mutation(); ++commit_calls;
     if (race_confirm_commit) {
         now_ms = trial_deadline_ms + 1000;
         CHECK(!trial_poll()); ++deadline_poll_count;
@@ -78,7 +102,7 @@ esp_err_t nvs_commit(nvs_handle_t handle) {
     }
     return nvs_failure == 4 ? ESP_FAIL : ESP_OK;
 }
-void nvs_close(nvs_handle_t handle) { (void)handle; }
+void nvs_close(nvs_handle_t handle) { if (handle == NVS_READWRITE + 1) CHECK(flash_owned); }
 int xTaskCreate(void (*entry)(void *), const char *name, unsigned stack, void *arg, unsigned priority, TaskHandle_t *out) {
     (void)arg; CHECK(priority == 4); ++task_calls; now_ms += create_delay;
     if (!strcmp(name, "update_trial")) { CHECK(entry == trial_task && stack == 3072 && locked); }
@@ -95,31 +119,34 @@ void xTaskNotifyGive(TaskHandle_t handle) {
     kl_update_indicator snapshot = indicator_snapshot();
     CHECK(snapshot.phase == KL_UPDATE_VERIFIED && snapshot.received_bytes == written_bytes);
     CHECK(kl_update_indicator_progress(&snapshot) == KL_UPDATE_PROGRESS_VERIFIED);
+    CHECK(app_update_reboot_deadline_us() == (snapshot.verified_ms + 1400) * 1000);
+    app_lock(); CHECK(app_update_reboot_deadline_us() == reboot_io_deadline_us); app_unlock();
     ++notify_calls;
 }
 void esp_restart(void) { ++restart_calls; /* Return deliberately tests defensive failure handling. */ }
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *previous) { CHECK(!previous); return partition_missing ? NULL : &partition; }
 esp_err_t esp_ota_set_boot_partition(const esp_partition_t *selected) {
-    CHECK(selected == &partition); ++boot_calls;
+    flash_mutation(); CHECK(selected == &partition); ++boot_calls;
     if (app.updating) indicator_receiving(written_bytes); /* Not verified before this call returns. */
     if (race_rollback_confirm) { CHECK(app_trial_confirm() == ESP_ERR_INVALID_STATE); ++confirm_during_rollback; }
     return boot_failure ? ESP_FAIL : ESP_OK;
 }
 esp_err_t esp_ota_begin(const esp_partition_t *selected, size_t size, esp_ota_handle_t *handle) {
-    CHECK(selected == &partition && size >= 288); ++begin_calls; now_ms += begin_delay; *handle = 1;
+    flash_mutation(); CHECK(selected == &partition && size == OTA_WITH_SEQUENTIAL_WRITES);
+    ++begin_calls; now_ms += begin_delay; *handle = 1;
     written_bytes = 0;
     indicator_receiving(0);
     return ota_failure == 1 ? ESP_FAIL : ESP_OK;
 }
 esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *value, size_t size) {
-    CHECK(handle == 1 && value && size && size <= 2048); ++write_calls; now_ms += write_delay;
+    flash_mutation(); CHECK(handle == 1 && value && size && size <= 2048); ++write_calls; now_ms += write_delay;
     indicator_receiving(written_bytes); /* Hashing/receiving does not publish a flash-write success. */
     if (ota_failure == 2 || write_calls == write_failure_at) return ESP_FAIL;
     written_bytes += (unsigned)size;
     return ESP_OK;
 }
 esp_err_t esp_ota_end(esp_ota_handle_t handle) {
-    CHECK(handle == 1); ++end_calls; now_ms += end_delay;
+    flash_mutation(); CHECK(handle == 1); ++end_calls; now_ms += end_delay;
     indicator_receiving(written_bytes);
     CHECK(kl_update_indicator_progress(&update_indicator) == KL_UPDATE_PROGRESS_RECEIVED);
     return ota_failure == 3 ? ESP_FAIL : ESP_OK;
@@ -149,6 +176,7 @@ esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *request, const char *name, ch
     return header_failure == 4 ? ESP_FAIL : ESP_OK;
 }
 int httpd_req_recv(httpd_req_t *request, char *buffer, size_t size) {
+    CHECK(!flash_owned);
     (void)request; ++recv_calls; now_ms += recv_delay;
     if (recv_failure == 1) return -1;
     if (recv_failure == 2) return 0;
@@ -176,6 +204,8 @@ int mbedtls_sha256_finish(mbedtls_sha256_context *sha, unsigned char *out) {
 void mbedtls_sha256_free(mbedtls_sha256_context *sha) { (void)sha; }
 
 static void reset(void) {
+    CHECK(!flash_owned);
+    flash_calls = flash_releases = flash_failure_at = excluded_spi = flash_wait_at = 0; flash_wait_ms = 0;
     CHECK(!locked); memset(&app, 0, sizeof(app));
     availability_calls=0;availability_updating=false;
     now_ms = 100; begin_delay = recv_delay = write_delay = end_delay = create_delay = 0;
@@ -187,6 +217,7 @@ static void reset(void) {
     recv_chunk = 2048; race_confirm_commit = race_rollback_confirm = false;
     trial_state = TRIAL_UNINITIALIZED; trial_deadline_ms = 0; atomic_store(&trial_pending, true);
     memset(&update_indicator, 0, sizeof(update_indicator));
+    atomic_store(&reboot_io_deadline_published, false); reboot_io_deadline_us = 0;
     written_bytes = write_failure_at = 0; response_failure = false;
 }
 static void accepted(void) { accepted_present = 1; app_trial_start(); CHECK(!app_trial_pending()); }
@@ -313,11 +344,64 @@ static void indicator_publication_tests(void) {
     reset(); accepted(); response_failure = true;
     CHECK(http_update(&request) != ESP_OK); /* A lost HTTP response cannot undo accepted boot selection. */
     CHECK(indicator_snapshot().phase == KL_UPDATE_VERIFIED && app.updating && notify_calls == 1);
+    uint64_t cutoff = app_update_reboot_deadline_us();
     unsigned received = written_bytes;
+    now_ms += 20;
     CHECK(http_update(&request) != ESP_OK && response_status == 409);
     CHECK(indicator_snapshot().phase == KL_UPDATE_VERIFIED && written_bytes == received && notify_calls == 1);
+    CHECK(app_update_reboot_deadline_us() == cutoff); /* Rejected work cannot move it. */
     uint64_t time_before_reboot = now_ms;
     reboot_task(NULL);
     CHECK(now_ms == time_before_reboot + 1500 && restart_calls == 1);
+    reset(); accepted(); now_ms = UINT64_C(1) << 33;
+    CHECK(http_update(&request) == ESP_OK);
+    CHECK(app_update_reboot_deadline_us() == (now_ms + 1400) * 1000);
+    CHECK(app_update_reboot_deadline_us() > UINT32_MAX);
 }
-int main(void) { trial_tests(); upload_tests(); indicator_publication_tests(); printf("PASS %u assertions against actual update.c\n", assertions); return 0; }
+static void flash_exclusion_tests(void) {
+    httpd_req_t request = {288};
+    /* Begin, the only write, finalize, and boot selection each need their own
+     * admission. A rejected admission must never execute or retry that call. */
+    for (unsigned fail = 1; fail <= 4; ++fail) {
+        reset(); accepted(); flash_failure_at = fail;
+        CHECK(http_update(&request) != ESP_OK);
+        CHECK(response_status == 408 && !notify_calls && !flash_owned);
+        CHECK(flash_calls == fail && flash_releases == fail - 1);
+        CHECK(begin_calls == (fail > 1) && write_calls == (fail > 2));
+        CHECK(end_calls == (fail > 3) && boot_calls == 0);
+        CHECK(abort_calls == (fail == 2 || fail == 3));
+        CHECK(deleted_tasks == (fail == 4));
+        CHECK(indicator_snapshot().phase == KL_UPDATE_FAILED);
+    }
+    reset(); accepted(); flash_wait_ms = 600;
+    CHECK(http_update(&request) == ESP_OK);
+    CHECK(flash_calls == 4 && flash_releases == 4 && excluded_spi == 4 && !flash_owned);
+    CHECK(recv_calls == 1 && written_bytes == 288);
+    /* Admission delay still consumes the overall 120-second upload budget. */
+    reset(); accepted(); flash_wait_ms = 4500; recv_chunk = 1;
+    CHECK(http_update(&request) != ESP_OK && response_status == 408);
+    CHECK(!notify_calls && !boot_calls && !flash_owned && abort_calls == 1);
+    CHECK(now_ms >= UPLOAD_DURATION_MS && now_ms < UPLOAD_DURATION_MS + 5000);
+    for (unsigned queued = 2; queued <= 4; ++queued) {
+        reset(); accepted();
+        begin_delay = UPLOAD_DURATION_MS - 200;
+        flash_wait_at = queued; flash_wait_ms = 300;
+        CHECK(http_update(&request) != ESP_OK && response_status == 408);
+        CHECK(!boot_calls && !notify_calls && !flash_owned);
+        CHECK(write_calls == (queued > 2) && end_calls == (queued > 3));
+        CHECK(abort_calls == (queued < 4));
+        CHECK(deleted_tasks == (queued == 4));
+    }
+
+    reset(); app_trial_start();
+    unsigned reads = nvs_calls; flash_failure_at = 1;
+    CHECK(app_trial_confirm() == ESP_ERR_TIMEOUT && app_trial_pending());
+    CHECK(nvs_calls == reads && !commit_calls && !flash_owned && trial_state == TRIAL_PENDING);
+    reset(); app_trial_start(); flash_failure_at = 1; now_ms = trial_deadline_ms;
+    CHECK(trial_poll());
+    CHECK(trial_state == TRIAL_FAILED && !boot_calls && !restart_calls && !flash_owned);
+}
+int main(void) {
+    trial_tests(); upload_tests(); indicator_publication_tests(); flash_exclusion_tests();
+    printf("PASS %u assertions against actual update.c\n", assertions); return 0;
+}

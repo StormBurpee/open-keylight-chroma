@@ -30,6 +30,9 @@ clock: offline physical setup, continued AP access after pairing consumes its
 window, independent180-second AP expiry, failed AP configuration and cleanup,
 repeated cleanup after mode-switch failure, ordinary reconnects preserving
 credentials, and unconfigured first-boot setup. No network traffic is sent.
+It also verifies flash exclusion around synchronous Wi-Fi initialization and
+first-start PHY calibration, both admission/call failures, and release before
+later setup. Calibration persistence itself is provided by IDF, not emulated.
 
 The NVS mock models failed writes and commits; it cannot prove physical flash
 power-loss behavior. The digest stand-in is deliberately not a cryptographic

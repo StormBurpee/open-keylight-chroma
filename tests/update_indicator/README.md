@@ -39,6 +39,13 @@ automatic replay across boot.
 The suite injects faults and cancellation at setup/restore boundaries, verifies
 one lease-cleanup attempt, stale-generation suppression, no ownership reclaim,
 no full-master setup flash, exact restoration and the fixed reboot deadline.
+Receiving and failure handoffs charge actual wire time but exclude each validated
+flash-admission wait exactly once. The tests inject waits at every driver
+boundary, including compound reads and lease cleanup, and ensure a credited
+wait never converts a failed exchange into success. Verified uploads instead
+have a hard admission/wire cutoff; tests cover verification published while an
+older receiving snapshot waits behind flash and preservation of stricter caller
+deadlines. The native transport suite separately tests the real admission path.
 `tests/worker/run_tests.py` additionally exercises the actual worker integration,
 including pending Off, lock, failure red, verified purple and renderer resume.
 

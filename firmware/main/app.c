@@ -5,6 +5,7 @@
 #include "nvs_flash.h"
 #include "http_internal.h"
 #include "controller_job.h"
+#include "flash_guard.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -55,6 +56,7 @@ int app_activate_scene(unsigned index, const char *actor, uint32_t expected, boo
 void app_main(void) {
     app.mutex = xSemaphoreCreateMutex();
     if (!app.mutex) abort();
+    ESP_ERROR_CHECK(app_flash_guard_init());
     app.desired = app.reported = kl_state_default();
     snprintf(app.operation, sizeof(app.operation), "pending");
     snprintf(app.actor, sizeof(app.actor), "boot");

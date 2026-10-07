@@ -5,6 +5,7 @@
 #include "nvs_flash.h"
 #include "keylight_policy.h"
 #include "scene_store.h"
+#include "flash_guard.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -18,11 +19,15 @@ typedef struct {
 
 static esp_err_t save_blob(const char *key, const void *value, size_t size) {
     nvs_handle_t handle;
-    esp_err_t result = nvs_open(namespace_name, NVS_READWRITE, &handle);
+    esp_err_t result = app_flash_guard_enter(app_flash_guard_deadline());
     if (result != ESP_OK) return result;
-    result = nvs_set_blob(handle, key, value, size);
-    if (result == ESP_OK) result = nvs_commit(handle);
-    nvs_close(handle);
+    result = nvs_open(namespace_name, NVS_READWRITE, &handle);
+    if (result == ESP_OK) {
+        result = nvs_set_blob(handle, key, value, size);
+        if (result == ESP_OK) result = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    app_flash_guard_leave();
     return result;
 }
 
@@ -36,7 +41,10 @@ esp_err_t app_storage_init(void) {
     app.output_encoding = KL_OUTPUT_SRGB;
     snprintf(app.config.name, sizeof(app.config.name), "Open Keylight");
     snprintf(app.config.role, sizeof(app.config.role), "other");
-    esp_err_t result = nvs_flash_init();
+    esp_err_t result = app_flash_guard_enter(app_flash_guard_deadline());
+    if (result != ESP_OK) return result;
+    result = nvs_flash_init();
+    app_flash_guard_leave();
     if (result != ESP_OK) return result;
     nvs_handle_t handle;
     if (nvs_open(namespace_name, NVS_READONLY, &handle) == ESP_OK) {
@@ -85,11 +93,15 @@ esp_err_t app_config_save(const app_config *config) { return save_blob("config_v
 esp_err_t app_output_encoding_save(kl_output_encoding encoding) {
     if (encoding != KL_OUTPUT_SRGB && encoding != KL_OUTPUT_LINEAR) return ESP_ERR_INVALID_ARG;
     nvs_handle_t handle;
-    esp_err_t result = nvs_open(namespace_name, NVS_READWRITE, &handle);
+    esp_err_t result = app_flash_guard_enter(app_flash_guard_deadline());
     if (result != ESP_OK) return result;
-    result = nvs_set_u8(handle, "out_encoding", (uint8_t)encoding);
-    if (result == ESP_OK) result = nvs_commit(handle);
-    nvs_close(handle);
+    result = nvs_open(namespace_name, NVS_READWRITE, &handle);
+    if (result == ESP_OK) {
+        result = nvs_set_u8(handle, "out_encoding", (uint8_t)encoding);
+        if (result == ESP_OK) result = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    app_flash_guard_leave();
     return result;
 }
 
