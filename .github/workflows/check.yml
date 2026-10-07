@@ -16,6 +16,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libcjson-dev clang lld llvm python3-jsonschema
       - run: cmake -S . -B build/host -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" && cmake --build build/host && ctest --test-dir build/host --output-on-failure
       - run: python3 tests/config/test_contract.py && python3 tests/services/test_recovery_contract.py
+      - run: python3 tests/release/test_package_esp.py
       - run: python3 firmware-nxp/build.py
   interfaces:
     runs-on: ubuntu-24.04
@@ -55,10 +56,13 @@ jobs:
       - run: . /opt/esp/idf/export.sh && idf.py build
         shell: bash
         working-directory: firmware
+      - name: Package application with matching symbols and provenance
+        run: >-
+          python3 tools/package_esp.py --build-dir firmware/build
+          --dashboard-manifest dashboard/dist/asset-manifest.json
+          --commit "$GITHUB_SHA" --output build/release/esp32
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: esp32-development-image
-          path: |
-            firmware/build/open_keylight.bin
-            firmware/build/project_description.json
+          path: build/release/esp32
           if-no-files-found: error

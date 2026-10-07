@@ -1,5 +1,6 @@
 """Embed the audited dashboard assets into the application, deterministically."""
 import hashlib
+import gzip
 import json
 from pathlib import Path
 import sys
@@ -14,6 +15,7 @@ for index, item in enumerate(manifest["files"]):
     assert hashlib.sha256(source.read_bytes()).hexdigest() == item["sha256"]
     data = (root / "dashboard/dist" / item["gzip_path"]).read_bytes()
     assert len(data) == item["gzip_size"]
+    assert gzip.decompress(data) == source.read_bytes(), "Compressed dashboard asset differs from its source"
     lines.append(f"static const unsigned char web_asset_{index}[] = {{")
     lines.extend(",".join(str(byte) for byte in data[offset:offset + 32]) + "," for offset in range(0, len(data), 32))
     lines.append("};")

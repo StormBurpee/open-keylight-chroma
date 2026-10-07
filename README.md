@@ -8,7 +8,7 @@
 
 Independent firmware for the Razer Key Light Chroma, built around local control, a useful physical button, and an API that treats a light like a dependable piece of equipment.
 
-[Architecture](docs/architecture.md) · [API](docs/api-contract.md) · [Dashboard](docs/dashboard.md) · [Development record](PROGRESS.md)
+[Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [API](docs/api-contract.md) · [Dashboard](docs/dashboard.md) · [Development record](PROGRESS.md)
 
 </div>
 
@@ -20,7 +20,7 @@ Open Keylight Chroma is being built to replace **both** applications inside the 
 
 > **Development preview.** Original source and automated tests are available; public installation is not yet qualified. A successful build is not a claim of hardware safety, measured colour accuracy or production readiness. See the development record for exactly what has run on a device.
 
-The original ESP application and its embedded dashboard are running on the development light. Native OTA has also installed the original NXP all-off diagnostic, verified its complete application bank and register record, and returned it to the resident recovery loader. Physical darkness was confirmed during that test. Full NXP lighting output is the next qualification step.
+Both original applications have been installed on the reference light. Native OTA, the OFF1 all-off handoff, the LOW1 five-channel sequence and their resident-loader recovery paths have been exercised; low-level lighting controls have also passed. High-output colour subsequently caused ESP brownout resets. Recovery and PWM handoff changes are under qualification, and the cause is not established. **Full-output reliability and a reproducible stock-to-original installation remain pending.** See [installation and recovery limits](docs/getting-started.md) before using a build on hardware.
 
 ## A small instrument, carefully made
 
@@ -64,6 +64,8 @@ idf.py build
 ```
 
 The dashboard build produces a manifest of four compressed assets, including the scene photography. The ESP build embeds those assets and enforces the existing 1,572,864-byte application slot. **Do not use `idf.py flash` on an installed light:** its newly built bootloader and partition table are not part of the application-only migration.
+
+CI produces development artifacts, not qualified releases. Its ESP archive contains only the application image, matching ELF, build metadata, asset manifest and SHA-256 checksums. It checks the image descriptor against `VERSION` so a stale CMake version cannot silently label a different build. See [artifact verification](docs/getting-started.md#development-artifacts).
 
 For dashboard development, run `npm run dev` in `dashboard` and open the displayed URL with `?demo=1`. The demo has a persistent label, uses an isolated transport and is excluded from production device builds.
 
