@@ -5,6 +5,8 @@
 #include <stdint.h>
 
 typedef enum { KL_WHITE, KL_COLOR } kl_mode;
+/* Desired RGB remains the chosen code values; encoding affects colour output only. */
+typedef enum { KL_OUTPUT_SRGB, KL_OUTPUT_LINEAR } kl_output_encoding;
 typedef enum { KL_EFFECT_NONE, KL_EFFECT_AURORA, KL_EFFECT_BREATHE } kl_effect;
 typedef struct { uint8_t r, g, b; } kl_rgb;
 

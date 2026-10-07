@@ -2,12 +2,18 @@
 #include "nxp_transport.h"
 #include "output_policy.h"
 #include "controller_worker.h"
+#include "update_indicator_output.h"
 #include "freertos/task.h"
 #include <stdio.h>
 #include <string.h>
 
 static okl_nxp nxp;
 static uint8_t native_effect;
+static struct {
+    bool valid;
+    kl_state target;
+    kl_output_encoding encoding;
+} color_intent;
 enum { CONTROLLER_UNKNOWN, CONTROLLER_LEGACY, CONTROLLER_ORIGINAL };
 static struct {
     unsigned backend;
@@ -31,6 +37,22 @@ static void publish_native(const okl_light_state *s, bool adopt, uint32_t revisi
     app_lock();
     kl_state state;
     app.reported_fields = kl_native_report(&app.desired, s, &state);
+    if (color_intent.valid && kl_color_matches(&color_intent.target, color_intent.encoding, s)) {
+        state.rgb = color_intent.target.rgb;
+        state.brightness = color_intent.target.brightness;
+    } else {
+        color_intent.valid = false;
+        if (s->effect) {
+            /* Native raw RGB/master cannot recover the prior user tuple.
+             * Adopt a display estimate once, never gamma-decode raw bytes
+             * again on the next brightness-only command. Its decomposed
+             * fields remain unconfirmed until a new forward-verified intent. */
+            if (adopt && (app.reported_fields & KL_RGB) && app.output_encoding == KL_OUTPUT_SRGB)
+                state.rgb = (kl_rgb){kl_srgb_reconstruct(s->colors[0]),
+                    kl_srgb_reconstruct(s->colors[1]), kl_srgb_reconstruct(s->colors[2])};
+            app.reported_fields &= ~(KL_RGB | KL_BRIGHTNESS);
+        }
+    }
     app.reported = state;
     app.reported_revision = revision;
     app.rgb_confirmed = (app.reported_fields & KL_RGB) != 0;
@@ -87,6 +109,53 @@ static okl_result prepare(const kl_state *target, bool animated, const kl_frame 
     okl_result result = okl_nxp_claim(&nxp, (const uint8_t *)"Open Keylight", 13, nxp.transport.now_us(NULL) + 600000);
     if (result != OKL_OK) return result;
     return kl_output_prepare(target, animated, initial, &native_effect, execute, NULL);
+}
+
+static okl_result prepare_color(bool own_frame, kl_frame *current) {
+    uint8_t known[3] = {kl_byte(current->r), kl_byte(current->g), kl_byte(current->b)}, initial[3];
+    okl_result result;
+    if (own_frame) {
+        okl_owner owner;
+        result = okl_nxp_get_owner(&nxp, &owner, nxp.transport.now_us(NULL) + 150000);
+        if (result != OKL_OK) return result;
+        own_frame = owner.claimed && !memcmp(owner.identity, nxp.identity, sizeof(owner.identity)) &&
+            owner.name_size == 13 && !memcmp(owner.name, "Open Keylight", 13);
+    }
+    result = okl_nxp_claim(&nxp, (const uint8_t *)"Open Keylight", 13, nxp.transport.now_us(NULL) + 600000);
+    if (result != OKL_OK) return result;
+    okl_light_state state;
+    result = okl_nxp_read_state(&nxp, &state, nxp.transport.now_us(NULL) + 800000);
+    if (result != OKL_OK) return result;
+    result = kl_color_enter(&state, own_frame ? known : NULL, initial, &native_effect, execute, NULL);
+    if (result == OKL_OK) *current = (kl_frame){initial[0], initial[1], initial[2], 0, state.temperature_kelvin};
+    return result;
+}
+
+static okl_result read_color_and_publish(const kl_state *target, kl_output_encoding encoding,
+                                         uint32_t revision, bool *mismatch, kl_frame *current) {
+    okl_light_state state;
+    *mismatch = false;
+    okl_result result = okl_nxp_read_state(&nxp, &state, nxp.transport.now_us(NULL) + 800000);
+    if (result != OKL_OK) return result;
+    native_effect = state.effect;
+    *current = observed_frame(&state);
+    if (!kl_color_matches(target, encoding, &state)) {
+        publish_native(&state, false, revision);
+        *mismatch = true;
+        return OKL_VERIFY;
+    }
+    /* Verify the forward transformation, never infer logical sRGB or master
+     * percentage by reversing a quantized byte. Only this exact intent is
+     * attributed to the freshly observed canonical raw tuple. */
+    color_intent.valid = true; color_intent.target = *target; color_intent.encoding = encoding;
+    app_lock();
+    app.reported = *target;
+    app.reported.temperature_k = state.temperature_kelvin;
+    app.reported_fields = KL_POWER | KL_MODE | KL_BRIGHTNESS | KL_RGB | KL_EFFECT | KL_TEMPERATURE;
+    app.reported_revision = revision; app.reported_valid = true; app.rgb_confirmed = true;
+    app.controller_connected = true;
+    app_unlock();
+    return OKL_OK;
 }
 
 static okl_result release_if_synchronized(okl_result result) {
@@ -262,6 +331,14 @@ static okl_result health(void) {
     return OKL_OK;
 }
 
+static bool indicator_guard(void *unused, uint32_t revision) {
+    (void)unused;
+    app_lock();
+    bool unchanged = app.controller_ready && !app.desired.recording_lock && app.output_revision == revision;
+    app_unlock();
+    return unchanged;
+}
+
 static void worker_task(void *unused) {
     (void)unused;
     bool mismatch = false;
@@ -274,9 +351,11 @@ static void worker_task(void *unused) {
     }
     uint64_t next_health = app_now_ms() + HEALTH_INTERVAL_MS;
     kl_transition transition = {0};
+    kl_output_encoding rendering_encoding = KL_OUTPUT_SRGB;
     bool rendering = false;
     bool pending_off = false;
     uint32_t pending_off_revision = 0;
+    kl_update_output indicator = {0};
     for (;;) {
         app_controller_job job;
         if (app_controller_update_take(&job)) {
@@ -285,6 +364,7 @@ static void worker_task(void *unused) {
             uint32_t accepted_off_revision = app.output_revision;
             app_unlock();
             rendering = false;
+            indicator.active = false; indicator.finished = true;
             okl_loader_audit audit;
             app_controller_worker_outcome outcome;
             okl_loader_result updated = app_controller_worker_run(&nxp, &job, &audit, &outcome);
@@ -325,6 +405,51 @@ static void worker_task(void *unused) {
             rendering = false; vTaskDelay(pdMS_TO_TICKS(10)); continue;
         }
         app_lock(); bool ready = app.controller_ready; app_unlock();
+        kl_update_indicator upload;
+        app_update_indicator_snapshot(&upload);
+        app_lock();
+        uint32_t upload_revision = app.output_revision;
+        bool newer_off = upload_revision != seen_revision && !app.desired.power;
+        app_unlock();
+        /* An accepted Off beats a new cosmetic generation. It can also cancel
+         * an in-flight handoff through indicator_guard between exchanges. */
+        bool newer_after_failure = upload.phase == KL_UPDATE_FAILED && upload_revision != seen_revision;
+        if (indicator.generation != upload.generation && (!ready || newer_off || newer_after_failure)) {
+            indicator.generation = upload.generation;
+            indicator.active = false; indicator.finished = true;
+        }
+        uint8_t known_rgb[3] = {kl_byte(current.r), kl_byte(current.g), kl_byte(current.b)};
+        kl_update_output_result indicated = kl_update_output_step(&indicator, &nxp, &upload,
+            upload_revision, rendering ? known_rgb : NULL, indicator_guard, NULL);
+        if (indicated == KL_INDICATOR_ACTIVE) {
+            rendering = false;
+            app_lock(); app.reported_valid = false; app.rgb_confirmed = false; app.reported_fields = 0; app_unlock();
+            vTaskDelay(pdMS_TO_TICKS(5)); continue;
+        }
+        if (indicated == KL_INDICATOR_RESTORED) {
+            native_effect = indicator.restored.effect;
+            current = observed_frame(&indicator.restored);
+            rendering = indicator.resume_custom;
+            if (rendering) {
+                current.r = indicator.saved_rgb[0]; current.g = indicator.saved_rgb[1]; current.b = indicator.saved_rgb[2];
+            }
+            publish_native(&indicator.restored, false, indicator.revision);
+            app_lock();
+            app_event_locked("firmware", "indicator.restored", rendering ?
+                "Prior ACKed custom frame restored; volatile renderer resumed" : "Prior output restored and checked by native getters");
+            app_unlock(); app_mqtt_publish();
+        } else if (indicated == KL_INDICATOR_ERROR) {
+            rendering = false; fault(indicator.error, false);
+            next_health = app_now_ms() + HEALTH_INTERVAL_MS;
+        } else if (indicated == KL_INDICATOR_CANCELLED) {
+            rendering = false; /* The newer revision is handled below, once. */
+        }
+        /* No old renderer runs during the verified reboot grace. Off remains
+         * actionable, while reboot is independently scheduled by update.c. */
+        if (upload.phase == KL_UPDATE_VERIFIED && !newer_off) {
+            rendering = false; vTaskDelay(pdMS_TO_TICKS(10)); continue;
+        }
+        app_lock(); ready = app.controller_ready; app_unlock();
         if (app_now_ms() >= next_health) {
             result = ready ? health() : bootstrap(&current, &seen_revision, true, NULL);
             next_health = app_now_ms() + HEALTH_INTERVAL_MS;
@@ -336,7 +461,8 @@ static void worker_task(void *unused) {
             app_lock(); ready = app.controller_ready; app_unlock();
         }
         if (!ready) { rendering = false; vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-        app_lock(); kl_state target = app.desired; uint32_t revision = app.output_revision; app_unlock();
+        app_lock(); kl_state target = app.desired; uint32_t revision = app.output_revision;
+        kl_output_encoding encoding = app.output_encoding; app_unlock();
         bool apply_pending_off = pending_off && revision == pending_off_revision && !target.power;
         if (revision != seen_revision || apply_pending_off) {
             pending_off = false;
@@ -345,13 +471,16 @@ static void worker_task(void *unused) {
                 result = okl_nxp_recover(&nxp, nxp.transport.now_us(NULL) + 250000);
                 if (result != OKL_OK) { fault(result, false); rendering = false; vTaskDelay(10); continue; }
             }
-            bool animate = target.power && target.mode == KL_COLOR && (target.transition_ms || target.effect != KL_EFFECT_NONE);
-            result = prepare(&target, animate, &current);
+            /* Even zero-duration colour goes through one acknowledged custom
+             * frame. Direct static-to-static requests invoke the legacy fade. */
+            bool animate = target.power && target.mode == KL_COLOR;
+            result = animate ? prepare_color(rendering, &current) : prepare(&target, false, NULL);
             if (result != OKL_OK) {
                 result = release_if_synchronized(result);
                 fault(result, false); rendering = false; vTaskDelay(10); continue;
             }
             kl_transition_begin(&transition, &current, &target, app_now_ms());
+            rendering_encoding = encoding;
             rendering = animate;
             if (!animate) {
                 result = read_and_publish(false, &target, revision, &mismatch, &current);
@@ -365,7 +494,9 @@ static void worker_task(void *unused) {
             } else { app_lock(); app.reported_valid = false; app.rgb_confirmed = false; app.reported_fields = 0; app_unlock(); }
         }
         if (rendering) {
-            kl_frame sample = kl_transition_sample(&transition, app_now_ms());
+            uint64_t sample_ms = app_now_ms();
+            kl_frame sample = kl_color_sample(&transition, rendering_encoding, sample_ms);
+            bool complete = kl_transition_done(&transition, sample_ms);
             result = frame(&sample);
             if (result != OKL_OK) {
                 result = release_if_synchronized(result);
@@ -373,11 +504,14 @@ static void worker_task(void *unused) {
             }
             else {
                 current = sample; /* Keep the last ACKed frame if a later exchange fails. */
-                if (kl_transition_done(&transition, app_now_ms()) && transition.target.effect == KL_EFFECT_NONE) {
-                    /* Restore original RGB and separate master brightness after rendering. */
+                if (complete && transition.target.effect == KL_EFFECT_NONE) {
+                    /* Keep the same master and exact last ACKed raw colour.
+                     * The legacy custom-to-static ramp has zero RGB delta. */
                     mismatch = false;
-                    result = kl_output_park(&transition.target, &native_effect, execute, NULL);
-                    if (result == OKL_OK) result = read_and_publish(false, &transition.target, seen_revision, &mismatch, &current);
+                    uint8_t parked[3] = {kl_byte(sample.r), kl_byte(sample.g), kl_byte(sample.b)};
+                    result = kl_color_park(parked, &native_effect, execute, NULL);
+                    if (result == OKL_OK) result = read_color_and_publish(&transition.target, rendering_encoding,
+                        seen_revision, &mismatch, &current);
                     result = release_if_synchronized(result);
                     rendering = false;
                     if (result != OKL_OK) fault(result, mismatch);
@@ -388,7 +522,7 @@ static void worker_task(void *unused) {
                         app_event_locked("controller", "transition.finished", "RGB and master brightness confirmed by getters"); app_unlock();
                         app_mqtt_publish();
                     }
-                } else if (kl_transition_done(&transition, app_now_ms())) {
+                } else if (complete) {
                     app_lock(); if (seen_revision == app.output_revision) snprintf(app.operation, sizeof(app.operation), "idle"); app_unlock();
                 }
             }
@@ -399,6 +533,7 @@ static void worker_task(void *unused) {
 
 esp_err_t app_worker_start(void) {
     memset(&lifecycle, 0, sizeof(lifecycle));
+    memset(&color_intent, 0, sizeof(color_intent));
     if (!app_controller_update_blocked()) {
         lifecycle_observed("starting", false);
         esp_err_t result = app_nxp_transport_init(&nxp, app.mac);

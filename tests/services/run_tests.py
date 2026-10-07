@@ -47,7 +47,7 @@ network_command = command[:command.index(str(HERE / "test_services.c"))]
 network_command += [str(HERE / "test_network.c"), "-o", str(network_exe)]
 subprocess.run(network_command, check=True)
 outputs.append(run(network_exe))
-sources = [ROOT / f"firmware/main/{name}" for name in ["storage.c", "http_server.c", "network.c", "app.h"]]
+sources = [ROOT / f"firmware/main/{name}" for name in ["storage.c", "scene_store.c", "scene_store.h", "http_server.c", "network.c", "app.h"]]
 sources += [HERE / name for name in ["test_services.c", "service_mocks.h", "test_network.c", "network_mocks.h", "run_tests.py"]]
 report = {"status": "pass", "device_operations": 0, "sanitizer": "AddressSanitizer", "output": outputs, "source_sha256": {path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}, "limits": ["IDF/NVS/socket/crypto boundaries mocked; real cJSON and actual service sources used", "Single-record atomicity relies on NVS; physical flash and reset failure behavior not executed"]}
 (OUT / "result.json").write_text(json.dumps(report, indent=2) + "\n")

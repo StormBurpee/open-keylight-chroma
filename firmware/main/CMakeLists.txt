@@ -1,5 +1,5 @@
-idf_component_register(SRCS "app.c" "storage.c" "network.c" "state_json.c" "http_server.c"
-    "config_api.c" "update.c" "controller_update.c" "controller_job.c" "controller_worker.c"
+idf_component_register(SRCS "app.c" "storage.c" "scene_store.c" "network.c" "state_json.c" "http_server.c"
+    "config_api.c" "update.c" "update_indicator.c" "update_indicator_output.c" "controller_update.c" "controller_job.c" "controller_worker.c"
     "worker.c" "output_policy.c" "nxp_transport.c" "button.c" "mqtt.c"
     INCLUDE_DIRS "." "${CMAKE_CURRENT_BINARY_DIR}"
     REQUIRES keylight_core keylight_nxp keylight_loader keylight_json esp_wifi esp_netif esp_http_server app_update nvs_flash

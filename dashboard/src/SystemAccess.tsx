@@ -11,7 +11,72 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { message, sha256, type StudioStore, type PairedClient } from "./api";
+import {
+  message,
+  sha256,
+  type StudioStore,
+  type PairedClient,
+  type Settings,
+} from "./api";
+
+export function ColourRendering({
+  encoding,
+  disabled,
+  save,
+}: {
+  encoding: NonNullable<Settings["output_encoding"]>;
+  disabled: boolean;
+  save: (value: NonNullable<Settings["output_encoding"]>) => Promise<void>;
+}) {
+  const [selected, setSelected] = useState(encoding);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => setSelected(encoding), [encoding]);
+  return (
+    <form
+      className="settings-form colour-rendering"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        if (disabled || saving || selected === encoding) return;
+        setSaving(true);
+        setError("");
+        try {
+          await save(selected);
+        } catch (cause) {
+          setError(message(cause));
+        } finally {
+          setSaving(false);
+        }
+      }}
+    >
+      <Label htmlFor="output-encoding">Colour rendering</Label>
+      <select
+        id="output-encoding"
+        value={selected}
+        disabled={disabled || saving}
+        onChange={(event) => setSelected(event.target.value as typeof encoding)}
+      >
+        <option value="srgb">sRGB · recommended</option>
+        <option value="linear">Linear · direct channel levels</option>
+      </select>
+      <p className="hint">
+        sRGB interprets colours from the picker and hex codes. Linear uses
+        direct channel levels. White temperature is unchanged.
+      </p>
+      {error && (
+        <p role="alert" className="inline-error">
+          {error}
+        </p>
+      )}
+      <Button
+        variant="outline"
+        disabled={disabled || saving || selected === encoding}
+      >
+        {saving ? "Applying…" : "Apply colour rendering"}
+      </Button>
+    </form>
+  );
+}
 
 export function WifiSetup({
   store,

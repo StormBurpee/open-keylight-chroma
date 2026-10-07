@@ -1,4 +1,5 @@
 #include "http_internal.h"
+#include "update_indicator.h"
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
@@ -17,6 +18,14 @@ enum trial_state { TRIAL_UNINITIALIZED, TRIAL_PENDING, TRIAL_CONFIRMING, TRIAL_C
 static enum trial_state trial_state;
 static uint64_t trial_deadline_ms;
 static atomic_bool trial_pending = true;
+static kl_update_indicator update_indicator;
+
+void app_update_indicator_snapshot(kl_update_indicator *out) {
+    if (!out) return;
+    app_lock();
+    *out = update_indicator;
+    app_unlock();
+}
 
 #define TRIAL_DURATION_MS UINT64_C(180000)
 #define UPLOAD_DURATION_MS UINT64_C(120000)
@@ -151,6 +160,9 @@ esp_err_t http_update(httpd_req_t *request) {
         return http_error(request, 503, "Cannot bound the upload receive time");
     app_lock();
     if (app.updating) { app_unlock(); return http_error(request, 409, "An update is already active"); }
+    if (!kl_update_indicator_begin(&update_indicator, (uint32_t)request->content_len, app_now_ms())) {
+        app_unlock(); return http_error(request, 409, "An application upload is already active");
+    }
     app.updating = true; app_event_locked("update", "upload.started", "Receiving application into inactive slot"); app_unlock();
     uint64_t started_ms = app_now_ms();
     esp_ota_handle_t ota = 0; bool began = false;
@@ -171,6 +183,11 @@ esp_err_t http_update(httpd_req_t *request) {
         if (length <= 0 || (size_t)length > size || upload_expired(started_ms)) { result = ESP_ERR_TIMEOUT; break; }
         if (mbedtls_sha256_update(&sha, buffer, (size_t)length) != 0) { result = ESP_FAIL; break; }
         result = esp_ota_write(ota, buffer, length); received += length;
+        if (result == ESP_OK) {
+            app_lock();
+            (void)kl_update_indicator_advance(&update_indicator, (uint32_t)received);
+            app_unlock();
+        }
     }
     if (result == ESP_OK && mbedtls_sha256_finish(&sha, digest) != 0) result = ESP_FAIL;
     mbedtls_sha256_free(&sha);
@@ -186,8 +203,15 @@ esp_err_t http_update(httpd_req_t *request) {
     if (result == ESP_OK) result = esp_ota_set_boot_partition(partition);
     if (result != ESP_OK && reboot) vTaskDelete(reboot);
     app_lock();
-    if (result != ESP_OK) { app.updating = false; app_event_locked("update", "upload.failed", esp_err_to_name(result)); }
-    else app_event_locked("update", "upload.verified", "Application verified; restarting into trial");
+    if (result != ESP_OK) {
+        kl_update_indicator_fail(&update_indicator);
+        app.updating = false; app_event_locked("update", "upload.failed", esp_err_to_name(result));
+    } else {
+        /* Full progress requires SHA/image validation and accepted boot-slot
+         * selection. Receiving the last network chunk is not verification. */
+        (void)kl_update_indicator_verify(&update_indicator, app_now_ms());
+        app_event_locked("update", "upload.verified", "Application verified; restarting into trial");
+    }
     app_unlock();
     if (result != ESP_OK) return http_error(request, result == ESP_ERR_TIMEOUT ? 408 : result == ESP_ERR_NO_MEM ? 503 : 400,
         "Update did not complete; no reboot was scheduled");

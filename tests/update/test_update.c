@@ -16,12 +16,28 @@ static unsigned begin_calls, write_calls, end_calls, abort_calls, recv_calls, no
 static unsigned hash_bytes, response_status, deadline_poll_count, confirm_during_rollback;
 static size_t recv_chunk;
 static bool race_confirm_commit, race_rollback_confirm;
+static unsigned written_bytes, write_failure_at;
+static bool response_failure;
 static char events[32][32];
 static unsigned event_count;
 static mock_timeval last_timeout;
 static esp_partition_t partition = {1572864};
 static esp_app_desc_t descriptor = {{0x42}};
 static cJSON response_json;
+
+static kl_update_indicator indicator_snapshot(void) {
+    kl_update_indicator snapshot;
+    CHECK(!locked);
+    app_update_indicator_snapshot(&snapshot);
+    CHECK(!locked);
+    return snapshot;
+}
+static void indicator_receiving(unsigned bytes) {
+    kl_update_indicator snapshot = indicator_snapshot();
+    CHECK(snapshot.phase == KL_UPDATE_RECEIVING && snapshot.generation != 0);
+    CHECK(snapshot.received_bytes == bytes);
+    CHECK(kl_update_indicator_progress(&snapshot) <= KL_UPDATE_PROGRESS_RECEIVED);
+}
 
 uint64_t app_now_ms(void) { return now_ms; }
 void app_lock(void) { CHECK(!locked); locked = 1; }
@@ -72,23 +88,40 @@ int xTaskCreate(void (*entry)(void *), const char *name, unsigned stack, void *a
 void vTaskDelay(unsigned ticks) { now_ms += ticks; }
 void vTaskDelete(TaskHandle_t handle) { (void)handle; ++deleted_tasks; }
 unsigned ulTaskNotifyTake(int clear, unsigned timeout) { CHECK(clear && timeout == portMAX_DELAY); return 1; }
-void xTaskNotifyGive(TaskHandle_t handle) { CHECK(handle == (void *)(uintptr_t)0x1234); CHECK(boot_calls == 1); ++notify_calls; }
+void xTaskNotifyGive(TaskHandle_t handle) {
+    CHECK(handle == (void *)(uintptr_t)0x1234); CHECK(boot_calls == 1 && !boot_failure);
+    kl_update_indicator snapshot = indicator_snapshot();
+    CHECK(snapshot.phase == KL_UPDATE_VERIFIED && snapshot.received_bytes == written_bytes);
+    CHECK(kl_update_indicator_progress(&snapshot) == KL_UPDATE_PROGRESS_VERIFIED);
+    ++notify_calls;
+}
 void esp_restart(void) { ++restart_calls; /* Return deliberately tests defensive failure handling. */ }
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *previous) { CHECK(!previous); return partition_missing ? NULL : &partition; }
 esp_err_t esp_ota_set_boot_partition(const esp_partition_t *selected) {
     CHECK(selected == &partition); ++boot_calls;
+    if (app.updating) indicator_receiving(written_bytes); /* Not verified before this call returns. */
     if (race_rollback_confirm) { CHECK(app_trial_confirm() == ESP_ERR_INVALID_STATE); ++confirm_during_rollback; }
     return boot_failure ? ESP_FAIL : ESP_OK;
 }
 esp_err_t esp_ota_begin(const esp_partition_t *selected, size_t size, esp_ota_handle_t *handle) {
     CHECK(selected == &partition && size >= 288); ++begin_calls; now_ms += begin_delay; *handle = 1;
+    written_bytes = 0;
+    indicator_receiving(0);
     return ota_failure == 1 ? ESP_FAIL : ESP_OK;
 }
 esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *value, size_t size) {
     CHECK(handle == 1 && value && size && size <= 2048); ++write_calls; now_ms += write_delay;
-    return ota_failure == 2 ? ESP_FAIL : ESP_OK;
+    indicator_receiving(written_bytes); /* Hashing/receiving does not publish a flash-write success. */
+    if (ota_failure == 2 || write_calls == write_failure_at) return ESP_FAIL;
+    written_bytes += (unsigned)size;
+    return ESP_OK;
 }
-esp_err_t esp_ota_end(esp_ota_handle_t handle) { CHECK(handle == 1); ++end_calls; now_ms += end_delay; return ota_failure == 3 ? ESP_FAIL : ESP_OK; }
+esp_err_t esp_ota_end(esp_ota_handle_t handle) {
+    CHECK(handle == 1); ++end_calls; now_ms += end_delay;
+    indicator_receiving(written_bytes);
+    CHECK(kl_update_indicator_progress(&update_indicator) == KL_UPDATE_PROGRESS_RECEIVED);
+    return ota_failure == 3 ? ESP_FAIL : ESP_OK;
+}
 esp_err_t esp_ota_abort(esp_ota_handle_t handle) { CHECK(handle == 1); ++abort_calls; return ESP_OK; }
 int httpd_req_to_sockfd(httpd_req_t *request) { CHECK(request); return socket_failure == 1 ? -1 : 7; }
 int getsockopt(int socket, int level, int option, void *value, socklen_t *size) {
@@ -122,13 +155,22 @@ int httpd_req_recv(httpd_req_t *request, char *buffer, size_t size) {
     memset(buffer, 0xe9, size); return (int)size;
 }
 esp_err_t http_error(httpd_req_t *request, int status, const char *message) { (void)request; CHECK(message); response_status = (unsigned)status; return ESP_FAIL; }
-esp_err_t http_json(httpd_req_t *request, int status, cJSON *json) { (void)request; CHECK(json->accepted && json->rebooting); response_status = (unsigned)status; return ESP_OK; }
+esp_err_t http_json(httpd_req_t *request, int status, cJSON *json) {
+    (void)request; CHECK(json->accepted && json->rebooting); response_status = (unsigned)status;
+    kl_update_indicator snapshot = indicator_snapshot();
+    CHECK(snapshot.phase == KL_UPDATE_VERIFIED && end_calls == 1 && boot_calls == 1 && !boot_failure);
+    return response_failure ? ESP_FAIL : ESP_OK;
+}
 cJSON *cJSON_CreateObject(void) { memset(&response_json, 0, sizeof(response_json)); return &response_json; }
 void cJSON_AddBoolToObject(cJSON *json, const char *key, bool value) { if (!strcmp(key, "accepted")) json->accepted = value; else { CHECK(!strcmp(key, "rebooting")); json->rebooting = value; } }
 void mbedtls_sha256_init(mbedtls_sha256_context *sha) { sha->bytes = 0; }
 int mbedtls_sha256_starts(mbedtls_sha256_context *sha, int sha224) { (void)sha; CHECK(!sha224); return sha_failure == 1; }
 int mbedtls_sha256_update(mbedtls_sha256_context *sha, const void *data, size_t size) { CHECK(data); sha->bytes += (unsigned)size; hash_bytes += (unsigned)size; return sha_failure == 2; }
-int mbedtls_sha256_finish(mbedtls_sha256_context *sha, unsigned char *out) { CHECK(sha->bytes); memset(out, 0xab, 32); return sha_failure == 3; }
+int mbedtls_sha256_finish(mbedtls_sha256_context *sha, unsigned char *out) {
+    CHECK(sha->bytes); memset(out, 0xab, 32);
+    indicator_receiving(written_bytes);
+    return sha_failure == 3;
+}
 void mbedtls_sha256_free(mbedtls_sha256_context *sha) { (void)sha; }
 
 static void reset(void) {
@@ -141,6 +183,8 @@ static void reset(void) {
     hash_bytes = response_status = deadline_poll_count = confirm_during_rollback = event_count = 0;
     recv_chunk = 2048; race_confirm_commit = race_rollback_confirm = false;
     trial_state = TRIAL_UNINITIALIZED; trial_deadline_ms = 0; atomic_store(&trial_pending, true);
+    memset(&update_indicator, 0, sizeof(update_indicator));
+    written_bytes = write_failure_at = 0; response_failure = false;
 }
 static void accepted(void) { accepted_present = 1; app_trial_start(); CHECK(!app_trial_pending()); }
 static void trial_tests(void) {
@@ -200,13 +244,18 @@ static void upload_tests(void) {
         else create_failure = 1;
         CHECK(http_update(&request) != ESP_OK); CHECK(!boot_calls && !notify_calls);
         CHECK(fault == 7 || !app.updating); CHECK(fault != 17 || (response_status == 503 && end_calls == 1));
+        kl_update_indicator snapshot = indicator_snapshot();
+        CHECK(snapshot.phase == (begin_calls ? KL_UPDATE_FAILED : KL_UPDATE_IDLE));
+        CHECK(snapshot.received_bytes == written_bytes && kl_update_indicator_progress(&snapshot) < KL_UPDATE_PROGRESS_VERIFIED);
     }
     for (int failure = 1; failure <= 3; ++failure) {
         reset(); accepted(); ota_failure = failure; CHECK(http_update(&request) != ESP_OK);
         CHECK(!boot_calls && !notify_calls && !app.updating);
         CHECK(abort_calls == (failure == 2 ? 1u : 0u));
+        CHECK(indicator_snapshot().phase == KL_UPDATE_FAILED);
         reset(); accepted(); sha_failure = failure; CHECK(http_update(&request) != ESP_OK);
         CHECK(abort_calls == 1 && !end_calls && !boot_calls);
+        CHECK(indicator_snapshot().phase == KL_UPDATE_FAILED);
     }
     for (unsigned stage = 0; stage < 5; ++stage) {
         reset(); accepted(); request.content_len = 288;
@@ -218,6 +267,7 @@ static void upload_tests(void) {
         CHECK(http_update(&request) != ESP_OK && response_status == 408);
         CHECK(!boot_calls && !notify_calls && !app.updating);
         CHECK(deleted_tasks == (stage == 4 ? 1u : 0u));
+        CHECK(indicator_snapshot().phase == KL_UPDATE_FAILED);
     }
     reset(); accepted(); recv_chunk = 1; recv_delay = 1000; request.content_len = 288;
     CHECK(http_update(&request) != ESP_OK && response_status == 408);
@@ -226,10 +276,43 @@ static void upload_tests(void) {
     CHECK(http_update(&request) != ESP_OK && !write_calls && !boot_calls);
     reset(); accepted(); boot_failure = 1; CHECK(http_update(&request) != ESP_OK);
     CHECK(boot_calls == 1 && deleted_tasks == 1 && !notify_calls && !app.updating);
+    CHECK(indicator_snapshot().phase == KL_UPDATE_FAILED);
     /* All short read boundaries must preserve exactly the declared byte count. */
     for (size_t chunk = 1; chunk <= 300; ++chunk) {
         reset(); accepted(); recv_chunk = chunk; request.content_len = 301;
         CHECK(http_update(&request) == ESP_OK && hash_bytes == 301 && notify_calls == 1);
     }
 }
-int main(void) { trial_tests(); upload_tests(); printf("PASS %u assertions against actual update.c\n", assertions); return 0; }
+
+static void indicator_publication_tests(void) {
+    httpd_req_t request = {8193};
+    reset(); accepted();
+    kl_update_indicator before = indicator_snapshot();
+    CHECK(before.phase == KL_UPDATE_IDLE && !before.generation && !before.total_bytes);
+    app_update_indicator_snapshot(NULL); CHECK(!locked);
+    write_failure_at = 3;
+    CHECK(http_update(&request) != ESP_OK && !notify_calls && !boot_calls);
+    kl_update_indicator failed = indicator_snapshot();
+    CHECK(failed.phase == KL_UPDATE_FAILED && failed.received_bytes == 4096 && failed.total_bytes == 8193);
+    CHECK(kl_update_indicator_progress(&failed) == 494 && failed.generation == 1);
+    failed.received_bytes = 0; /* The consumer receives a copy, never the live upload state. */
+    CHECK(indicator_snapshot().received_bytes == 4096);
+    header_failure = 1;
+    CHECK(http_update(&request) != ESP_OK);
+    CHECK(indicator_snapshot().generation == 1 && indicator_snapshot().received_bytes == 4096);
+    header_failure = 0; write_failure_at = 0;
+    CHECK(http_update(&request) == ESP_OK);
+    CHECK(indicator_snapshot().generation == 2 && indicator_snapshot().phase == KL_UPDATE_VERIFIED);
+    CHECK(indicator_snapshot().received_bytes == request.content_len);
+
+    reset(); accepted(); response_failure = true;
+    CHECK(http_update(&request) != ESP_OK); /* A lost HTTP response cannot undo accepted boot selection. */
+    CHECK(indicator_snapshot().phase == KL_UPDATE_VERIFIED && app.updating && notify_calls == 1);
+    unsigned received = written_bytes;
+    CHECK(http_update(&request) != ESP_OK && response_status == 409);
+    CHECK(indicator_snapshot().phase == KL_UPDATE_VERIFIED && written_bytes == received && notify_calls == 1);
+    uint64_t time_before_reboot = now_ms;
+    reboot_task(NULL);
+    CHECK(now_ms == time_before_reboot + 1500 && restart_calls == 1);
+}
+int main(void) { trial_tests(); upload_tests(); indicator_publication_tests(); printf("PASS %u assertions against actual update.c\n", assertions); return 0; }

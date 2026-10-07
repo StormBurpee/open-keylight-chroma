@@ -14,6 +14,16 @@ The mocks validate resource lifetimes and ensure boot selection never occurs
 before image validation and reboot-task allocation. They do not replace
 IDF integration tests, flash fault testing, or a physical trial.
 
+The same harness links the actual progress-indicator module. Snapshot checks
+at hash, flash-write, image-validation and boot-selection boundaries prove that
+received bytes publish only after a successful write and remain below full
+progress until boot selection succeeds. Failed uploads retain their terminal
+generation and successfully written byte count; rejected admission leaves that
+record unchanged. A new explicitly accepted upload gets a new generation.
+Snapshots are locked copies. A lost HTTP acceptance response cannot undo an
+already verified image or stop the independent 1.5-second reboot task. The tests
+do not exercise physical indicator colour or worker rendering.
+
 Trial decisions are serialized by the application mutex. A confirmation that
 reserves the decision before180 seconds may finish its NVS operation after
 the deadline. Expiry waits for that result: successful persistence confirms,

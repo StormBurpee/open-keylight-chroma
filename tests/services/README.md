@@ -14,6 +14,17 @@ records, token non-disclosure, authentication and Host/Origin rejection,
 fragmented JSON, duplicate fields, NUL escapes, trailing input, body limits
 and a final fragment that crosses the deadline.
 
+The actual scene-store code is included as well: four exact persisted defaults,
+no activation, one-time migration, existing IDs and edited default names, full
+collections, deletion without reseeding, unsupported/corrupt records, namespace
+absence and read/write/commit faults. A failed commit is tested both before and
+after the complete blob becomes durable; further edits remain blocked until
+reload. These mocks model the blob boundary, not physical flash power loss.
+
+The separate output-encoding byte is tested for absent, invalid and unreadable
+values, explicit sRGB/linear reload, invalid enum rejection, persistence failure,
+handle cleanup and preservation of configuration and paired-client bytes.
+
 The network suite exercises the actual periodic reconnect task with a virtual
 clock: offline physical setup, continued AP access after pairing consumes its
 window, independent180-second AP expiry, failed AP configuration and cleanup,

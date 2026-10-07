@@ -13,17 +13,21 @@ static okl_result worker_claim(okl_nxp *, const uint8_t *, size_t, uint64_t);
 static okl_result worker_release(okl_nxp *, uint64_t);
 static okl_result worker_read(okl_nxp *, okl_light_state *, uint64_t);
 static okl_result worker_recover(okl_nxp *, uint64_t);
+static okl_result worker_owner(okl_nxp *, okl_owner *, uint64_t);
 #define okl_nxp_execute worker_execute
 #define okl_nxp_claim worker_claim
 #define okl_nxp_release worker_release
 #define okl_nxp_read_state worker_read
 #define okl_nxp_recover worker_recover
+#define okl_nxp_get_owner worker_owner
+#include "../../firmware/main/update_indicator_output.c"
 #include "../../firmware/main/worker.c"
 #undef okl_nxp_execute
 #undef okl_nxp_claim
 #undef okl_nxp_release
 #undef okl_nxp_read_state
 #undef okl_nxp_recover
+#undef okl_nxp_get_owner
 
 app_context app;
 static jmp_buf finished;
@@ -31,7 +35,7 @@ static void (*task_entry)(void *);
 static uint64_t now;
 static unsigned locks, claims, releases, reads, versions, publications, faults, recoveries;
 static unsigned writes, delays, stop_after, fail_write, delay_step;
-static okl_request sent[32];
+static okl_request sent[4096];
 static okl_light_state controller;
 static okl_result claim_result, read_result, release_result;
 static bool poison_claim, poison_read, malformed_version, queued_on_read, retarget_after_failure;
@@ -50,6 +54,14 @@ static bool journal_blocked, job_queued, finish_durable, finished_confirmed, off
 static unsigned transport_inits, job_runs, job_finishes, job_rejections;
 static okl_loader_result job_result;
 static bool job_read_only_rejection;
+static kl_update_indicator upload;
+static unsigned upload_at, upload_terminal_at, off_at;
+static bool upload_success;
+static unsigned queued_duration, frame_latency, encoding_at, stolen_at, corrupt_read, owner_reads;
+static okl_result owner_result;
+static bool brightness_only_on_read;
+
+void app_update_indicator_snapshot(kl_update_indicator *out) { CHECK(!locks); *out = upload; }
 
 bool app_controller_update_blocked(void) { return journal_blocked; }
 bool app_controller_update_take(app_controller_job *out) {
@@ -99,10 +111,15 @@ void app_mqtt_publish(void) {
     if (queued_on_read && publications == 1 && app.controller_ready) {
         app.desired = kl_state_default(); app.desired.power = true; app.desired.mode = KL_COLOR;
         app.desired.rgb = (kl_rgb){10, 180, 90}; app.desired.brightness = 80;
+        app.desired.transition_ms = queued_duration;
         app.output_revision = 1; snprintf(app.operation, sizeof(app.operation), "queued");
     }
     if (off_on_read && publications == 1 && app.controller_ready) {
         CHECK(app.updating); app.desired.power = false; ++app.output_revision;
+    }
+    if (brightness_only_on_read && publications == 1 && app.controller_ready) {
+        CHECK(!app.rgb_confirmed && !(app.reported_fields & (KL_RGB | KL_BRIGHTNESS)));
+        app.desired.brightness = 50; app.desired.transition_ms = 0; ++app.output_revision;
     }
 }
 esp_err_t app_nxp_transport_init(okl_nxp *driver, const uint8_t mac[6]) {
@@ -124,20 +141,28 @@ void vTaskDelay(unsigned ticks) {
     if (retarget_after_failure && delays == 2) {
         app.desired.rgb = (kl_rgb){5, 220, 35}; ++app.output_revision;
     }
+    if (delays == encoding_at) { app.output_encoding = KL_OUTPUT_LINEAR; ++app.output_revision; }
+    if (delays == stolen_at) claimed = false;
+    if (delays == upload_at) { CHECK(kl_update_indicator_begin(&upload,1000,now)); app.updating=true; }
+    if (delays == upload_terminal_at) {
+        if (upload_success) { CHECK(kl_update_indicator_advance(&upload,1000)); CHECK(kl_update_indicator_verify(&upload,now)); }
+        else { kl_update_indicator_fail(&upload); app.updating=false; }
+    }
+    if (delays == off_at) { app.desired.power=false; ++app.output_revision; }
     if (delays >= stop_after) longjmp(finished, 1);
 }
-static void bounded(uint64_t deadline, uint64_t maximum_us) {
+static void assert_deadline(uint64_t deadline, uint64_t maximum_us) {
     CHECK(!locks && deadline > now * 1000 && deadline <= now * 1000 + maximum_us);
 }
 static okl_result worker_claim(okl_nxp *driver, const uint8_t *name, size_t size, uint64_t deadline) {
-    bounded(deadline, 600000); ++claims;
+    assert_deadline(deadline, 600000); ++claims;
     CHECK(size == 13 && !memcmp(name, "Open Keylight", size));
     if (claim_result == OKL_OK) claimed = true;
     if (poison_claim) driver->needs_recovery = 1;
     return claim_result;
 }
 static okl_result worker_release(okl_nxp *driver, uint64_t deadline) {
-    bounded(deadline, 600000); CHECK(!driver->needs_recovery); ++releases;
+    assert_deadline(deadline, 600000); CHECK(!driver->needs_recovery); ++releases;
     if (release_result == OKL_OK) {
         if (claimed) foreign_status_owner = false;
         claimed = false;
@@ -145,20 +170,29 @@ static okl_result worker_release(okl_nxp *driver, uint64_t deadline) {
     return release_result;
 }
 static okl_result worker_read(okl_nxp *driver, okl_light_state *state, uint64_t deadline) {
-    bounded(deadline, 800000); ++reads;
+    assert_deadline(deadline, 800000); ++reads;
     if (poison_read) driver->needs_recovery = 1;
-    if (read_result == OKL_OK) *state = controller;
+    if (read_result == OKL_OK) {
+        *state = controller;
+        if (reads == corrupt_read) state->colors[0] ^= 1;
+    }
     return read_result;
 }
 static okl_result worker_recover(okl_nxp *driver, uint64_t deadline) {
-    bounded(deadline, 250000); ++recoveries; driver->needs_recovery = 0; return OKL_OK;
+    assert_deadline(deadline, 250000); ++recoveries; driver->needs_recovery = 0; return OKL_OK;
+}
+static okl_result worker_owner(okl_nxp *driver, okl_owner *owner, uint64_t deadline) {
+    ++owner_reads;
+    assert_deadline(deadline,150000);memset(owner,0,sizeof(*owner));owner->claimed=claimed;
+    memcpy(owner->identity,driver->identity,6);owner->name_size=13;memcpy(owner->name,"Open Keylight",13);
+    return owner_result;
 }
 static void put_word(uint8_t *out, uint32_t value) {
     out[0] = (uint8_t)(value >> 24); out[1] = (uint8_t)(value >> 16);
     out[2] = (uint8_t)(value >> 8); out[3] = (uint8_t)value;
 }
 static okl_result worker_execute(okl_nxp *driver, const okl_request *request, okl_reply *reply, uint64_t deadline) {
-    bounded(deadline, OKL_DEFAULT_TIMEOUT_US); CHECK(!driver->needs_recovery);
+    assert_deadline(deadline, OKL_DEFAULT_TIMEOUT_US); CHECK(!driver->needs_recovery);
     memset(reply, 0, sizeof(*reply));
     if (request->command == OKL_GET_FIRMWARE) {
         ++versions; reply->received = 1; reply->acknowledged = 1; reply->report.status = 2;
@@ -214,18 +248,18 @@ static okl_result worker_execute(okl_nxp *driver, const okl_request *request, ok
         reply->received = reply->acknowledged = 1; reply->report.status = 2;
         reply->report.opcode = 0xfd; reply->report.size = 1; reply->report.arguments[0] = 1; return OKL_OK;
     }
-    CHECK(claimed && writes < 32); sent[writes++] = *request;
+    CHECK(claimed && writes < 4096); sent[writes++] = *request;
     if (fail_write == writes) {
         if (poison_write) { driver->needs_recovery = 1; return OKL_TIMEOUT; }
         return OKL_REMOTE; /* Correlated rejection leaves the link synchronized. */
     }
     const uint8_t *a = request->arguments;
     switch (request->command) {
-    case OKL_SET_EFFECT: controller.effect = a[2]; controller.color_count = a[5]; memcpy(controller.colors, a + 6, 6); break;
+    case OKL_SET_EFFECT: controller.effect = a[2]; controller.flags=a[3];controller.speed=a[4];controller.color_count = a[5]; memcpy(controller.colors, a + 6, 6); break;
     case OKL_SET_COLOR_BRIGHTNESS: controller.color_brightness = a[2]; break;
     case OKL_SET_WHITE_BRIGHTNESS: controller.white_brightness = a[2]; break;
     case OKL_SET_TEMPERATURE: controller.temperature_kelvin = (uint16_t)(a[2] * 256u + a[3]); break;
-    case OKL_SET_FRAME: break;
+    case OKL_SET_FRAME: now += frame_latency; break;
     default: CHECK(false);
     }
     return OKL_OK;
@@ -249,6 +283,9 @@ static void reset(void) {
     journal_blocked = job_queued = finished_confirmed = off_on_read = false; finish_durable = true;
     transport_inits = job_runs = job_finishes = job_rejections = 0; job_result = OKL_LOADER_OK;
     job_read_only_rejection=false;
+    memset(&upload,0,sizeof(upload));upload_at=upload_terminal_at=off_at=0;upload_success=false;
+    queued_duration=600;frame_latency=encoding_at=stolen_at=corrupt_read=owner_reads=0;owner_result=OKL_OK;
+    brightness_only_on_read=false;
     controller = (okl_light_state){.effect = 1, .color_count = 1, .colors = {255, 0, 32},
                                   .color_brightness = 102, .temperature_kelvin = 4500};
 }
@@ -262,7 +299,10 @@ static void test_startup(void) {
     CHECK(claims == 1 && versions == 1 && reads == 1 && releases == 1 && !claimed);
     CHECK(!writes && !faults && publications == 1 && app.reported_valid && app.controller_connected);
     CHECK(app.desired.power && app.desired.mode == KL_COLOR && app.desired.brightness == 40);
-    CHECK(app.desired.rgb.r == 255 && app.desired.rgb.b == 32 && !strcmp(app.operation, "idle"));
+    CHECK(app.desired.rgb.r == 255 && app.desired.rgb.b == kl_srgb_reconstruct(32) && !strcmp(app.operation, "idle"));
+    CHECK(!app.rgb_confirmed && !(app.reported_fields & (KL_RGB | KL_BRIGHTNESS)));
+    reset(); controller.white_brightness = 10; run();
+    CHECK(app.reported_valid && !app.rgb_confirmed && !(app.reported_fields & (KL_RGB | KL_BRIGHTNESS | KL_MODE)));
     for (unsigned failure = 0; failure < 5; ++failure) {
         reset(); stop_after = 3;
         if (failure == 0) { claim_result = OKL_OWNER_DENIED; }
@@ -280,16 +320,16 @@ static void test_startup(void) {
 }
 static void test_startup_queued_transition(void) {
     reset(); queued_on_read = true; run();
-    CHECK(claims == 2 && releases == 1 && writes == 6 && !faults);
+    CHECK(claims == 2 && releases == 1 && writes == 4 && !faults);
     CHECK(app.desired.rgb.r == 10 && app.desired.brightness == 80);
-    CHECK(sent[3].command == OKL_SET_FRAME);
-    CHECK(sent[3].arguments[5] == 102 && sent[3].arguments[6] == 0 && sent[3].arguments[7] == 13);
-    CHECK(sent[4].command == OKL_SET_COLOR_BRIGHTNESS && sent[4].arguments[2] == 255);
+    CHECK(sent[0].command == OKL_SET_FRAME);
+    CHECK(sent[0].arguments[5] == 102 && sent[0].arguments[6] == 0 && sent[0].arguments[7] == 12);
+    CHECK(sent[2].command == OKL_SET_COLOR_BRIGHTNESS && sent[2].arguments[2] == 255);
     CHECK(!app.reported_valid && !app.completed_revision);
     for (unsigned level = 0; level <= 255; ++level) {
         reset(); queued_on_read = true; controller.color_brightness = (uint8_t)level; run();
-        CHECK(sent[3].command == OKL_SET_FRAME && sent[3].arguments[5] == level);
-        CHECK(sent[3].arguments[7] == (32u * level + 127u) / 255u);
+        CHECK(sent[0].command == OKL_SET_FRAME && sent[0].arguments[5] == 255u * (level * 100u / 255u) / 100u);
+        CHECK(sent[0].arguments[7] == 32u * (level * 100u / 255u) / 100u);
     }
     reset(); queued_on_read = true; controller.effect = 8; controller.color_brightness = 255; run();
     CHECK(sent[3].arguments[5] == 0 && sent[3].arguments[6] == 0 && sent[3].arguments[7] == 0);
@@ -300,13 +340,12 @@ static void test_setup_and_frame_failures(void) {
         reset(); queued_on_read = true; fail_write = failed; stop_after = 3; run();
         CHECK(writes == failed && claims == 2 && releases == 2 && !claimed);
         CHECK(faults == 1 && !app.reported_valid && !app.completed_revision && !recoveries);
-        if (failed == 4) CHECK(controller.color_brightness == 0); /* First frame rejection cannot enable master. */
+        if (failed == 1) CHECK(controller.effect == 1 && controller.color_brightness == 102);
     }
-    reset(); queued_on_read = true; fail_write = 7; delay_step = 500;
-    retarget_after_failure = true; stop_after = 3; run();
-    CHECK(faults == 1 && claims == 3 && writes == 7);
-    CHECK(sent[6].command == OKL_SET_FRAME && sent[6].arguments[6] != 0); /* Rejected mid-fade sample. */
-    CHECK(app.controller_ready && app.completed_revision == 0); /* No queued replay through recovery. */
+    reset(); queued_on_read = true; fail_write = 5; delay_step = 100; stop_after = 3; run();
+    CHECK(faults == 1 && claims == 2 && writes == 5);
+    CHECK(sent[4].command == OKL_SET_FRAME && sent[4].arguments[6] != 0); /* Rejected mid-fade sample. */
+    CHECK(!app.controller_ready && app.completed_revision == 0); /* No command replay after failure. */
     for (unsigned failed = 1; failed <= 6; ++failed) {
         reset(); queued_on_read = true; fail_write = failed; poison_write = true; stop_after = 3; run();
         CHECK(writes == failed && claims == 2 && releases == 1 && nxp.needs_recovery);
@@ -315,11 +354,89 @@ static void test_setup_and_frame_failures(void) {
 }
 static void test_transition_completion(void) {
     reset(); queued_on_read = true; delay_step = 2000; stop_after = 2; run();
-    CHECK(writes == 9 && releases == 2 && !claimed && !faults);
-    CHECK(sent[7].command == OKL_SET_COLOR_BRIGHTNESS && sent[7].arguments[2] == 204);
-    CHECK(sent[8].command == OKL_SET_EFFECT && sent[8].arguments[2] == 1);
+    CHECK(writes == 6 && releases == 2 && !claimed && !faults);
+    CHECK(sent[4].command == OKL_SET_FRAME && sent[5].command == OKL_SET_EFFECT && sent[5].arguments[2] == 1);
+    CHECK(controller.color_brightness == 255);
+    CHECK(controller.colors[1] == (kl_srgb_channel(180) * 80u + 50u) / 100u);
     CHECK(app.completed_revision == 1 && app.reported_revision == 1 && app.reported_valid && app.rgb_confirmed);
     CHECK(!strcmp(app.operation, "idle") && app.reported.rgb.g == 180 && app.reported.brightness == 80);
+}
+static void test_canonical_color_worker(void) {
+    for (unsigned encoding = 0; encoding < 2; ++encoding) {
+        reset(); queued_on_read = true; queued_duration = 0;
+        app.output_encoding = (kl_output_encoding)encoding; run();
+        CHECK(writes == 5 && !faults && app.completed_revision == 1 && app.rgb_confirmed);
+        CHECK(sent[0].command == OKL_SET_FRAME); /* Seed while native Static is still selected. */
+        CHECK(sent[1].command == OKL_SET_EFFECT && sent[1].arguments[2] == 8);
+        CHECK(sent[3].command == OKL_SET_FRAME);
+        CHECK(sent[4].command == OKL_SET_EFFECT && sent[4].arguments[2] == 1);
+        CHECK(!memcmp(sent[3].arguments + 5, sent[4].arguments + 6, 3));
+        CHECK(controller.color_brightness == 255 && !controller.white_brightness);
+        CHECK(controller.colors[1] == (encoding ? 144 : (kl_srgb_channel(180) * 80u + 50u) / 100u));
+        CHECK(app.desired.rgb.g == 180 && app.reported.rgb.g == 180 && app.reported.brightness == 80);
+        /* Matching indicator restoration retains this logical tuple. Unknown
+         * or externally changed raw bytes invalidate its provenance. */
+        publish_native(&controller, false, 1);
+        CHECK(app.reported.rgb.g == 180 && app.reported.brightness == 80 && color_intent.valid);
+        controller.colors[0] ^= 1; publish_native(&controller, false, 1);
+        CHECK(!color_intent.valid && app.reported.rgb.r == controller.colors[0]);
+    }
+    reset(); queued_on_read = true; controller.color_brightness = 255;
+    delay_step = 100; stop_after = 2; run();
+    CHECK(writes == 4 && sent[0].command == OKL_SET_FRAME && sent[0].arguments[5] == 255);
+    for (unsigned i = 0; i < writes; ++i) CHECK(sent[i].command != OKL_SET_COLOR_BRIGHTNESS);
+    /* Retarget uses the last ACKed raw frame without toggling mode/master. */
+    reset(); queued_on_read = true; controller.color_brightness = 255;
+    retarget_after_failure = true; delay_step = 100; stop_after = 3; run();
+    CHECK(writes == 5 && owner_reads == 1 && !faults);
+    CHECK(sent[3].command == OKL_SET_FRAME && sent[4].command == OKL_SET_FRAME);
+    CHECK(!memcmp(sent[3].arguments + 5, sent[4].arguments + 5, 3));
+    for (unsigned i = 2; i < writes; ++i) CHECK(sent[i].command == OKL_SET_FRAME);
+    /* A foreign owner breaks framebuffer provenance even if effect8 remains. */
+    reset(); queued_on_read = true; controller.color_brightness = 255;
+    retarget_after_failure = true; stolen_at = 2; delay_step = 100; stop_after = 3; run();
+    CHECK(owner_reads == 1 && writes == 8 && !faults);
+    CHECK(sent[4].command == OKL_SET_COLOR_BRIGHTNESS && !sent[4].arguments[2]);
+    CHECK(sent[5].command == OKL_SET_FRAME && !sent[5].arguments[5] && !sent[5].arguments[6] && !sent[5].arguments[7]);
+    reset(); queued_on_read = true; controller.color_brightness = 255;
+    retarget_after_failure = true; owner_result = OKL_IO; delay_step = 100; stop_after = 3; run();
+    CHECK(owner_reads == 1 && writes == 4 && faults == 1 && !app.completed_revision);
+    /* A slow ACK crossing the duration must not park a pre-deadline sample. */
+    reset(); queued_on_read = true; controller.color_brightness = 255;
+    frame_latency = 650; stop_after = 1; run();
+    CHECK(writes == 3 && controller.effect == 8 && !app.completed_revision);
+    reset(); queued_on_read = true; controller.color_brightness = 255;
+    frame_latency = 650; stop_after = 2; run();
+    CHECK(writes == 5 && controller.effect == 1 && app.completed_revision == 1);
+    CHECK(controller.colors[1] == (kl_srgb_channel(180) * 80u + 50u) / 100u);
+    /* Encoding revision applies forward conversion once, leaving chosen hex
+     * and brightness unchanged and requiring a new exact raw readback. */
+    reset(); queued_on_read = true; queued_duration = 0; encoding_at = 1; stop_after = 2; run();
+    CHECK(!faults && app.completed_revision == 2 && app.reported_revision == 2);
+    CHECK(controller.colors[1] == 144 && app.reported.rgb.g == 180 && app.reported.brightness == 80);
+    CHECK(writes == 9); /* Second canonical handoff has no master write. */
+    reset(); queued_on_read = true; queued_duration = 0; fail_write = 5; run();
+    CHECK(faults == 1 && !app.completed_revision && !app.reported_valid);
+    reset(); queued_on_read = true; queued_duration = 0; corrupt_read = 3; run();
+    CHECK(faults == 1 && !app.completed_revision && !color_intent.valid);
+    CHECK(app.reported_valid && strcmp(app.operation, "idle")); /* Fresh mismatch is not confirmation. */
+}
+static void test_reboot_color_adoption(void) {
+    for (unsigned encoding = 0; encoding < 2; ++encoding) {
+        for (unsigned raw = 0; raw <= 255; ++raw) {
+            reset(); app.output_encoding = (kl_output_encoding)encoding;
+            controller.color_brightness = 255; controller.colors[0] = (uint8_t)raw;
+            brightness_only_on_read = true; run();
+            unsigned logical = encoding == KL_OUTPUT_SRGB ? kl_srgb_reconstruct((uint8_t)raw) : raw;
+            unsigned decoded = encoding == KL_OUTPUT_SRGB ? kl_srgb_channel((uint8_t)logical) : raw;
+            CHECK(app.desired.rgb.r == logical && app.reported.rgb.r == logical);
+            CHECK(controller.colors[0] == (decoded * 50u + 50u) / 100u);
+            CHECK(abs((int)controller.colors[0] - (int)((raw * 50u + 50u) / 100u)) <= 1);
+            CHECK(sent[0].command == OKL_SET_FRAME && sent[0].arguments[5] == raw);
+            CHECK(app.completed_revision == 1 && app.reported_valid && app.rgb_confirmed);
+            CHECK(app.reported.brightness == 50 && controller.color_brightness == 255 && !faults);
+        }
+    }
 }
 static void original_reset(void) {
     reset(); original = true;
@@ -343,7 +460,7 @@ static void test_legacy_owner_admission(void) {
     CHECK(claims == 1 && releases == 1 && versions == 1 && status_reads == 2 && reads == 1);
     CHECK(app.controller_ready && !strcmp(app.controller_backend, "legacy") && !claimed);
     CHECK(!writes && !confirmations && !faults && app.reported_valid);
-    CHECK(app.reported.rgb.r == 255 && app.reported.rgb.b == 32 && app.desired.power);
+    CHECK(app.reported.rgb.r == 255 && app.reported.rgb.b == kl_srgb_reconstruct(32) && app.desired.power);
     CHECK(health() == OKL_OK && claims == 1 && releases == 1); /* Released/unclaimed stock FC dispatches. */
     foreign_status_owner = true;
     CHECK(health() == OKL_OWNER_DENIED && claims == 1); /* Health never steals another owner. */
@@ -409,7 +526,7 @@ static void test_confirmation_readback_and_ambiguity(void) {
 static void test_health_and_reset_no_replay(void) {
     original_reset(); queued_on_read = true; reset_at = 1000; delay_step = 1000; stop_after = 5; run();
     CHECK(reset_done && confirmations == 2 && faults == 1 && app.controller_ready);
-    CHECK(writes == 6 && !controller.effect && !controller.white_brightness); /* No frames after reset detection. */
+    CHECK(writes == 4 && !controller.effect && !controller.white_brightness); /* No frames after reset detection. */
     CHECK(app.output_revision == 1 && app.completed_revision == 0 && app.reported_revision == 0);
     CHECK(app.desired.power && app.reported_valid && !app.reported.power); /* Desired scene remains visible, never replayed. */
     CHECK(app.controller_last_health_ms == 4000);
@@ -463,13 +580,74 @@ static void test_update_worker_gates(void) {
     app.desired.power=false;app.output_revision=9;stop_after=4;delay_step=1000;
     run();CHECK(!writes && app.controller_ready); /* Already consumed Off is not a new request. */
 }
+static void test_update_indicator_worker(void) {
+    for(unsigned success=0;success<2;++success) {
+        reset();okl_light_state saved=controller;
+        upload_at=1;upload_terminal_at=8;upload_success=success!=0;stop_after=110;delay_step=20;
+        run();CHECK(upload.generation==1 && upload.phase==(success?KL_UPDATE_VERIFIED:KL_UPDATE_FAILED));
+        CHECK(same(&saved,&controller) && app.reported_valid && app.controller_ready && !claimed && !faults);
+        CHECK(claims==2 && releases==2 && writes>10 && !app.output_revision && !app.completed_revision);
+        bool blue=false,purple=false,red=false;
+        for(unsigned n=0;n<writes;++n)if(sent[n].command==OKL_SET_FRAME){
+            const uint8_t *a=sent[n].arguments;
+            CHECK(!a[6]);blue|=!a[5] && a[7]!=0;purple|=a[5]!=0 && a[7]!=0;red|=a[5]!=0 && !a[7];
+        }
+        CHECK(blue && (success?purple && !red:red));
+    }
+    /* A new Off cancels the generation, runs once, and no later progress or
+     * verified notification can restart the cosmetic animation. */
+    reset();upload_at=1;upload_terminal_at=8;upload_success=true;off_at=4;stop_after=40;delay_step=20;
+    run();CHECK(!controller.effect && !controller.white_brightness && !claimed && !faults);
+    CHECK(app.completed_revision==1 && app.output_revision==1);
+    unsigned last_off=0;
+    for(unsigned n=0;n<writes;++n)if(sent[n].command==OKL_SET_EFFECT && !sent[n].arguments[2])last_off=n;
+    CHECK(last_off==writes-1);
+    /* Off already pending when the upload appears suppresses setup entirely. */
+    reset();upload_at=off_at=1;stop_after=6;delay_step=20;run();
+    CHECK(writes==2 && !controller.effect && app.completed_revision==1);
+    /* Unknown external custom framebuffer cannot be captured by getters. */
+    reset();controller.effect=8;controller.color_brightness=255;upload_at=1;stop_after=6;run();
+    CHECK(!writes && claims==2 && releases==2 && app.controller_ready);
+    reset();app.desired.recording_lock=true;upload_at=1;stop_after=6;run();
+    CHECK(!writes && claims==1 && releases==1 && app.controller_ready);
+    reset();upload_at=upload_terminal_at=1;stop_after=100;delay_step=20;run();
+    CHECK(!faults && claims==2 && releases==2 && app.reported_valid);
+    for(unsigned n=0;n<writes;++n)if(sent[n].command==OKL_SET_FRAME)
+        CHECK(sent[n].arguments[5]>=43 && !sent[n].arguments[6] && !sent[n].arguments[7]);
+    reset();upload_at=upload_terminal_at=2;retarget_after_failure=true;stop_after=110;delay_step=20;run();
+    CHECK(claims==2 && releases==2 && !faults && app.completed_revision==1);
+    CHECK(controller.colors[0]==kl_srgb_channel(5)*40u/100u &&
+        controller.colors[1]==(kl_srgb_channel(220)*40u+50u)/100u &&
+        controller.colors[2]==(kl_srgb_channel(35)*40u+50u)/100u);
+    /* A poisoned first frame gets no master-enable, retry, or restoration. */
+    reset();upload_at=1;fail_write=4;poison_write=true;stop_after=10;run();
+    CHECK(writes==4 && !controller.color_brightness && nxp.needs_recovery && faults==1 && !recoveries);
+    /* In-process custom animation resumes only after failed precommit upload;
+     * a successful update parks its captured ACKed frame for boot adoption. */
+    for(unsigned success=0;success<2;++success) {
+        reset();queued_on_read=true;upload_at=2;upload_terminal_at=6;upload_success=success!=0;
+        stop_after=110;delay_step=20;run();
+        CHECK(!faults && app.controller_ready && !claimed);
+        CHECK(controller.effect==1 && app.reported_valid && app.rgb_confirmed==!success);
+        if(success)CHECK(controller.color_brightness==255 && app.completed_revision==0);
+        else CHECK(controller.color_brightness==255 && app.completed_revision==1 &&
+            controller.colors[1]==(kl_srgb_channel(180)*80u+50u)/100u);
+    }
+    /* Controller journal/job wins before the cosmetic worker and must not
+     * emit an ESP progress frame while the other MCU is being rewritten. */
+    reset();CHECK(kl_update_indicator_begin(&upload,1000,0));journal_blocked=true;
+    stop_after=5;run();CHECK(!writes && !transport_inits && !claims);
+}
 int main(void) {
     test_startup(); test_startup_queued_transition(); test_setup_and_frame_failures();
     test_transition_completion();
+    test_canonical_color_worker();
+    test_reboot_color_adoption();
     test_original_bootstrap(); test_original_rejections(); test_confirmation_readback_and_ambiguity();
     test_legacy_owner_admission();
     test_health_and_reset_no_replay();
     test_update_worker_gates();
+    test_update_indicator_worker();
     printf("%u worker assertions passed; actual source, no device I/O.\n", checks);
     return 0;
 }

@@ -4,10 +4,12 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "keylight_policy.h"
+#include "scene_store.h"
 #include <stdio.h>
 #include <string.h>
 
 static const char *namespace_name = "openkeylight";
+_Static_assert(sizeof(app_config) == 407, "config_v1 layout must remain unchanged; use separate versioned keys");
 typedef struct {
     uint32_t count;
     uint8_t hashes[4][32];
@@ -31,12 +33,16 @@ static bool read_blob(nvs_handle_t handle, const char *key, void *value, size_t 
 }
 
 esp_err_t app_storage_init(void) {
+    app.output_encoding = KL_OUTPUT_SRGB;
     snprintf(app.config.name, sizeof(app.config.name), "Open Keylight");
     snprintf(app.config.role, sizeof(app.config.role), "other");
     esp_err_t result = nvs_flash_init();
     if (result != ESP_OK) return result;
     nvs_handle_t handle;
     if (nvs_open(namespace_name, NVS_READONLY, &handle) == ESP_OK) {
+        uint8_t encoding;
+        if (nvs_get_u8(handle, "out_encoding", &encoding) == ESP_OK && encoding <= KL_OUTPUT_LINEAR)
+            app.output_encoding = (kl_output_encoding)encoding;
         app_config loaded;
         if (read_blob(handle, "config_v1", &loaded, sizeof(loaded))) {
             loaded.name[32] = 0; loaded.role[15] = 0; loaded.ssid[32] = 0; loaded.password[64] = 0;
@@ -57,24 +63,17 @@ esp_err_t app_storage_init(void) {
                 memcpy(app.client_labels, clients.labels, sizeof(app.client_labels));
             }
         }
-        for (unsigned i = 0; i < KL_SCENES; i++) {
-            char key[12]; snprintf(key, sizeof(key), "scene%u_v1", i);
-            app_scene scene;
-            if (read_blob(handle, key, &scene, sizeof(scene)) && kl_state_valid(&scene.state)) {
-                scene.name[32] = 0; app.scenes[i] = scene;
-            }
-        }
         nvs_close(handle);
     }
+    result = app_scene_store_init();
     if (!app.config.ssid[0] && nvs_open("nvskvinfo0", NVS_READONLY, &handle) == ESP_OK) {
         size_t ssid_size = sizeof(app.config.ssid), password_size = sizeof(app.config.password);
         esp_err_t ssid_result = nvs_get_str(handle, "w_ssid", app.config.ssid, &ssid_size);
         esp_err_t password_result = nvs_get_str(handle, "w_pwd", app.config.password, &password_size);
         nvs_close(handle);
-        if (ssid_result == ESP_OK && password_result == ESP_OK && app.config.ssid[0]) {
-            /* Import stays in RAM until the owner confirms the new application. */
-            result = ESP_OK;
-        } else {
+        /* Import stays in RAM until the owner confirms the new application.
+         * Successful import must not hide a scene persistence failure. */
+        if (ssid_result != ESP_OK || password_result != ESP_OK || !app.config.ssid[0]) {
             memset(app.config.ssid, 0, sizeof(app.config.ssid));
             memset(app.config.password, 0, sizeof(app.config.password));
         }
@@ -83,10 +82,15 @@ esp_err_t app_storage_init(void) {
 }
 
 esp_err_t app_config_save(const app_config *config) { return save_blob("config_v1", config, sizeof(*config)); }
-esp_err_t app_scene_save(unsigned index, const app_scene *scene) {
-    if (index >= KL_SCENES) return ESP_ERR_INVALID_ARG;
-    char key[12]; snprintf(key, sizeof(key), "scene%u_v1", index);
-    return save_blob(key, scene, sizeof(*scene));
+esp_err_t app_output_encoding_save(kl_output_encoding encoding) {
+    if (encoding != KL_OUTPUT_SRGB && encoding != KL_OUTPUT_LINEAR) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t handle;
+    esp_err_t result = nvs_open(namespace_name, NVS_READWRITE, &handle);
+    if (result != ESP_OK) return result;
+    result = nvs_set_u8(handle, "out_encoding", (uint8_t)encoding);
+    if (result == ESP_OK) result = nvs_commit(handle);
+    nvs_close(handle);
+    return result;
 }
 
 void app_pair_window(void) {

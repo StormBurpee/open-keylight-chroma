@@ -1,6 +1,8 @@
 #include "output_policy.h"
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
@@ -8,7 +10,8 @@ typedef struct {
     unsigned calls, temperatures, fail_call;
     bool acknowledge_without_change;
     bool check_visible_limit;
-    uint8_t frame[3], visible_limit[3];
+    bool check_visible_floor;
+    uint8_t frame[3], visible_limit[3], visible_floor[3];
     okl_request requests[8];
 } fake_controller;
 
@@ -28,11 +31,12 @@ static okl_result exchange(void *user, const okl_request *request) {
     case OKL_SET_FRAME: memcpy(f->frame, a + 5, 3); break;
     default: assert(false);
     }
-    if (f->check_visible_limit) {
+    if (f->check_visible_limit || f->check_visible_floor) {
         const uint8_t *rgb = f->state.effect == 8 ? f->frame : f->state.colors;
         for (unsigned i = 0; i < 3; ++i) {
             unsigned output = f->state.effect ? (rgb[i] * f->state.color_brightness + 127u) / 255u : 0;
-            assert(output <= f->visible_limit[i]);
+            if (f->check_visible_limit) assert(output <= f->visible_limit[i]);
+            if (f->check_visible_floor) assert(output >= f->visible_floor[i]);
         }
     }
     return OKL_OK;
@@ -151,10 +155,88 @@ static void test_animation_handoff(void) {
     assert(fake.calls == 0);
 }
 
+static void test_srgb_forward_and_canonical_readback(void) {
+    kl_state target = kl_state_default(); target.power = true; target.mode = KL_COLOR; target.effect = KL_EFFECT_NONE;
+    assert(kl_srgb_channel(0) == 0 && kl_srgb_channel(255) == 255 && kl_srgb_channel(32) == 4);
+    for (unsigned code = 0; code <= 255; ++code) {
+        double value = code / 255.0;
+        double linear = value <= .04045 ? value / 12.92 : pow((value + .055) / 1.055, 2.4);
+        assert(kl_srgb_channel((uint8_t)code) == (unsigned)floor(linear * 255 + .5));
+        if (code) assert(kl_srgb_channel((uint8_t)code) >= kl_srgb_channel((uint8_t)(code - 1)));
+        unsigned reconstructed = kl_srgb_reconstruct((uint8_t)code);
+        int distance = abs((int)kl_srgb_channel((uint8_t)reconstructed) - (int)code);
+        assert(distance <= 1);
+        for (unsigned candidate = 0; candidate <= 255; ++candidate)
+            assert(distance <= abs((int)kl_srgb_channel((uint8_t)candidate) - (int)code));
+        for (unsigned brightness = 0; brightness <= 100; ++brightness) {
+            target.rgb = (kl_rgb){(uint8_t)code, 32, 255}; target.brightness = (uint8_t)brightness;
+            for (unsigned encoding = 0; encoding < 2; ++encoding) {
+                kl_frame frame = kl_color_frame(&target, (kl_output_encoding)encoding, 0);
+                unsigned channel = encoding == KL_OUTPUT_SRGB ? kl_srgb_channel((uint8_t)code) : code;
+                assert(kl_byte(frame.r) == (channel * brightness + 50u) / 100u);
+                okl_light_state native = {.effect = 1, .color_count = 1, .color_brightness = 255,
+                    .colors = {kl_byte(frame.r), kl_byte(frame.g), kl_byte(frame.b)}};
+                assert(kl_color_matches(&target, (kl_output_encoding)encoding, &native));
+                native.colors[0] ^= 1; assert(!kl_color_matches(&target, (kl_output_encoding)encoding, &native));
+                native.colors[0] ^= 1; native.color_brightness = 254;
+                assert(!kl_color_matches(&target, (kl_output_encoding)encoding, &native));
+            }
+        }
+    }
+    target.mode = KL_WHITE;
+    kl_frame white = kl_color_frame(&target, KL_OUTPUT_SRGB, 0), raw = kl_state_frame(&target, 0);
+    assert(!memcmp(&white, &raw, sizeof(white)));
+    target.mode = KL_COLOR; target.brightness = 100; target.rgb = (kl_rgb){255, 0, 32}; target.transition_ms = 100;
+    kl_frame origin = {.r = 4, .g = 100, .b = 55}; kl_transition transition;
+    kl_transition_begin(&transition, &origin, &target, 500);
+    kl_frame start = kl_color_sample(&transition, KL_OUTPUT_SRGB, 500);
+    kl_frame middle = kl_color_sample(&transition, KL_OUTPUT_SRGB, 550);
+    kl_frame end = kl_color_sample(&transition, KL_OUTPUT_SRGB, 600);
+    assert(start.r == 4 && start.g == 100 && start.b == 55);
+    assert(middle.r == 129.5f && middle.g == 50 && middle.b == 29.5f);
+    assert(end.r == 255 && end.g == 0 && end.b == 4);
+    kl_frame late = kl_color_sample(&transition, KL_OUTPUT_SRGB, 20000);
+    assert(end.r == late.r && end.g == late.g && end.b == late.b);
+}
+
+static void test_canonical_handoff_never_blanks_or_reveals_stale_frame(void) {
+    for (unsigned channel = 0; channel <= 255; ++channel) {
+        uint8_t rgb[3] = {(uint8_t)channel, 91, 14}, initial[3];
+        fake_controller fake = {.state = {.effect = 1, .color_count = 1,
+            .color_brightness = 255, .colors = {(uint8_t)channel, 91, 14}}, .frame = {255, 255, 255},
+            .check_visible_limit = true, .check_visible_floor = true};
+        memcpy(fake.visible_limit, rgb, 3); memcpy(fake.visible_floor, rgb, 3);
+        uint8_t effect = 1;
+        assert(kl_color_enter(&fake.state, NULL, initial, &effect, exchange, &fake) == OKL_OK);
+        assert(fake.calls == 2 && effect == 8 && !memcmp(initial, rgb, 3));
+        assert(fake.requests[0].command == OKL_SET_FRAME);
+        assert(fake.requests[1].command == OKL_SET_EFFECT && fake.requests[1].arguments[2] == 8);
+        assert(kl_color_park(rgb, &effect, exchange, &fake) == OKL_OK);
+        assert(effect == 1 && fake.calls == 3 && fake.state.color_brightness == 255);
+        assert(!memcmp(fake.state.colors, rgb, 3));
+    }
+    fake_controller fake = {.state = {.effect = 8, .color_brightness = 255}, .frame = {19, 80, 220}};
+    uint8_t initial[3], effect = 8;
+    assert(kl_color_enter(&fake.state, fake.frame, initial, &effect, exchange, &fake) == OKL_OK);
+    assert(fake.calls == 0 && !memcmp(initial, fake.frame, 3)); /* Retarget preserves the owned stream. */
+    for (unsigned fail = 1; fail <= 2; ++fail) {
+        fake = (fake_controller){.state = {.effect = 1, .color_count = 1, .color_brightness = 255,
+            .colors = {19, 80, 220}}, .fail_call = fail}; effect = 1;
+        assert(kl_color_enter(&fake.state, NULL, initial, &effect, exchange, &fake) == OKL_TIMEOUT);
+        assert(fake.calls == fail && fake.state.color_brightness == 255);
+    }
+    fake = (fake_controller){.state = {.effect = 8, .color_brightness = 255}, .frame = {255, 255, 255}};
+    assert(kl_color_enter(&fake.state, NULL, initial, &effect, exchange, &fake) == OKL_OK);
+    assert(fake.calls == 3 && fake.requests[0].command == OKL_SET_COLOR_BRIGHTNESS && !fake.requests[0].arguments[2]);
+    assert(fake.frame[0] == 0 && fake.frame[1] == 0 && fake.frame[2] == 0 && fake.state.color_brightness == 255);
+}
+
 int main(void) {
     test_park_and_verification(); test_off_and_failures(); test_all_brightness_levels();
     test_honest_report_fields(); test_publication_revision();
     test_animation_handoff();
+    test_srgb_forward_and_canonical_readback();
+    test_canonical_handoff_never_blanks_or_reveals_stale_frame();
     puts("output: exact native readback, normalized parking, Off ordering, failures, mixed fields and publication revision passed");
     return 0;
 }

@@ -72,6 +72,7 @@ export class DemoTransport implements Transport {
   settings: Settings = {
     name: "Studio key",
     role: "key",
+    output_encoding: "srgb",
     mqtt: { enabled: false, uri: "", username: "", connected: false },
     button: { single: "toggle", double: "next_scene", hold: "pair" },
   };
@@ -199,6 +200,20 @@ export class DemoTransport implements Transport {
       } = body as Partial<Settings> & { ssid?: string; password?: string };
       void _ssid;
       void _password;
+      if ("output_encoding" in publicSettings) {
+        if (
+          Object.keys(body as Record<string, unknown>).length !== 1 ||
+          !["srgb", "linear"].includes(publicSettings.output_encoding ?? "")
+        )
+          throw new ApiError("Send only output_encoding: srgb or linear", 400);
+        if (publicSettings.output_encoding !== this.settings.output_encoding) {
+          if (this.state.desired.recording_lock)
+            throw new ApiError("Recording lock is active.", 423);
+          if (this.device.controller.ready === false)
+            throw new ApiError("Controller is unavailable.", 503);
+          this.state.revision++;
+        }
+      }
       this.settings = { ...this.settings, ...publicSettings };
       value = this.settings;
     } else if (/^\/clients\/[0-9a-f]{16}$/.test(path) && method === "DELETE") {

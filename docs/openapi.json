@@ -518,6 +518,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Recording Lock prevents an output encoding change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "requestBody": {
@@ -1483,11 +1493,32 @@
               }
             },
             "required": []
+          },
+          "output_encoding": {
+            "type": "string",
+            "enum": [
+              "srgb",
+              "linear"
+            ],
+            "default": "srgb",
+            "description": "Send this field alone. Persisted separately without restarting. A changed value advances the state and output revisions; Recording Lock, an update, or an unavailable controller prevents the change."
           }
         },
         "required": [],
         "minProperties": 1,
-        "description": "String limits are UTF-8 byte limits; x-maxUtf8Bytes records the firmware constraint. Control characters are rejected. Wi-Fi and MQTT changes schedule a restart; name/role-only changes do not. Fields omitted retain their previous values. Passwords are never returned."
+        "description": "String limits are UTF-8 byte limits; x-maxUtf8Bytes records the firmware constraint. Control characters are rejected. Wi-Fi and MQTT changes schedule a restart; name/role-only changes do not. Fields omitted retain their previous values. Passwords are never returned.",
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "output_encoding"
+              ]
+            },
+            "then": {
+              "maxProperties": 1
+            }
+          }
+        ]
       },
       "Settings": {
         "type": "object",
@@ -1557,13 +1588,23 @@
               "double",
               "hold"
             ]
+          },
+          "output_encoding": {
+            "type": "string",
+            "enum": [
+              "srgb",
+              "linear"
+            ],
+            "default": "srgb",
+            "description": "RGB input encoding. sRGB decodes display RGB before output scaling; linear uses raw linear channels. White temperature and brightness remain independent."
           }
         },
         "required": [
           "name",
           "role",
           "mqtt",
-          "button"
+          "button",
+          "output_encoding"
         ]
       },
       "Scene": {

@@ -40,6 +40,7 @@ typedef struct {
     uint8_t mac[6];
     int rssi;
     app_config config;
+    kl_output_encoding output_encoding; /* Separate NVS key; never changes config_v1 layout. */
     app_scene scenes[KL_SCENES];
     app_event history[KL_HISTORY];
     uint32_t history_sequence;
@@ -63,6 +64,7 @@ int app_revoke_client(const char *id);
 esp_err_t app_clear_clients(void);
 esp_err_t app_storage_init(void);
 esp_err_t app_config_save(const app_config *config);
+esp_err_t app_output_encoding_save(kl_output_encoding encoding);
 esp_err_t app_scene_save(unsigned index, const app_scene *scene);
 esp_err_t app_network_start(void);
 void app_network_recovery_request(void);

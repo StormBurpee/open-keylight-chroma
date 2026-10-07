@@ -25,6 +25,17 @@ function fixture() {
 }
 
 describe("HTTP transport", () => {
+  it("keeps demo encoding changes separate from network configuration", async () => {
+    const api = new DemoTransport();
+    const before = structuredClone(api.settings);
+    await expect(
+      api.request("PATCH", "/settings", {
+        output_encoding: "linear",
+        ssid: "example",
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(api.settings).toEqual(before);
+  });
   it("calls the default browser fetch with its required global receiver", async () => {
     const original = globalThis.fetch;
     const received: unknown[] = [];

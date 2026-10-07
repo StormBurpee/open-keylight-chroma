@@ -32,6 +32,7 @@ for path in (HERE, stubs, ROOT / "firmware/main", components / "keylight_core/in
              components / "keylight_loader/include"):
     command += ["-I", str(path)]
 sources = [HERE / "test_worker.c", ROOT / "firmware/main/output_policy.c",
+           ROOT / "firmware/main/update_indicator.c",
            components / "keylight_core/keylight_core.c", components / "keylight_nxp/okl_nxp.c"]
 base_command = command.copy()
 command += [str(path) for path in sources] + ([] if os.name == "nt" else ["-lm"]) + ["-o", str(exe)]
@@ -64,6 +65,8 @@ if adapter_result.returncode:
     adapter_result.check_returncode()
 sources += adapter_sources + [ROOT / "firmware/main/controller_worker.c", ROOT / "firmware/main/controller_worker.h"]
 sources += [ROOT / "firmware/main/worker.c", ROOT / "firmware/main/app.h",
+            ROOT / "firmware/main/update_indicator_output.c", ROOT / "firmware/main/update_indicator_output.h",
+            ROOT / "firmware/main/update_indicator.h",
             ROOT / "firmware/main/output_policy.h", ROOT / "firmware/main/controller_job.h",
             components / "keylight_loader/include/okl_loader.h", HERE / "worker_mocks.h", Path(__file__)]
 report = {"status": "pass", "sanitizer": "AddressSanitizer", "device_operations": 0,

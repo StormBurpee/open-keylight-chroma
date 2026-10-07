@@ -40,7 +40,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { WifiSetup, ClientAccess } from "./SystemAccess";
+import { WifiSetup, ClientAccess, ColourRendering } from "./SystemAccess";
 import { ControllerUpdate } from "./ControllerUpdate";
 import { ColourWheel } from "./ColourWheel";
 import sceneAtlas from "./assets/scene-atlas.webp";
@@ -1221,6 +1221,36 @@ export function Studio({ store }: { store: StudioStore }) {
                       Save device settings
                     </Button>
                   </form>
+                )}
+                {settings?.output_encoding && (
+                  <ColourRendering
+                    encoding={settings.output_encoding}
+                    disabled={outputDisabled || busy}
+                    save={async (output_encoding) => {
+                      await store.write(
+                        "PATCH",
+                        "/settings",
+                        { output_encoding },
+                        "Colour rendering change accepted.",
+                      );
+                      const saved = await store.transport.request<Settings>(
+                        "GET",
+                        "/settings",
+                      );
+                      if (saved.output_encoding !== output_encoding)
+                        throw Error(
+                          "The light has not confirmed this colour rendering setting. Refresh details before trying again.",
+                        );
+                      setSettings(
+                        (current) =>
+                          current && {
+                            ...current,
+                            output_encoding: saved.output_encoding,
+                          },
+                      );
+                      await store.refresh();
+                    }}
+                  />
                 )}
                 {supported.settings && (
                   <WifiSetup store={store} disabled={!authorized || busy} />

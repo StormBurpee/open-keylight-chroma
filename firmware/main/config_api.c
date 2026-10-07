@@ -19,6 +19,7 @@ static cJSON *settings_json(void) {
     cJSON *json = cJSON_CreateObject();
     app_lock();
     cJSON_AddStringToObject(json, "name", app.config.name); cJSON_AddStringToObject(json, "role", app.config.role);
+    cJSON_AddStringToObject(json, "output_encoding", app.output_encoding == KL_OUTPUT_LINEAR ? "linear" : "srgb");
     cJSON *mqtt = cJSON_AddObjectToObject(json, "mqtt");
     cJSON_AddBoolToObject(mqtt, "enabled", app.config.mqtt_enabled); cJSON_AddStringToObject(mqtt, "uri", app.config.mqtt_uri);
     cJSON_AddStringToObject(mqtt, "username", app.config.mqtt_username); cJSON_AddBoolToObject(mqtt, "connected", app.mqtt_connected);
@@ -34,6 +35,36 @@ esp_err_t http_settings(httpd_req_t *request) {
     if (request->method != HTTP_PATCH) return http_error(request, 405, "Use GET or PATCH");
     cJSON *json = http_read_json(request);
     if (!cJSON_IsObject(json) || !unique(json) || !json->child) { cJSON_Delete(json); return http_error(request, 400, "Invalid settings object"); }
+    cJSON *encoding = cJSON_GetObjectItemCaseSensitive(json, "output_encoding");
+    if (encoding) {
+        bool valid = cJSON_GetArraySize(json) == 1 && cJSON_IsString(encoding) &&
+            (!strcmp(encoding->valuestring, "srgb") || !strcmp(encoding->valuestring, "linear"));
+        if (!valid) { cJSON_Delete(json); return http_error(request, 400, "Send only output_encoding: srgb or linear"); }
+        kl_output_encoding next = !strcmp(encoding->valuestring, "linear") ? KL_OUTPUT_LINEAR : KL_OUTPUT_SRGB;
+        cJSON_Delete(json);
+        /* One separate NVS record, serialized with state changes and update
+         * admission. No config_v1 migration or multi-record atomicity claim. */
+        app_lock();
+        int status = 200;
+        bool changed = next != app.output_encoding;
+        if (app.updating) status = 409;
+        else if (changed && app.desired.recording_lock) status = 423;
+        else if (changed && !app.controller_ready) status = 503;
+        else if (changed && app_output_encoding_save(next) != ESP_OK) status = 503;
+        if (status == 200 && changed) {
+            app.output_encoding = next; ++app.revision; ++app.output_revision;
+            app.reported_valid = false; app.rgb_confirmed = false; app.reported_fields = 0;
+            snprintf(app.operation, sizeof(app.operation), "pending"); app.error[0] = 0;
+            snprintf(app.actor, sizeof(app.actor), "dashboard");
+            app_event_locked("dashboard", "encoding.saved", next == KL_OUTPUT_SRGB ? "sRGB output encoding" : "Linear output encoding");
+        }
+        app_unlock();
+        if (status != 200) return http_error(request, status, status == 423 ?
+            "Recording Lock is on; unlock before changing output encoding" : status == 409 ?
+            "Update in progress" : "Output encoding could not be applied or persisted");
+        if (changed) app_mqtt_publish();
+        return http_json(request, 200, settings_json());
+    }
     app_lock(); app_config config = app.config; bool updating = app.updating; app_unlock();
     if (updating) { cJSON_Delete(json); return http_error(request, 409, "Update in progress"); }
     bool valid = true, restart = false;

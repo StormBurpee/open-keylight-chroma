@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 import { Studio } from "../App";
-import { StudioStore, sha256 } from "../api";
+import { ApiError, StudioStore, sha256 } from "../api";
 import { DemoTransport } from "../demo";
 async function setup(change?: (api: DemoTransport) => void) {
   const api = new DemoTransport();
@@ -18,6 +18,113 @@ async function setup(change?: (api: DemoTransport) => void) {
   return { api, store, user: userEvent.setup() };
 }
 describe("studio controls", () => {
+  it("keeps colour encoding in System and applies it without rewriting the selected colour", async () => {
+    const { api, user } = await setup();
+    expect(screen.queryByLabelText("Colour rendering")).not.toBeInTheDocument();
+    const desired = structuredClone(api.state.desired);
+    const request = vi.spyOn(api, "request");
+    await user.click(screen.getByRole("tab", { name: "System" }));
+    const select = await screen.findByLabelText("Colour rendering");
+    expect(select).toHaveValue("srgb");
+    const apply = screen.getByRole("button", {
+      name: "Apply colour rendering",
+    });
+    expect(apply).toBeDisabled();
+    await user.selectOptions(select, "linear");
+    expect(api.settings.output_encoding).toBe("srgb");
+    await user.click(apply);
+    await waitFor(() => expect(api.settings.output_encoding).toBe("linear"));
+    await waitFor(() => expect(apply).toBeDisabled());
+    expect(request.mock.calls.filter(([method]) => method === "PATCH")).toEqual(
+      [["PATCH", "/settings", { output_encoding: "linear" }, undefined]],
+    );
+    expect(api.state.desired).toEqual(desired);
+  });
+
+  it("does not retry or claim a rejected colour rendering change", async () => {
+    const { api, user } = await setup();
+    const original = api.request.bind(api);
+    const request = vi
+      .spyOn(api, "request")
+      .mockImplementation(async (method, path, body) => {
+        if (method === "PATCH" && path === "/settings")
+          throw new ApiError("Recording lock is active.", 423);
+        return original(method, path, body);
+      });
+    await user.click(screen.getByRole("tab", { name: "System" }));
+    await user.selectOptions(
+      await screen.findByLabelText("Colour rendering"),
+      "linear",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Apply colour rendering" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getAllByText("Recording lock is active.").length,
+      ).toBeGreaterThan(0),
+    );
+    expect(api.settings.output_encoding).toBe("srgb");
+    expect(
+      request.mock.calls.filter(([method]) => method === "PATCH"),
+    ).toHaveLength(1);
+  });
+
+  it.each(["mismatch", "unavailable"])(
+    "keeps %s rendering readback visibly unconfirmed without retry",
+    async (failure) => {
+      const { api, store, user } = await setup();
+      await user.click(screen.getByRole("tab", { name: "System" }));
+      await user.selectOptions(
+        await screen.findByLabelText("Colour rendering"),
+        "linear",
+      );
+      const original = api.request.bind(api);
+      const request = vi
+        .spyOn(api, "request")
+        .mockImplementation(async (method, path, body) => {
+          if (method === "GET" && path === "/settings") {
+            if (failure === "unavailable")
+              throw new ApiError("Settings readback unavailable.");
+            return { ...api.settings, output_encoding: "srgb" } as any;
+          }
+          return original(method, path, body);
+        });
+      await user.click(
+        screen.getByRole("button", { name: "Apply colour rendering" }),
+      );
+      await screen.findByText(
+        failure === "unavailable"
+          ? "Settings readback unavailable."
+          : /has not confirmed this colour rendering/,
+      );
+      expect(store.getSnapshot().notice).toBe(
+        "Colour rendering change accepted.",
+      );
+      expect(
+        request.mock.calls.filter(([method]) => method === "PATCH"),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("disables rendering changes while locked and hides the setting on older firmware", async () => {
+    const { api, store, user } = await setup((api) => {
+      api.state.desired.recording_lock = true;
+    });
+    await user.click(screen.getByRole("tab", { name: "System" }));
+    expect(await screen.findByLabelText("Colour rendering")).toBeDisabled();
+    delete api.settings.output_encoding;
+    await user.click(screen.getByRole("button", { name: "Refresh details" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByLabelText("Colour rendering"),
+      ).not.toBeInTheDocument(),
+    );
+    await act(async () => {
+      await store.refresh();
+    });
+  });
+
   it("blocks output for diagnostic firmware while keeping system controls available", async () => {
     const { api, store, user } = await setup();
     await act(async () => {

@@ -1,10 +1,20 @@
 # Development record
 
+## Colour rendering, stored scenes and upload indication
+
+The 0.1.1-dev candidate makes sRGB the default and places its persistent linear override in System. Colour transitions now seed a custom frame before entering custom mode, keep a constant native master and park the exact final acknowledged colour. Zero-duration changes use that same direct frame path to bypass the legacy Static-to-Static fade. Retarget and slow-ACK regressions check that an intermediate frame cannot be mistaken for completion. After reboot, a native colour can only be reconstructed approximately; its original chosen hex and brightness decomposition are not claimed as confirmed. Eight-bit output still limits very dim fades.
+
+Focus, Blue hour, Ember and Afterglow are seeded once into free scene slots without activation or overwriting existing scenes. A single versioned NVS record keeps the collection and seeding marker together. The encoding setting uses a separate key without changing the existing credential/configuration blob.
+
+The existing SPI worker now owns a bounded blue-to-purple ESP upload indication, with two red failure pulses and guarded restoration of the prior output. Off, Recording Lock, transport uncertainty and newer commands take precedence. The indication becomes available only after this application is installed; the previous live application cannot display it during this first upgrade. Controller flashing remains separate and excludes cosmetic output work.
+
+The dashboard passes 75 tests and embeds in 152,944 compressed bytes. All 17 host suites and the ESP-IDF build pass; the updated actual worker passes 66,172 assertions plus startup/adapter checks. Independent source reviews cover output ordering, storage migration, encoding and indication. Live deployment and optical transition verification are still pending for this candidate.
+
 ## Stream Deck installation and settings corrections
 
 The initial package required Stream Deck 7.1 and Node 24 while the installed application was 7.0.3. Version 0.1.2 targets Stream Deck 7.0 and Node 20, including the SDK's explicit legacy settings mode. Its compiled-plugin test now exercises settings requests and replies without message identifiers. The owner's app was upgraded to 7.6 during this work; all 25 tests pass using that installation's Node 20.20.0 runtime, and Elgato validation and packaging pass.
 
-The owner's first installed test exposed a settings-routing defect. Adding the missing action type in 0.1.2 did not resolve it: the actual application log explicitly rejected `setSettings` and `getSettings` as coming from the wrong context. Inspection of the SDPI client confirmed that outgoing property-inspector commands require its registered inspector UUID, while replies identify the action instance. Version 0.1.3 separates those identifiers. The DOM harness now rejects action-instance contexts on outgoing inspector commands and verifies returned values before displaying success. The corrected installer awaits another live test; automated checks do not establish physical Stream Deck control.
+The owner's first installed test exposed a settings-routing defect. Adding the missing action type in 0.1.2 did not resolve it: the actual application log explicitly rejected `setSettings` and `getSettings` as coming from the wrong context. Inspection of the SDPI client confirmed that outgoing property-inspector commands require its registered inspector UUID, while replies identify the action instance. Version 0.1.3 separates those identifiers. The DOM harness now rejects action-instance contexts on outgoing inspector commands and verifies returned values before displaying success. Subsequent read-only observation of the lamp showed `last_actor: streamdeck`, idle operation and matching controller readback at revision 34. This establishes a live API/control result; it does not measure light output.
 
 ## ESP control qualification and browser correction
 

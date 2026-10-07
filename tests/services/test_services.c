@@ -1,6 +1,7 @@
 #include "service_mocks.h"
 #include <stdio.h>
 #include <string.h>
+#include "../../firmware/main/scene_store.c"
 #include "../../firmware/main/storage.c"
 #include "../../firmware/main/http_server.c"
 
@@ -16,6 +17,9 @@ static unsigned request_reads, response_code, server_handlers;
 static uint64_t now_ms, receive_delay;
 static size_t body_used, chunk;
 static int failure, sha_failure, recv_failure;
+static const char *read_failure_key;
+static bool commit_persists_on_failure;
+static bool namespace_absent;
 static const char *header_host, *header_origin, *header_auth, *header_type, *body;
 static char response_body[16384];
 static bool connection_close;
@@ -30,6 +34,7 @@ esp_err_t nvs_flash_init(void) { return failure == 5 ? ESP_FAIL : ESP_OK; }
 esp_err_t nvs_open(const char *name, int mode, nvs_handle_t *out) {
     CHECK(!strcmp(name, "openkeylight") || (!strcmp(name, "nvskvinfo0") && mode == NVS_READONLY));
     *out = !strcmp(name, "openkeylight") ? 1 : 2;
+    if (namespace_absent && !stored_count && mode == NVS_READONLY && *out == 1) return ESP_ERR_NVS_NOT_FOUND;
     return failure == 1 ? ESP_FAIL : ESP_OK;
 }
 static blob *find_blob(const char *key) {
@@ -38,7 +43,8 @@ static blob *find_blob(const char *key) {
 }
 esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *out, size_t *size) {
     CHECK(handle == 1); blob *entry = find_blob(key);
-    if (!entry) return ESP_FAIL;
+    if (read_failure_key && !strcmp(key, read_failure_key)) return ESP_FAIL;
+    if (!entry) return ESP_ERR_NVS_NOT_FOUND;
     if (!out) { *size = entry->size; return ESP_OK; }
     if (*size < entry->size) return ESP_FAIL;
     memcpy(out, entry->data, entry->size); *size = entry->size; return ESP_OK;
@@ -49,16 +55,23 @@ esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *data, s
     snprintf(pending.key, sizeof(pending.key), "%s", key); memcpy(pending.data, data, size); pending.size = size;
     return ESP_OK;
 }
+esp_err_t nvs_get_u8(nvs_handle_t handle, const char *key, uint8_t *out) {
+    blob *entry = find_blob(key); if (entry && entry->size != 1) return ESP_FAIL;
+    size_t size = 1; return nvs_get_blob(handle, key, out, &size);
+}
+esp_err_t nvs_set_u8(nvs_handle_t handle, const char *key, uint8_t value) {
+    return nvs_set_blob(handle, key, &value, sizeof(value));
+}
 esp_err_t nvs_get_str(nvs_handle_t handle, const char *key, char *out, size_t *size) {
     CHECK(handle == 2); const char *value = !strcmp(key, "w_ssid") ? "private-test-network" : "private-test-password";
     if (failure == 4 || *size < strlen(value) + 1) return ESP_FAIL;
     memcpy(out, value, strlen(value) + 1); *size = strlen(value) + 1; return ESP_OK;
 }
 esp_err_t nvs_commit(nvs_handle_t handle) {
-    CHECK(handle == 1); ++commits; if (failure == 3) return ESP_FAIL;
+    CHECK(handle == 1); ++commits; if (failure == 3 && !commit_persists_on_failure) return ESP_FAIL;
     blob *entry = find_blob(pending.key);
     if (!entry) { CHECK(stored_count < 16); entry = &stored[stored_count++]; }
-    *entry = pending; return ESP_OK;
+    *entry = pending; return failure == 3 ? ESP_FAIL : ESP_OK;
 }
 void nvs_close(nvs_handle_t handle) { CHECK(handle == 1 || handle == 2); ++closes; }
 void esp_fill_random(void *out, size_t size) {
@@ -135,12 +148,164 @@ static void reset(void) {
     snprintf(app.ip, sizeof(app.ip), "192.0.2.1"); snprintf(app.hostname, sizeof(app.hostname), "keylight-test");
     now_ms = 100; stored_count = writes = commits = closes = random_counter = recovery_requests = 0;
     issued_routes = submit_calls = settings_calls = update_calls = confirm_calls = server_handlers = 0;
-    failure = sha_failure = 0; request_reset("{}");
+    failure = sha_failure = 0; read_failure_key = NULL; commit_persists_on_failure = namespace_absent = false; scene_store_ready = false;
+    request_reset("{}");
 }
 static void pair(char token[65], const char *label) { app_pair_window(); CHECK(app_issue_token(label, token) == ESP_OK); CHECK(app_token_valid(token)); }
+static void put_fixture(const char *key, const void *data, size_t size) {
+    blob *entry = find_blob(key);
+    if (!entry) { CHECK(stored_count < 16); entry = &stored[stored_count++]; }
+    CHECK(size <= sizeof(entry->data)); memset(entry, 0, sizeof(*entry));
+    snprintf(entry->key, sizeof(entry->key), "%s", key); memcpy(entry->data, data, size); entry->size = size;
+}
+static app_scene custom_scene(const char *name) {
+    app_scene scene = {.used = true, .state = kl_state_default()};
+    snprintf(scene.name, sizeof(scene.name), "%s", name); scene.state.brightness = 17;
+    return scene;
+}
+static unsigned scene_count(void) {
+    unsigned count = 0; for (unsigned i = 0; i < KL_SCENES; ++i) count += app.scenes[i].used; return count;
+}
+static void reboot_storage(void) {
+    memset(&app, 0, sizeof(app)); scene_store_ready = false; memset(&pending, 0, sizeof(pending));
+}
+static void scene_tests(void) {
+    static const char *names[] = {"Focus", "Blue hour", "Ember", "Afterglow"};
+    static const uint8_t brightness[] = {80,72,60,55};
+    static const kl_rgb rgb[] = {{36,92,255},{36,92,255},{255,112,38},{178,138,255}};
+    reset(); app.desired = kl_state_default(); app.desired.recording_lock = true; app.revision = 53;
+    kl_state desired = app.desired;
+    CHECK(app_storage_init() == ESP_OK && writes == 1 && commits == 1 && scene_count() == 4);
+    CHECK(!memcmp(&desired, &app.desired, sizeof(desired)) && app.revision == 53 && !app.output_revision);
+    for (unsigned i = 0; i < 4; ++i) {
+        const app_scene *s = &app.scenes[i];
+        CHECK(s->used && !strcmp(s->name, names[i]) && s->state.brightness == brightness[i]);
+        CHECK(s->state.power && s->state.mode == (i ? KL_COLOR : KL_WHITE) && s->state.temperature_k == 4200);
+        CHECK(!memcmp(&s->state.rgb, &rgb[i], sizeof(rgb[i])) && s->state.transition_ms == 1200);
+        CHECK(s->state.effect == KL_EFFECT_NONE && !s->state.recording_lock);
+    }
+    app_scene initial[KL_SCENES]; memcpy(initial, app.scenes, sizeof(initial));
+    reboot_storage(); CHECK(app_storage_init() == ESP_OK && writes == 1 && !memcmp(initial, app.scenes, sizeof(initial)));
+    /* Editing and deletion persist the marker, so deleted defaults stay gone. */
+    app_scene edited = custom_scene("My Focus"), empty = {0};
+    CHECK(app_scene_save(0, &edited) == ESP_OK && app_scene_save(1, &empty) == ESP_OK);
+    unsigned before = writes; reboot_storage(); CHECK(app_storage_init() == ESP_OK && writes == before);
+    CHECK(scene_count() == 3 && !strcmp(app.scenes[0].name, "My Focus") && !app.scenes[1].used);
+    for (unsigned i = 0; i < KL_SCENES; ++i) CHECK(app_scene_save(i, &empty) == ESP_OK);
+    before = writes; reboot_storage(); CHECK(app_storage_init() == ESP_OK && !scene_count() && writes == before);
+
+    /* Legacy IDs and values, including a deleted legacy slot, are reserved.
+     * A user-modified lower-case default prevents a duplicate named default. */
+    reset(); app_scene custom = custom_scene("Portrait"), focus = custom_scene("focus");
+    put_fixture("scene0_v1", &custom, sizeof(custom)); put_fixture("scene1_v1", &focus, sizeof(focus));
+    put_fixture("scene5_v1", &empty, sizeof(empty));
+    app_config config = {.name = "Studio", .ssid = "Saved WiFi", .password = "Saved password"};
+    clients_record clients = {.count = 1, .labels = {"Trusted"}, .hashes = {{1,2,3,4}}};
+    put_fixture("config_v1", &config, sizeof(config)); put_fixture("clients_v1", &clients, sizeof(clients));
+    CHECK(app_storage_init() == ESP_OK && writes == 1 && scene_count() == 5);
+    CHECK(!memcmp(&app.scenes[0], &custom, sizeof(custom)) && !memcmp(&app.scenes[1], &focus, sizeof(focus)));
+    for (unsigned i = 2; i <= 4; ++i) CHECK(!strcmp(app.scenes[i].name, names[i - 1]));
+    CHECK(!app.scenes[5].used && !memcmp(find_blob("scene0_v1")->data, &custom, sizeof(custom)));
+    CHECK(!memcmp(find_blob("config_v1")->data, &config, sizeof(config))
+          && !memcmp(find_blob("clients_v1")->data, &clients, sizeof(clients)));
+    CHECK(!memcmp(&app.config, &config, sizeof(config)) && app.token_count == 1);
+    /* A full collection is still marked seeded. A later deletion does not
+     * opportunistically fill the vacancy with a missing default. */
+    reset();
+    for (unsigned i = 0; i < KL_SCENES; ++i) {
+        char key[12], name[16]; snprintf(key, sizeof(key), "scene%u_v1", i); snprintf(name, sizeof(name), "User %u", i);
+        app_scene scene = custom_scene(name); put_fixture(key, &scene, sizeof(scene));
+    }
+    CHECK(app_storage_init() == ESP_OK && scene_count() == 8 && writes == 1);
+    CHECK(app_scene_save(3, &empty) == ESP_OK); before = writes; reboot_storage();
+    CHECK(app_storage_init() == ESP_OK && scene_count() == 7 && !app.scenes[3].used && writes == before);
+
+    /* Failed first migration publishes no defaults. After reset the one blob
+     * is either absent or complete, never a scene/marker mismatch. */
+    for (int fail = 1; fail <= 3; ++fail) for (unsigned durable = 0; durable < 2; ++durable) {
+        reset(); failure = fail; commit_persists_on_failure = durable != 0;
+        CHECK(app_storage_init() != ESP_OK && !scene_count() && !scene_store_ready);
+        CHECK(app_scene_save(0, &custom) == ESP_ERR_INVALID_STATE);
+        failure = 0; reboot_storage(); CHECK(app_storage_init() == ESP_OK && scene_count() == 4);
+        CHECK(find_blob("scenes_v2") && find_blob("scenes_v2")->size == SCENE_RECORD_BYTES);
+    }
+    reset(); put_fixture("scene0_v1", &custom, sizeof(custom)); failure = 2;
+    CHECK(app_storage_init() != ESP_OK && scene_count() == 1 && !scene_store_ready);
+    CHECK(!memcmp(&app.scenes[0], &custom, sizeof(custom)) && !find_blob("scenes_v2"));
+    failure = 0; reboot_storage(); CHECK(app_storage_init() == ESP_OK && scene_count() == 5);
+    /* Failed edits preserve RAM and forbid a second edit until a fresh load
+     * resolves whether the first write reached durable storage. */
+    for (int fail = 1; fail <= 3; ++fail) for (unsigned durable = 0; durable < 2; ++durable) {
+        reset(); CHECK(app_storage_init() == ESP_OK); app_scene prior = app.scenes[0];
+        failure = fail; commit_persists_on_failure = durable != 0;
+        CHECK(app_scene_save(0, &custom) != ESP_OK && !memcmp(&app.scenes[0], &prior, sizeof(prior)));
+        before = writes; CHECK(app_scene_save(1, &edited) == ESP_ERR_INVALID_STATE && writes == before);
+        failure = 0; reboot_storage(); CHECK(app_storage_init() == ESP_OK);
+        CHECK(!strcmp(app.scenes[0].name, fail == 3 && durable ? "Portrait" : "Focus"));
+        CHECK(!strcmp(app.scenes[1].name, "Blue hour"));
+    }
+    /* Corrupt/unreadable canonical records cannot silently fall back to
+     * legacy defaults, erase deleted slots, or admit a destructive edit. */
+    static const unsigned bad_offsets[] = {0,4,5,6,7,15,16,16+33,16+34,16+35,16+36,16+38,16+43,16+44,16+45,16+46,16+47,16+4*48+1};
+    for (unsigned kind = 0; kind < sizeof(bad_offsets)/sizeof(bad_offsets[0]) + 2; ++kind) {
+        reset(); CHECK(app_storage_init() == ESP_OK); blob *entry = find_blob("scenes_v2");
+        if (kind < sizeof(bad_offsets)/sizeof(bad_offsets[0])) entry->data[bad_offsets[kind]] = 255;
+        else if (kind == sizeof(bad_offsets)/sizeof(bad_offsets[0])) --entry->size;
+        else read_failure_key = "scenes_v2";
+        before = writes; reboot_storage(); CHECK(app_storage_init() != ESP_OK && writes == before && !scene_count());
+        CHECK(app_scene_save(0, &custom) == ESP_ERR_INVALID_STATE && writes == before);
+    }
+    for (unsigned kind = 0; kind < 6; ++kind) {
+        reset(); app_scene invalid = custom_scene("Saved");
+        if (kind == 0) memset(invalid.name, 'x', sizeof(invalid.name));
+        if (kind == 1) invalid.state.brightness = 101;
+        put_fixture("scene6_v1", &invalid, sizeof(invalid)); blob *entry = find_blob("scene6_v1");
+        if (kind == 2) --entry->size;
+        if (kind == 3) entry->data[offsetof(app_scene, used)] = 2;
+        if (kind == 4) entry->data[offsetof(app_scene, state) + offsetof(kl_state, power)] = 2;
+        if (kind == 5) read_failure_key = "scene6_v1";
+        CHECK(app_storage_init() != ESP_OK && !writes && !scene_count());
+    }
+    reset(); CHECK(app_storage_init() == ESP_OK); before = writes;
+    custom.state.brightness = 101;
+    CHECK(app_scene_save(0, &custom) == ESP_ERR_INVALID_ARG && app_scene_save(8, &edited) == ESP_ERR_INVALID_ARG);
+    CHECK(app_scene_save(0, NULL) == ESP_ERR_INVALID_ARG && writes == before && scene_store_ready);
+    reset(); namespace_absent = true;
+    CHECK(app_storage_init() == ESP_OK && scene_count() == 4 && writes == 1 && app.config.ssid[0]);
+}
+static void encoding_storage_tests(void) {
+    for (unsigned kind = 0; kind < 6; ++kind) {
+        reset(); app.output_encoding = KL_OUTPUT_LINEAR;
+        uint8_t stored_value = kind == 2 ? 1 : kind == 3 ? 2 : 0;
+        if (kind) put_fixture("out_encoding", &stored_value, sizeof(stored_value));
+        if (kind == 4) read_failure_key = "out_encoding";
+        if (kind == 5) find_blob("out_encoding")->size = 0;
+        CHECK(app_storage_init() == ESP_OK && app.output_encoding == (kind == 2 ? KL_OUTPUT_LINEAR : KL_OUTPUT_SRGB));
+        CHECK(writes == 1 && !strcmp(pending.key, "scenes_v2")); /* No startup repair write. */
+    }
+    reset(); CHECK(app_storage_init() == ESP_OK);
+    app_config config = {.name = "Desk", .ssid = "Private SSID", .password = "Private password"};
+    clients_record clients = {.count = 1, .labels = {"Owner"}, .hashes = {{7,8,9}}};
+    put_fixture("config_v1", &config, sizeof(config)); put_fixture("clients_v1", &clients, sizeof(clients));
+    CHECK(app_output_encoding_save(KL_OUTPUT_LINEAR) == ESP_OK && app.output_encoding == KL_OUTPUT_SRGB);
+    CHECK(find_blob("out_encoding")->size == 1 && find_blob("out_encoding")->data[0] == 1);
+    unsigned before = writes;
+    CHECK(app_output_encoding_save((kl_output_encoding)-1) == ESP_ERR_INVALID_ARG);
+    CHECK(app_output_encoding_save((kl_output_encoding)2) == ESP_ERR_INVALID_ARG && writes == before);
+    for (int fail = 1; fail <= 3; ++fail) {
+        failure = fail; unsigned prior_closes = closes;
+        CHECK(app_output_encoding_save(KL_OUTPUT_SRGB) != ESP_OK && app.output_encoding == KL_OUTPUT_SRGB);
+        CHECK(closes == prior_closes + (fail == 1 ? 0 : 1) && find_blob("out_encoding")->data[0] == 1);
+        CHECK(!memcmp(find_blob("config_v1")->data, &config, sizeof(config))
+              && !memcmp(find_blob("clients_v1")->data, &clients, sizeof(clients)));
+    }
+    failure = 0; reboot_storage();
+    CHECK(app_storage_init() == ESP_OK && app.output_encoding == KL_OUTPUT_LINEAR
+          && !memcmp(&app.config, &config, sizeof(config)) && app.token_count == 1);
+}
 static void storage_tests(void) {
     char tokens[4][65], token[65], id[17];
-    reset(); CHECK(app_storage_init() == ESP_OK && !writes && !app.token_count); CHECK(app.config.ssid[0] && app.config.password[0]);
+    reset(); CHECK(app_storage_init() == ESP_OK && writes == 1 && !app.token_count); CHECK(app.config.ssid[0] && app.config.password[0]);
     app_config saved = app.config;
     for (unsigned i = 0; i < 4; ++i) { pair(tokens[i], "Test client"); CHECK(!app.pair_until_ms && app.token_count == i + 1); }
     app_pair_window(); unsigned prior_writes = writes; CHECK(app_issue_token("Fifth", token) == ESP_ERR_INVALID_STATE && writes == prior_writes);
@@ -268,4 +433,4 @@ static void controller_json_tests(void) {
     CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(controller,"status")->valuestring,"diagnostic"));
     cJSON_Delete(document);
 }
-int main(void) { storage_tests(); http_tests(); controller_json_tests(); printf("PASS %u assertions against actual storage.c/http_server.c\n", assertions); return 0; }
+int main(void) { storage_tests(); scene_tests(); encoding_storage_tests(); http_tests(); controller_json_tests(); printf("PASS %u assertions against actual storage.c/scene_store.c/http_server.c\n", assertions); return 0; }

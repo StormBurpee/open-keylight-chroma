@@ -61,6 +61,7 @@ export type HistoryEntry = {
 export type Settings = {
   name: string;
   role: "key" | "fill" | "background" | "other";
+  output_encoding?: "srgb" | "linear";
   mqtt: { enabled: boolean; uri: string; username: string; connected: boolean };
   button: { single: string; double: string; hold: string };
 };
