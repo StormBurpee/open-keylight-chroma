@@ -21,12 +21,25 @@ jobs:
           build/nxp-emulator-venv/bin/python -m pip install --disable-pip-version-check -r firmware-nxp/tests/requirements-emulator.txt
       - name: Build the reference-board lighting profile
         run: python3 firmware-nxp/build.py --reference-lighting
+      - name: Build the three installer diagnostic profiles
+        run: |
+          python3 firmware-nxp/build.py --spi-only-trial
+          python3 firmware-nxp/build.py --pwm-off-trial
+          python3 firmware-nxp/build.py --pwm-low-trial
       - name: Execute compiled startup, PWM and recovery regressions
-        run: build/nxp-emulator-venv/bin/python firmware-nxp/tests/emulate_production.py
+        run: |
+          build/nxp-emulator-venv/bin/python firmware-nxp/tests/emulate_production.py
+          build/nxp-emulator-venv/bin/python firmware-nxp/tests/emulate_off.py
+          build/nxp-emulator-venv/bin/python firmware-nxp/tests/emulate_low.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nxp-emulation-evidence
           path: |
             firmware-nxp/build/lighting/manifest.json
             firmware-nxp/build/lighting/compiled-production-tests.json
+            firmware-nxp/build/spi-trial-mode3/manifest.json
+            firmware-nxp/build/pwm-off-trial/manifest.json
+            firmware-nxp/build/pwm-off-trial/compiled-off-tests.json
+            firmware-nxp/build/pwm-low-trial/manifest.json
+            firmware-nxp/build/pwm-low-trial/compiled-low-tests.json
           if-no-files-found: error

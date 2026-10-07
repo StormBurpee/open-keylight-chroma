@@ -6,93 +6,121 @@
 
 **Your light. Your firmware. Your studio.**
 
-Independent firmware for the Razer Key Light Chroma, built around local control, a useful physical button, and an API that treats a light like a dependable piece of equipment.
+Open firmware for the Razer Key Light Chroma. A dashboard on the light, an API for everything around it, and no cloud account between you and the switch.
 
-[Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [API](docs/api-contract.md) · [Dashboard](docs/dashboard.md) · [Development record](PROGRESS.md)
+[Get started](docs/getting-started.md) · [Releases](https://github.com/StormBurpee/open-keylight-chroma/releases) · [API](docs/api-contract.md) · [Home Assistant](docs/home-assistant.md) · [Stream Deck](integrations/streamdeck/README.md)
 
 </div>
 
 ---
 
-Open a browser. Set the warmth of your key light, settle on a background colour, save the scene, and close the tab. The light should keep doing its job.
+Set the warmth of your key light. Pick a background colour. Save the scene and close the tab. Everything runs on the panel—including the dashboard.
 
-Open Keylight Chroma is being built to replace **both** applications inside the panel: the ESP32 network controller and the NXP LED controller. It preserves the original power electronics, cooling and installed bootloaders. The ESP implementation also speaks the existing NXP protocol, providing a useful compatibility stage while the independent LED firmware is qualified.
+Open Keylight replaces the applications on **both the ESP32 and the NXP lighting controller**. It keeps the existing power electronics, bootloaders and partition layout. Once installed, the light works without a desktop service, Razer software or an internet connection.
 
-> **Development preview.** Original source and automated tests are available; public installation is not yet qualified. A successful build is not a claim of hardware safety, measured colour accuracy or production readiness. See the development record for exactly what has run on a device.
+> **Early access.** The first installer release is being qualified. Hardware support currently covers the reviewed Key Light Chroma board and stock firmware profile; broad compatibility and long-term electrical testing remain open. [Installation status and recovery limits →](docs/getting-started.md)
 
-Both original applications are running on the reference light. Native OTA, diagnostic recovery and five-channel output have been exercised. After PWM handoff and flash/SPI coordination changes, progressive colour tests through 100%, a two-minute full-brightness hold and 24 rapid colour retargets passed without a reset. The owner observed clean instant changes, fades and update breathing. These bounded checks do not establish the cause of earlier brownouts or long-term electrical reliability. **A reproducible stock-to-original installation is the next qualification step.** See [installation and recovery limits](docs/getting-started.md) before using a build on hardware.
+![Colour controls served directly by an Open Keylight light](assets/dashboard/light-live.jpg)
 
-## A small instrument, carefully made
+## Make it yours
 
-- **A dashboard on the light.** React, TypeScript and local shadcn/ui components, compressed into the ESP application. No cloud account, CDN or desktop control service.
-- **One control model.** White, RGB, brightness, transitions, bounded effects and eight saved scenes share the same validation path. Recording Lock protects output changes while always allowing Off.
-- **An API you can build on.** Versioned JSON, revision checks, explicit errors, pairing tokens, controller reports and a bounded history of changes. A command acknowledgement is distinguished from a getter-confirmed setting.
-- **Useful integrations.** Home Assistant through MQTT discovery; a small Stream Deck plugin uses the same HTTP API. Availability and rejected commands are visible.
-- **A physical escape route.** Single press toggles power, double press advances a saved scene, and a deliberate hold opens pairing. Button servicing does not depend on the browser.
-- **Updates with a clear boundary.** Application-only OTA, image and digest validation, preserved partition layout, and a trial confirmation window. The existing ESP bootloader has no automatic crash rollback; the application-level fallback cannot rescue a failure before application startup.
+**Light that follows your controls.** Warm and cool white, RGB with sRGB decoding by default, instant changes, adjustable smooth colour transitions and effects. All five output channels use one state model.
 
-![Colour controls served directly by a light running Open Keylight](assets/dashboard/light-live.jpg)
+**Scenes worth keeping.** Four starting scenes, eight saved slots, and a physical double press to move through them. Your scenes stay on the light.
 
-Browser captures from the reference light running both original applications. The colour wheel, fade controls and controller report all use its local API.
+**A button with a job.** Press to toggle power, double press for the next scene, hold for three seconds to open pairing. Recording Lock protects your lighting during a take; Off remains available.
 
-![The Scenes dashboard served directly by a light running Open Keylight](assets/dashboard/scenes-live.jpg)
+**Made to connect.** A versioned local HTTP API, MQTT discovery for Home Assistant, and a Stream Deck plugin for keys and dials. Requests, reported controller state and rejected commands are distinct, so integrations can tell you what happened.
 
-These four defaults and any scenes you save live on the device.
+**Updates you can see.** Gentle breathing moves from blue through cyan to green as an update progresses, with red pulses on failure. Image checks and a confirmation window guard application updates; recovery limits are documented.
 
-## What is in the tree
+![Saved scenes in the on-device dashboard](assets/dashboard/scenes-live.jpg)
 
-| Directory | Responsibility |
+*Dashboard screenshots captured from a light running both original applications.*
+
+## Get started
+
+The guided installer is built with React and Ink. It finds your light, prepares a verified recovery image from Razer's official download, checks the hardware, and walks through installation. Firmware and dashboard files travel together in the release bundle.
+
+![The React and Ink guided installer](assets/installer/setup-preview.png)
+
+*Actual Ink output in demonstration mode; the example progress does not describe a live installation.*
+
+1. Connect your Key Light Chroma to your local network and close other lighting controllers.
+2. Follow the [installation guide](docs/getting-started.md) for the current release status and supported starting firmware.
+3. Stay with the light for the dark and five-colour checks. The installer explains each observation before continuing.
+4. Open the light's local address. Pair the browser and start using it.
+
+The Windows launcher prepares its own portable Node and Python runtimes. It does not change your PATH or require a compiler. Those runtimes and the stock recovery image are downloaded during setup; everyday control stays local.
+
+Already installed? Use the firmware controls in **System**. See [updating an existing installation](docs/getting-started.md#update-an-existing-installation) before changing either application.
+
+## Build on the API
+
+Read device information without an account:
+
+```sh
+curl http://LIGHT_IP/api/v1/device
+```
+
+Control requires a paired device token. The [API guide](docs/api-contract.md) and [OpenAPI document](docs/openapi.json) cover state, transitions, effects, scenes, pairing, integrations and updates. Revision checks let clients avoid overwriting a newer change.
+
+| Integration | Setup |
 | --- | --- |
-| `firmware/` | ESP-IDF application, networking, persistence and platform adapters |
-| `firmware/components/keylight_core/` | Portable state validation and time-based rendering |
-| `firmware/components/keylight_nxp/` | Original bounded SPI protocol driver and button state machine |
-| `firmware-nxp/` | Original Cortex-M0 application and LED-controller qualification work |
-| `dashboard/` | Embedded interface and browser tests |
-| `integrations/` | Thin clients around the public API |
-| `tests/` | Host-side protocol, state and failure-path tests |
-| `tools/` | Reproducible asset and release tooling |
+| Home Assistant | [MQTT discovery and broker configuration](docs/home-assistant.md) |
+| Stream Deck | [Install the plugin and connect keys or dials](integrations/streamdeck/README.md) |
+| Your own tools | [HTTP API and authentication](docs/api-contract.md) |
 
-The repository contains original application source, interface documentation and dependency lockfiles. Extracted vendor binaries, decompiler exports, device credentials and private network captures are excluded. This is an independently written implementation informed by hardware investigation; it is not presented as a clean-room reimplementation.
+## Under the hood
 
-## Build and test
+| Area | What lives there |
+| --- | --- |
+| `firmware/` | ESP-IDF application, networking, persistence and portable control core |
+| `firmware-nxp/` | Cortex-M0 lighting application and hardware diagnostics |
+| `dashboard/` | React interface embedded in the ESP image |
+| `installer/` | React / Ink setup experience |
+| `integrations/` | Home Assistant and Stream Deck support |
+| `tools/` | Migration, artifact verification and release packaging |
+| `tests/` | State, protocol, failure-path and packaging regressions |
 
-ESP32 builds are pinned to **ESP-IDF 5.5.5**. Use Node.js 22 or newer for the dashboard and CMake with a C compiler and cJSON development package for portable tests (`libcjson-dev` on Ubuntu). The Stream Deck plugin runs on Stream Deck 7.0 or newer using the host application's Node 20 runtime.
+Start with the [architecture](docs/architecture.md), [colour rendering](docs/color-rendering.md) and [release process](docs/releasing.md). The [development record](PROGRESS.md) keeps detailed test evidence and unresolved hardware questions out of the user guide.
+
+### Build and test
+
+Use ESP-IDF **5.5.5**, Node.js **22 or newer**, Python **3.12 or newer**, and CMake with a C compiler and cJSON. The NXP build also needs Clang and LLVM with Cortex-M0 support. On Ubuntu, install `libcjson-dev clang lld llvm` for the host/controller tools.
 
 ```sh
 cmake -S . -B build/host
 cmake --build build/host
 ctest --test-dir build/host --output-on-failure
+python3 -m unittest discover -s tests/migration -p 'test_*.py'
 
 cd dashboard
 npm ci
-npm test -- --run
+npm test
 npm run build
 cd ../firmware
 idf.py build
 ```
 
-The dashboard build produces a manifest of four compressed assets, including the scene photography. The ESP build embeds those assets and enforces the existing 1,572,864-byte application slot. **Do not use `idf.py flash` on an installed light:** its newly built bootloader and partition table are not part of the application-only migration.
+The dashboard build supplies the assets embedded by the ESP build. For interface development, run `npm run dev` in `dashboard` and use `?demo=1`; the labelled demo sends no device requests. In `installer`, `npm ci`, `npm test` and `npm run bundle` build the guided setup tool.
 
-CI produces development artifacts, not qualified releases. Its ESP archive contains only the application image, matching ELF, build metadata, asset manifest and SHA-256 checksums. It checks the image descriptor against `VERSION` so a stale CMake version cannot silently label a different build. See [artifact verification](docs/getting-started.md#development-artifacts).
+**Use application-only OTA on an existing light.** `idf.py flash` also writes bootloader and partition data and is not the migration procedure. The default NXP qualification build is inert; the installer uses separately reviewed diagnostic and lighting packages.
 
-For the reviewed stock profile, an [experimental guided migration tool](docs/stock-migration.md) prepares a target-bound plan and preserves an audit through controller trials and ESP replacement. Its builder workflow still requires a legitimate owner-local restore bank; fresh stock-to-original qualification remains pending.
+## Compatibility and care
 
-For dashboard development, run `npm run dev` in `dashboard` and open the displayed URL with `?demo=1`. The demo has a persistent label, uses an isolated transport and is excluded from production device builds.
+The panel is one RGB light with two white channels, not individually addressable pixels. Colour and brightness values are control levels, not calibrated optical measurements. Existing output limits stay in place pending electrical and thermal measurements.
 
-## The engineering boundary
+The retained ESP bootloader does not provide automatic crash rollback. Application fallback needs the new application to run; an early boot failure can require physical serial recovery. Use the documented [installation and recovery procedure](docs/getting-started.md), and keep the previous known-good image.
 
-The panel is one logical RGB light with two white channels. It is not a strip of individually addressable pixels. Colour values and brightness are control levels, not optical measurements. The existing mixed-mode brightness constraints are retained until electrical and thermal measurements justify a change.
-
-Wi-Fi outages must leave the light state and credentials intact. Animation must not write flash. A stale command must not resurrect an old effect. Shared NVS must never be erased as an error-recovery shortcut. Those rules are part of the architecture, not optional polish.
-
-The current local HTTP interface is intended for a trusted LAN; pairing tokens do not encrypt traffic. MQTT supports broker TLS with certificate validation. Do not expose the device directly to the public internet.
+Use the HTTP dashboard on a trusted LAN. Pairing tokens authenticate requests but do not encrypt them. MQTT supports broker TLS with certificate validation.
 
 ## Contributing
 
-Small changes with a clear failure case are welcome. Include a reproducer, the tests you ran, and any hardware claims that remain unmeasured. Keep protocol logic portable and avoid adding an abstraction until it has a job.
+Small, well-tested changes are welcome. Describe the failure or feature, include a reproducer where useful, and distinguish software checks from hardware observations. New board variants need their own qualification record. Changes to output limits need measurements.
 
-Hardware variants need their own qualification record. Do not infer board support from the product name alone, and do not raise PWM or combined-channel limits without measurements.
+This repository contains original application source and dependency lockfiles. Vendor firmware, extracted code, device credentials and private captures are excluded. The implementation is informed by hardware investigation; it is not a clean-room claim.
 
-## License and affiliation
+## License
 
-Apache-2.0. See [LICENSE](LICENSE). Razer and Key Light Chroma are trademarks of their respective owners. This project is independent and is not affiliated with or endorsed by Razer.
+[Apache-2.0](LICENSE). Razer and Key Light Chroma are trademarks of their respective owners. This project is independent and is not affiliated with or endorsed by Razer.

@@ -2,6 +2,17 @@
 
 There is no qualified public installation release yet. These entries describe development builds; [the development record](PROGRESS.md) separates automated checks from device observations.
 
+## 0.2.0-alpha.1 — candidate
+
+- Add a guided React / Ink installer with local discovery, named device selection, verified release bundles, stage progress and explicit visual checks.
+- Acquire the reviewed stock recovery image from Razer's official download automatically. No vendor firmware is included in the repository or release ZIP.
+- Prepare a Windows x64 launcher with checksum-pinned portable Node and Python runtimes; no global runtime or compiler installation is required.
+- Check the running ESP image, embedded dashboard, controller and low-output controls before first-boot confirmation; keep the paired credential in a private local file.
+- Fix the migration HTTP reader's handling of completed and truncated responses. Real HTTP regressions cover compressed, fragmented, chunked and close-delimited responses.
+- Add reproducible, allowlisted release packaging and a user-focused setup guide with actual dashboard and Ink screenshots.
+
+Hardware qualification and the final public release record remain pending. NXP lighting remains **0.1.1.0** and Stream Deck remains **0.1.3**.
+
 ## 0.1.9-dev
 
 - Clear a temporary dashboard connection error after fresh device and state reads succeed. Keep an uncertain command visible across a later outage; reconnecting never retries it.

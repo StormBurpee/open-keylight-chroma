@@ -3,6 +3,11 @@ import {builtinModules} from 'node:module';
 import {readFile, writeFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 
+const version = JSON.parse(await readFile('package.json', 'utf8')).version;
+const productVersion = (await readFile('../VERSION', 'utf8')).trim();
+if (typeof version !== 'string' || !/^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/.test(version)
+  || version.length > 31 || version !== productVersion) throw new Error('Installer package version must match the root VERSION before building.');
+
 const result = await build({entryPoints: ['src/cli.tsx'], outfile: 'dist/cli.js', bundle: true, platform: 'node', format: 'esm', target: 'node22', minify: true,
   define: {'process.env.NODE_ENV': '"production"', 'process.env.DEV': '"false"'}, legalComments: 'linked', metafile: true,
   // Ink's optional developer-tools dynamic import is not part of this product.
@@ -30,7 +35,7 @@ for (const path of [...packages].sort()) {
   notices.push(`${pkg.name} ${pkg.version} (${pkg.license})\n${'='.repeat(72)}\n${license.trim()}\n`);
 }
 await writeFile('dist/THIRD_PARTY_NOTICES.txt', notices.join('\n'));
-await writeFile('dist/package.json', JSON.stringify({type: 'module', engines: {node: '>=22'}}) + '\n');
+await writeFile('dist/package.json', JSON.stringify({type: 'module', engines: {node: '>=22'}, version}) + '\n');
 const bytes = await readFile('dist/cli.js');
-await writeFile('dist/build.json', JSON.stringify({format: 1, node: '>=22', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), bundled_packages: packages.size, external_runtime_packages: 0}, null, 2) + '\n');
+await writeFile('dist/build.json', JSON.stringify({format: 1, node: '>=22', version, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), bundled_packages: packages.size, external_runtime_packages: 0}, null, 2) + '\n');
 console.log(`Bundled ${bytes.length} bytes; ${packages.size} package notices; no external runtime packages.`);

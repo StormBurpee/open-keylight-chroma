@@ -177,10 +177,10 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
     {page === 'discover' && <LightChoices lights={lights} selected={selected} />}
     {page === 'bundle' && bundle && <>
       <Heading eyebrow="02 / YOUR RELEASE" title={`Open Keylight ${bundle.version}`} detail={`Selected for ${draft.name} · ${draft.ip}`} />
-      <Text color={palette.accent}>✓ Six bundled artifacts match their declared hashes</Text>
-      <Text color={palette.muted}>The backend checks firmware contents before contacting the light.</Text>
-      <Box marginY={1} flexDirection="column"><Text color={palette.ink}>Recovery is included in the setup</Text><Text color={palette.muted}>We obtain the pinned official Razer download and derive the reviewed recovery bank. No file hunting, no claimed device backup.</Text></Box>
-      <Text color={palette.muted}>Source {bundle.commit.slice(0, 12)} · {bundle.version.includes('-') ? 'Experimental prerelease' : 'Owner-selected release'}</Text>
+      <Text color={palette.accent}>✓ Firmware and dashboard files verified</Text>
+      <Text color={palette.muted}>Replaces both controller applications and installs the dashboard on your light.</Text>
+      <Box marginY={1} flexDirection="column"><Text color={palette.ink}>Recovery is prepared for you</Text><Text color={palette.muted}>A stock recovery image is downloaded directly from Razer and checked before installation.</Text></Box>
+      <Text color={palette.muted}>{bundle.version.includes('-') ? 'Early-access release' : 'Selected release'} · Stay beside the light for its two visual checks.</Text>
       <Button label="Prepare and review this installation" />
     </>}
     {fields.length > 0 && <>

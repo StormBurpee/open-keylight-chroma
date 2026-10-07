@@ -57,7 +57,7 @@ idf.py build
 cd ..
 ```
 
-The matching migration inputs are `firmware/build/open_keylight.bin` and `dashboard/dist/asset-manifest.json`. A [development artifact archive](getting-started.md#development-artifacts) from the intended commit can supply that pair instead. Use only the application image, never `idf.py flash`, a merged image, bootloader or partition table. Keep the matching ELF and metadata for diagnosis.
+The matching migration inputs are `firmware/build/open_keylight.bin` and `dashboard/dist/asset-manifest.json`. A [development artifact archive](getting-started.md#build-or-explore-without-installing) from the intended commit can supply that pair instead. Use only the application image, never `idf.py flash`, a merged image, bootloader or partition table. Keep the matching ELF and metadata for diagnosis.
 
 Acquire the reviewed stock recovery image:
 

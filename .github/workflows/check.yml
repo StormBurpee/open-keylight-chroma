@@ -29,14 +29,22 @@ jobs:
           cache-dependency-path: |
             dashboard/package-lock.json
             integrations/streamdeck/package-lock.json
+            installer/package-lock.json
       - run: npm ci && npm test && npm run build
         working-directory: dashboard
       - run: npm ci && npm run build && npm test && npm run validate && npm run pack
         working-directory: integrations/streamdeck
+      - run: npm ci && npm test && npm run check && npm run bundle && npm run test:bundle
+        working-directory: installer
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dashboard-assets
           path: dashboard/dist
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guided-installer
+          path: installer/dist
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -66,3 +74,20 @@ jobs:
           name: esp32-development-image
           path: build/release/esp32
           if-no-files-found: error
+  windows-installer:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: installer/package-lock.json
+      - run: npm ci; if ($LASTEXITCODE) { exit $LASTEXITCODE }; npm test; if ($LASTEXITCODE) { exit $LASTEXITCODE }; npm run check; if ($LASTEXITCODE) { exit $LASTEXITCODE }; npm run bundle; if ($LASTEXITCODE) { exit $LASTEXITCODE }; npm run test:bundle; exit $LASTEXITCODE
+        working-directory: installer
+      - run: python -W error::ResourceWarning -m unittest discover -s tests/migration -p 'test_*.py'
+      - run: python tests/release/test_package_release.py
+      - run: python tests/release/test_windows_launcher.py

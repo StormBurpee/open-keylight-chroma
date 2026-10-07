@@ -6,11 +6,14 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.parse import unquote, urlsplit
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,7 +32,7 @@ class Tests(unittest.TestCase):
         self.root.mkdir()
         self.input = self.base / "original builds"
         self.input.mkdir()
-        manifest_fixture(self.input)
+        _, self.plan, _ = manifest_fixture(self.input)
         image = bytearray((self.input / "open-keylight.bin").read_bytes())
         image[48:80] = b"0.2.0-dev".ljust(32, b"\0")
         offset, checksum = 24, 0xEF
@@ -52,14 +55,15 @@ class Tests(unittest.TestCase):
         self.installer.mkdir()
         cli = b"import {readFile} from 'node:fs/promises'; console.log('synthetic original test');\n"
         (self.installer / "cli.js").write_bytes(cli)
-        (self.installer / "package.json").write_text(json.dumps({"type": "module", "engines": {"node": ">=22"}}))
+        (self.installer / "package.json").write_text(json.dumps({
+            "version": "0.2.0-dev", "type": "module", "engines": {"node": ">=22"}}))
         (self.installer / "THIRD_PARTY_NOTICES.txt").write_text("Synthetic notices\n")
-        self.build = {"format": 1, "node": ">=22", "bytes": len(cli), "sha256": p.digest(cli),
+        self.build = {"format": 1, "version": "0.2.0-dev", "node": ">=22", "bytes": len(cli), "sha256": p.digest(cli),
                       "bundled_packages": 1, "external_runtime_packages": 0}
         self.write_json(self.installer / "build.json", self.build)
         for name in (*["tools/" + name for name in p.TOOLS],
                      *["distribution/windows/" + name for name in p.LAUNCHERS],
-                     "LICENSE", "README.md", "docs/getting-started.md", *p.GUIDE_IMAGES):
+                     *p.GUIDE_FILES, "docs/releases/0.2.0-dev.md", *p.GUIDE_IMAGES):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("Public test content for " + name + "\n", encoding="utf-8")
@@ -84,7 +88,7 @@ class Tests(unittest.TestCase):
     def test_fixed_layout_checksums_and_metadata(self):
         result = self.build_release()
         with zipfile.ZipFile(self.output) as archive:
-            expected = {"firmware/bundle.json", "VERSION", "LICENSE", "README.md", "docs/getting-started.md",
+            expected = {"firmware/bundle.json", "VERSION", *p.GUIDE_FILES, "docs/releases/0.2.0-dev.md",
                         "release.json", "SHA256SUMS", "START_HERE.txt", *p.LAUNCHERS, *p.GUIDE_IMAGES,
                         *["tools/" + name for name in p.TOOLS],
                         *["installer/" + name for name in p.INSTALLER],
@@ -185,13 +189,60 @@ class Tests(unittest.TestCase):
 
     def test_stale_installer_or_external_runtime_dependencies_denied(self):
         for key, value in (("sha256", "0" * 64), ("bytes", self.build["bytes"] + 1), ("format", True),
+                           ("version", "0.1.9-dev"), ("version", True),
                            ("external_runtime_packages", 1), ("external_runtime_packages", False),
                            ("bundled_packages", True), ("node", ">=20")):
             self.write_json(self.installer / "build.json", {**self.build, key: value}); self.rejects()
         self.write_json(self.installer / "build.json", self.build)
-        self.write_json(self.installer / "package.json", {"type": "module", "engines": {"node": ">=22"},
+        self.write_json(self.installer / "package.json", {"version": "0.2.0-dev", "type": "module", "engines": {"node": ">=22"},
                                                          "dependencies": {"unexpected": "1"}})
         self.rejects()
+
+    def test_installer_version_metadata_is_required_and_consistent(self):
+        missing = {key: value for key, value in self.build.items() if key != "version"}
+        self.write_json(self.installer / "build.json", missing); self.rejects()
+        self.write_json(self.installer / "build.json", self.build)
+        for version in (None, "0.1.9-dev", True):
+            package = {"type": "module", "engines": {"node": ">=22"}}
+            if version is not None: package["version"] = version
+            self.write_json(self.installer / "package.json", package); self.rejects()
+
+    def test_extracted_jsonl_backend_imports_with_isolated_python_without_checkout(self):
+        # Use the exact five shipped public modules, not mocked substitutes or
+        # an import that can accidentally fall back to this checkout.
+        for name in p.TOOLS:
+            (self.root / "tools" / name).write_bytes((ROOT / "tools" / name).read_bytes())
+        self.build_release()
+        extracted = self.base / "extracted"
+        with zipfile.ZipFile(self.output) as archive: archive.extractall(extracted)
+        document = json.loads((extracted / "firmware/bundle.json").read_bytes())
+        plan = copy.deepcopy(self.plan)
+        for name, entry in document["packages"].items():
+            plan["packages"][name] = {"path": "firmware/" + entry["path"], "sha256": entry["sha256"]}
+        for name in ("esp", "assets"):
+            entry = document[name]
+            plan[name] = {"path": "firmware/" + entry["path"], "sha256": entry["sha256"]}
+        plan["restore"]["path"] = str(self.input / "owner-restore.bin")
+        self.write_json(extracted / "local-plan.json", plan)
+        bootstrap = (
+            "import runpy,sys,socket; from pathlib import Path; "
+            "p=Path(sys.argv[1]).resolve(); sys.path.insert(0,str(p.parent)); "
+            "import migration_events,migration_profiles,vendor_restore; "
+            "socket.socket=lambda *a,**k: (_ for _ in ()).throw(AssertionError('No network')); "
+            "assert all(Path(m.__file__).parent == p.parent for m in "
+            "(migration_events,migration_profiles,vendor_restore)); "
+            "sys.argv=sys.argv[1:]; runpy.run_path(str(p),run_name='__main__')")
+        result = subprocess.run([sys.executable, "-I", "-S", "-X", "utf8", "-c", bootstrap,
+                                 str(extracted / "tools/stock_migration.py"), "prepare",
+                                 "--manifest", str(extracted / "local-plan.json"), "--events-jsonl"],
+                                cwd=extracted, capture_output=True, text=True, timeout=10,
+                                stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual([(row["seq"], row["event"]) for row in rows], [(0, "status"), (1, "completed")])
+        self.assertEqual(rows[0]["summary"]["device_operations"], 0)
+        self.assertEqual(rows[0]["summary"]["esp"]["version"], "0.2.0-dev")
+        self.assertEqual(rows[-1]["outcome"], "prepared")
 
     def test_validated_firmware_snapshot_is_not_reread(self):
         original = (self.bundle / "open-keylight.bin").read_bytes()
@@ -211,6 +262,21 @@ class Tests(unittest.TestCase):
         self.write_json(path, {"format": 1, "platform": "win-x64"})
         (self.root / p.GUIDE_IMAGES[-1]).unlink()
         self.rejects(FileNotFoundError)
+
+    def test_public_guide_local_link_closure_is_explicit_and_complete(self):
+        version = (ROOT / "VERSION").read_text().strip()
+        included = {*p.GUIDE_FILES, *p.GUIDE_IMAGES, f"docs/releases/{version}.md"}
+        for name in sorted(included):
+            source = ROOT / name
+            self.assertTrue(source.is_file(), name)
+            if source.suffix != ".md": continue
+            for target in re.findall(r"!?\[[^\]]*\]\(([^)]+)\)", source.read_text(encoding="utf-8")):
+                target = target.split(' "', 1)[0].strip("<>")
+                parsed = urlsplit(target)
+                if parsed.scheme or parsed.netloc or not parsed.path: continue
+                resolved = (source.parent / unquote(parsed.path)).resolve()
+                self.assertTrue(resolved.is_relative_to(ROOT), (name, target))
+                self.assertIn(resolved.relative_to(ROOT).as_posix(), included, (name, target))
 
     def test_existing_and_concurrent_destination_preserved(self):
         self.output.write_bytes(b"existing release")

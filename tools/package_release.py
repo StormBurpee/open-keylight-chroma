@@ -28,6 +28,13 @@ INSTALLER = ("cli.js", "package.json", "THIRD_PARTY_NOTICES.txt", "build.json")
 STAGES = ("identity", "OFF1", "LOW1", "lighting")
 GUIDE_IMAGES = ("assets/brand/readme-hero.png", "assets/dashboard/light-live.jpg",
                 "assets/dashboard/scenes-live.jpg", "assets/installer/setup-preview.png")
+GUIDE_FILES = ("LICENSE", "README.md", "PROGRESS.md", "docs/getting-started.md",
+               "docs/api-contract.md", "docs/architecture.md", "docs/color-rendering.md",
+               "docs/controller-update-journal.md", "docs/controller-updates.md",
+               "docs/home-assistant.md", "docs/openapi.json", "docs/releasing.md",
+               "docs/scenes.md", "docs/stock-migration.md", "firmware-nxp/LOW-TRIAL.md",
+               "firmware-nxp/OFF-TRIAL.md", "firmware-nxp/PRODUCTION.md", "firmware-nxp/README.md",
+               "firmware/main/mqtt.c", "integrations/streamdeck/README.md")
 
 
 def _json_bytes(value: dict) -> bytes:
@@ -123,16 +130,18 @@ def build_release(bundle: Path, installer: Path, output: Path, root: Path = ROOT
         put("installer/" + name, read(installer, name, 16777216 if name == "cli.js" else 1048576))
     build = _json(files["installer/build.json"])
     require(isinstance(build, dict) and set(build) == {
-        "format", "node", "bytes", "sha256", "bundled_packages", "external_runtime_packages"},
+        "format", "version", "node", "bytes", "sha256", "bundled_packages", "external_runtime_packages"},
         "Unexpected installer build fields")
-    require(type(build["format"]) is int and build["format"] == 1 and build["node"] == ">=22"
+    require(type(build["format"]) is int and build["format"] == 1 and build["version"] == version
+            and build["node"] == ">=22"
             and type(build["bytes"]) is int and build["bytes"] == len(files["installer/cli.js"])
             and build["sha256"] == digest(files["installer/cli.js"])
             and type(build["bundled_packages"]) is int and 0 < build["bundled_packages"] <= 1000
             and type(build["external_runtime_packages"]) is int and build["external_runtime_packages"] == 0,
             "Installer build is stale or contains external runtime packages")
-    require(_json(files["installer/package.json"]) == {"type": "module", "engines": {"node": ">=22"}},
-            "Installer runtime manifest must not add dependencies or scripts")
+    require(_json(files["installer/package.json"]) == {
+        "version": version, "type": "module", "engines": {"node": ">=22"}},
+        "Installer runtime version differs or its manifest adds dependencies or scripts")
     legal = installer / "cli.js.LEGAL.txt"
     if legal.exists() or legal.is_symlink():
         put("installer/cli.js.LEGAL.txt", read(installer, legal.name, 1048576))
@@ -146,7 +155,7 @@ def build_release(bundle: Path, installer: Path, output: Path, root: Path = ROOT
     require(isinstance(runtimes, dict) and type(runtimes.get("format")) is int
             and runtimes["format"] == 1 and runtimes.get("platform") == "win-x64",
             "Wrong launcher runtime platform")
-    for name in ("LICENSE", "README.md", "docs/getting-started.md"):
+    for name in (*GUIDE_FILES, f"docs/releases/{version}.md"):
         put(name, read(root, name, 1048576))
     for name in GUIDE_IMAGES:
         put(name, read(root, name, 8388608))
@@ -154,8 +163,8 @@ def build_release(bundle: Path, installer: Path, output: Path, root: Path = ROOT
         "Open Keylight Chroma - Windows x64\n\n"
         "Extract the entire ZIP, then open start-open-keylight.cmd.\n"
         "Read docs/getting-started.md before connecting to a light.\n"
-        "README.md and the guide images are included for offline reading.\n"
-        "Engineering references linked from those documents are in the online source:\n"
+        "README.md, its local reference documents and guide images work offline.\n"
+        "The complete source repository and current release information are online:\n"
         "https://github.com/StormBurpee/open-keylight-chroma\n\n"
         "First setup downloads pinned Node/Python runtimes and the stock recovery\n"
         "image from their original publishers. They are not bundled here.\n"

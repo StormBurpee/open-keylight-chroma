@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "source": "Actual React / Ink component output from installer/dist/cli.js --demo install, rendered as ANSI text in the local capture page",
+  "capture": "Browser screenshot through computer use",
+  "image": "setup-preview.png",
+  "mode": "demonstration",
+  "hardware_installation_evidence": false,
+  "source_command": "npm run capture:demo",
+  "screen": "install",
+  "dimensions": [
+    1553,
+    886
+  ]
+}

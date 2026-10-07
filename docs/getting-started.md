@@ -1,61 +1,94 @@
 # Getting started
 
-Open Keylight Chroma is a development preview for a qualified reference board. Both original MCU applications run on that light, including native update and recovery tests. This is not yet a general installation release. Following PWM handoff and flash/SPI coordination changes, native OTA, progressive colour tests through 100%, a two-minute full-brightness hold and 24 rapid colour retargets passed without a reset. The cause of earlier brownouts and long-term electrical reliability remain unproven; these are bounded checks on one board.
+Open Keylight runs on the light itself. You use a computer for the initial installation; afterward, a browser is enough.
 
-## Choose the appropriate path
+**Current status:** the guided installer and first prerelease are being qualified. The reference light runs both original applications. On the second light, controller installation and the observed five-channel checks passed; final ESP acceptance is still pending. Do not treat a development artifact as a completed installation release.
 
-| Starting point | Current path |
-| --- | --- |
-| Explore the interface without a light | Run the explicitly labelled [dashboard demo](dashboard.md#build-and-preview). It sends no device requests. |
-| Build or contribute | Follow the [README build steps](../README.md#build-and-test) and automated tests. Building does not establish hardware compatibility. |
-| A factory-firmware light | The [experimental guided migration](stock-migration.md) is available for the reviewed stock profile. It requires prepared original builds, an owner-local restore bank and observed diagnostic checks. Fresh stock-to-original hardware qualification is still pending; this is not a general installation release. |
-| An already qualified Open Keylight light | Use its embedded dashboard and authenticated application-only update flow below. Keep its known-good image and qualification record. |
+## Before you begin
 
-The ESP image, NXP application bank and controller update package are different formats. Never upload a bootloader, partition table, merged flash image, raw NXP bank or diagnostic image through the ESP firmware control. `idf.py flash` is not the existing-light migration procedure. The NXP default build is deliberately inert and must not be installed; [reference lighting](../firmware-nxp/PRODUCTION.md) and diagnostic profiles have separate acceptance requirements.
+You need a Razer Key Light Chroma already connected to Wi-Fi, a computer on the same local network, its original power supply, and a few minutes beside the light. Close Synapse, the Razer app and other controllers during installation.
 
-For the factory-firmware path, the migration guide consolidates [target identification](stock-migration.md#identify-the-target), [all four controller builds and packages](stock-migration.md#build-and-package-once-then-prepare-the-plan), and plan creation in PowerShell or a POSIX shell. Prepare the matching ESP image/assets and the independently reviewed owner-local restore bank before starting. Stay with the light for the two physical diagnostic prompts and the browser acceptance window. If installation stops, use its [outcome and recovery matrix](stock-migration.md#if-a-stage-stops); restarting the installer is not a general resume operation.
+The initial stock profile is **ESP 1.0.13.0 with NXP 1.3.0.0**, using the reviewed LPC11U35/501 controller and resident loader. The installer checks live identity and the loader before continuing. A similar product name or firmware number does not establish support for a different board.
 
-## Connect to an existing installation
+Initial Wi-Fi provisioning of a factory-new light is outside this installer. Once Open Keylight is installed, its dashboard handles Wi-Fi configuration without Razer software.
 
-Open the light's current local IP address in a browser. The dashboard is served by the light on port 80; no companion desktop server is needed. Find the address in your router if local hostname discovery is unavailable.
+## Install with the guided Windows setup
 
-To authorize a browser, hold the physical button for three seconds, open **Connect access**, give the client a recognizable name and choose **Pair this browser**. The pairing window lasts up to 180 seconds and closes after one client pairs. An already trusted client can instead use **System → Open pairing for another client**. Tokens are scoped to clients and the browser keeps its token in tab session storage; closing that session may require pairing again. Keep the device on a trusted LAN: HTTP bearer tokens do not encrypt traffic.
+The release package is designed for **Windows 10/11 x64**. It includes original firmware and the React / Ink installer. The launcher downloads verified portable Node and Python runtimes on first use—about 47 MB—without installing them globally or changing PATH.
 
-System provides Wi-Fi setup, client revocation and integration settings. A Wi-Fi change is an explicit **Save Wi-Fi & restart light** action; it may change the address. Passwords are never returned by the settings API. An installation without configured Wi-Fi exposes `Keylight-Setup-<suffix>` at `http://192.168.4.1`. If configured Wi-Fi is unavailable, a three-second button hold also requests a temporary setup network. Pairing is still required to change settings.
+1. Download the Windows installer ZIP from the project's [Releases](https://github.com/StormBurpee/open-keylight-chroma/releases) page. Read that release's supported hardware and qualification record.
+2. Choose **Extract all**. Open **start-open-keylight.cmd** from the extracted folder.
+3. Choose **Find my light**, then select it by name and address. If discovery finds nothing, check that the computer and light are on the same network; guest-network isolation or a VPN can prevent discovery.
+4. Review the selected light and release. The installer downloads the exact stock recovery image from Razer's official HTTPS server and verifies it locally. You do not need to find or extract a firmware backup.
+5. Start installation and keep both the terminal and light powered. Follow the two visual checks: complete darkness, then red, green, blue, warm white and cool white with darkness between them. Choose **No / unsure** if the observation does not match.
+6. The installer replaces the ESP application last, checks the actual image and dashboard assets, pairs its client, briefly checks 5% white and Off, and confirms the new application. If pairing is already closed, it asks for a three-second button hold.
+7. Open the dashboard address shown at completion. Pair your browser as described below.
 
-If all access tokens are lost, an uninterrupted button hold beginning at boot and lasting ten seconds revokes existing clients and reopens pairing. It preserves Wi-Fi and scenes; it is not a factory erase or controller-journal reset. Use it deliberately, since other clients will lose access.
+The installer saves an audit and a private client credential on your computer. Its recovery download stays in your local cache; it is not uploaded to GitHub or redistributed in our releases. That file is a known stock recovery image, **not a backup of your device's settings or complete flash**.
 
-## Development artifacts
+Advanced mode supports prepared plans and explicit artifact paths for developers. Normal setup does not require typing hashes, commits or firmware paths. See [the stock migration reference](stock-migration.md) for those details.
 
-Download artifacts only from the intended commit's successful **Build and verify** run. The workflow does not create GitHub Releases or designate a hardware-qualified version. The ESP archive contains:
+If a stage stops, keep the audit and follow the displayed recovery instruction. Starting the installer again is not a general resume procedure. A timeout can occur after a write succeeded; the tool does not blindly repeat a mutation.
 
-- `open_keylight.bin`: standalone ESP application, including the dashboard.
-- `open_keylight.elf`: matching symbols and build identity, for diagnosis; do not upload it.
-- `manifest.json`: source commit, descriptor version, image and ELF digests, slot size and explicit unqualified status.
-- `project_description.json` and `asset-manifest.json`: build and embedded-asset metadata.
-- `SHA256SUMS`: checksums for the files above.
+## Pair your browser
 
-Run `sha256sum --check SHA256SUMS` after extraction on Linux, or compare `Get-FileHash .\open_keylight.bin -Algorithm SHA256` with its entry on Windows. Verify the workflow commit and expected image digest independently of the selected local file. These hashes detect mismatches; they are not firmware signatures or proof that a build is safe for another board. Firmware `VERSION`, NXP application version and Stream Deck plugin version are independent.
+Open the light's local IP address. The dashboard comes directly from the ESP32 on port 80; no desktop control server is needed.
 
-The separately packaged Stream Deck plugin is described in [its installation guide](../integrations/streamdeck/README.md); [Home Assistant setup](home-assistant.md) uses MQTT. Neither integration installs firmware on a factory light.
+1. Hold the light's physical button for **three seconds**.
+2. In the dashboard, open **Connect access**.
+3. Give the browser a recognizable name and choose **Pair this browser**.
 
-## Update an already qualified ESP installation
+The window lasts up to 180 seconds and closes after one successful pairing. An existing trusted client can instead use **System → Open pairing for another client**. You can also enter the installer client's saved token in the dashboard or Stream Deck; keep that credential file private.
 
-1. Keep the previous known-good application and its digest. Check System's current firmware/controller health, paired access and stable network. Resolve any pending ESP trial first. Stop other controllers and set the light Off.
-2. In System, select the standalone `open_keylight.bin` and enter its independently checked SHA-256. Choose **Verify & update** once. The device writes the inactive application slot; it preserves the installed bootloader, partition table, settings, tokens and scenes.
-3. Reconnect after restart. Check the expected firmware version **and** `firmware_elf_sha256` in `GET /api/v1/device`, since version labels can repeat. Check the dashboard, settings/scenes, controller health, low-level controls and fresh reported fields, then return to Off. A successful upload response is not a successful reboot or optical verification.
-4. Within the 180-second application trial, measured from application startup, explicitly choose **Confirm this firmware** only after those checks. Reconnecting or opening the dashboard does not restart the timer. Confirming the ESP does not independently qualify or install the NXP application.
+Browser access is stored in the current tab session. Closing that session may require pairing again. System lets you view and revoke clients independently.
 
-If a request times out, inspect the current device and preserve the audit before another action. Do not blindly repeat an upload or confirmation: a response can be lost after a successful operation. A later upload can replace the previous recovery image.
+If every token is lost, a continuous button hold starting at power-on and lasting ten seconds revokes existing clients and reopens pairing. It preserves Wi-Fi and scenes.
 
-ESP 0.1.8 shows update progress with a subtle blue → cyan → green breath: blue begins reception, and pure green means the image has passed verification. Failure uses two red pulses. The indicator depends on a healthy controller link and is suppressed by Recording Lock; its absence alone does not establish the update outcome. The API and the next boot's image identity are the acceptance evidence.
+## Make your first scene
 
-## Fallback and controller recovery
+Choose White for warmth and brightness, or Colour for RGB. sRGB decoding is the default. In Colour mode, disable smooth transitions for an immediate change, or enable them and choose a fade duration. White transitions are not supported by the current application.
 
-Leave an unsuccessful ESP trial unconfirmed. If the new application is running sufficiently to service its trial task, it selects the other application slot and restarts after 180 seconds. This is **application-level fallback**. The retained ESP bootloader has no automatic crash rollback: an invalid startup, repeated early crash or lost power can prevent that task from running. Do not assume a power cycle repairs an unbootable image. Recovering that case can require independently prepared serial access and a verified image/layout; no general serial recovery recipe is qualified here.
+Scenes has four defaults and space for eight saved scenes. Save deliberately; turning a control does not overwrite a scene. A single button press toggles power, and a double press advances the saved scenes. Recording Lock protects output changes during a take; Off is always available.
 
-Confirmation ends the automatic trial. There is no general dashboard rollback button. Reinstalling an older known-good image is a separate explicit OTA operation and requires compatible stored data; it is not a reason to erase NVS.
+Connect [Home Assistant through MQTT](home-assistant.md), or install the [Stream Deck plugin](../integrations/streamdeck/README.md). The plugin needs Stream Deck 7.0 or newer, the light's address and a paired token.
 
-The NXP controller has its own updater and durable failure journal. A failed controller update can leave the ESP dashboard reachable while normal lighting stays disabled. ESP rollback or reboot does not clear that journal. Preserve the cached job and transport diagnostics. The authenticated recovery operation requires the exact job ID, a confirmed ESP application, an acknowledged **whole-light physical power cycle**, and the documented fresh-boot conditions; it does not erase the journal or resume an interrupted transfer. A resident recovery result permits a new explicit package upload. See [the exact recovery contract](controller-update-journal.md#explicit-recovery-after-physical-power-cycle).
+## Change Wi-Fi
 
-Public stock migration, broad board compatibility, sustained maximum-output/current/thermal testing and recovery from arbitrary early-boot failure remain release gates. Host tests and development artifacts are evidence for software behavior, not substitutes for those observations.
+Use **System → Save Wi-Fi & restart light**. Reconnecting may assign a different IP address. Passwords are never returned by the settings API.
+
+An installation without configured Wi-Fi exposes `Keylight-Setup-<suffix>` at `http://192.168.4.1`. If configured Wi-Fi is unavailable, a three-second button hold also requests a temporary setup network. Pairing is still required to change settings.
+
+## Update an existing installation
+
+Firmware releases identify the ESP application, controller package and Stream Deck plugin separately. Updating the ESP does not automatically replace the NXP application.
+
+1. Keep the previous known-good application and its checksum. Check System for healthy controller status and no pending update. Close other controllers and set the light Off.
+2. Select the standalone ESP application and its published SHA-256 in System's firmware controls. Choose **Verify & update** once.
+3. Reconnect after restart. Check the expected firmware version and `firmware_elf_sha256` in `GET /api/v1/device`, the dashboard, settings/scenes and controller health. Check low-level controls, then return to Off.
+4. Within the **180-second application trial**, choose **Confirm this firmware** after those checks. The timer begins at application startup; opening or refreshing the dashboard does not restart it.
+
+Native updates breathe gently from blue through cyan to green. Green means image verification completed. Failure uses two red pulses. The indicator needs a healthy controller and is suppressed by Recording Lock; verify the API and next boot's identity even if no indicator is visible.
+
+Use only the standalone application image. A bootloader, partition table, merged flash dump, raw NXP bank and controller package are different formats. **Do not use `idf.py flash` on an installed light.** It is not the application-only update path.
+
+Controller updates have a separate [package and recovery procedure](controller-updates.md).
+
+## When something goes wrong
+
+An unconfirmed ESP trial selects the previous application after 180 seconds **if the new application can run its trial task**. The retained bootloader has no automatic crash rollback. An early crash or unbootable application can require physical serial recovery; an A/B partition layout alone cannot prevent that.
+
+Once confirmed, there is no general rollback button. Installing an older known-good application is another explicit update and requires compatible saved data. Do not erase NVS as a recovery shortcut.
+
+Controller updates keep a durable failure journal in ESP storage. The dashboard can remain reachable while lighting is disabled. Restarting or rolling back the ESP does not clear that journal. Preserve the job details and follow the [controller recovery contract](controller-update-journal.md#explicit-recovery-after-physical-power-cycle); some failures need a whole-light power cycle.
+
+Current evidence covers bounded functional checks on the reference hardware. Broad board compatibility, sustained maximum-output/current/thermal measurements and arbitrary early-boot recovery remain unqualified. The [development record](../PROGRESS.md) distinguishes observed behaviour from software tests.
+
+## Build or explore without installing
+
+The [README](../README.md#build-and-test) covers the toolchain. For a dashboard demo, run `npm run dev` inside `dashboard` and add `?demo=1` to the displayed address. It is visibly labelled and sends no device requests.
+
+The installer has its own labelled interface preview. It does not discover or change lights.
+
+GitHub Actions development artifacts are tied to their workflow commit and are not hardware-qualified releases. The ESP archive includes the application, matching ELF, source and asset metadata, and `SHA256SUMS`. Check those hashes and retain the ELF for diagnosis; never upload the ELF.
+
+Use the dashboard on a trusted LAN. HTTP tokens authenticate requests but do not encrypt traffic. MQTT supports broker TLS with certificate validation. Do not expose the device directly to the public internet.
