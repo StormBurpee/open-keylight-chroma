@@ -1,5 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {realpathSync} from 'node:fs';
 import {mkdtemp, mkdir, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -33,7 +34,8 @@ test('shared bootstrap imports adjacent modules with isolated Python and preserv
     const args = pythonArguments(root, 'stock_migration.py', ['prepare', 'spaces & $(literal)']);
     const result = JSON.parse(execFileSync(python, ['-I', '-S', ...args], {encoding: 'utf8'}));
     assert.equal(result.value, 42);
-    assert.deepEqual(result.args, [join(root, 'tools/stock_migration.py'), 'prepare', 'spaces & $(literal)']);
+    assert.equal(realpathSync.native(result.args[0]), realpathSync.native(join(root, 'tools/stock_migration.py')));
+    assert.deepEqual(result.args.slice(1), ['prepare', 'spaces & $(literal)']);
     assert.throws(() => pythonArguments(root, '../outside.py', []), /Unknown/);
   });
 });

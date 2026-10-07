@@ -1,8 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {realpathSync} from 'node:fs';
 import {mkdtemp, mkdir, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {display, privateIPv4, emptyDraft, draftErrors, parseSummary} from '../src/model.js';
 import {edit} from '../src/input.js';
 import {discoverArtifacts} from '../src/artifacts.js';
@@ -57,5 +59,5 @@ test('vendor helper must declare exact derived artifact, never a device backup',
   const v = {format: 1, profile: summary.profile, path, bytes: 28672, sha256: 'f46d19f50bba9fd97c6c3e207557b15470ad05d1877402a0cd15e0adc3a87a96', version: '1.3.0.0', cached: true, source_url: 'https://mobileapp-assets.razerzone.com/iOS/Jade/T1/02.03.13.00.zip', archive_sha256: 'a'.repeat(64), provenance: 'Pinned vendor-derived fixture', device_backup: false, device_operations: 0};
   assert.equal((await acquireRestore(path, async () => v)).cached, true);
   for (const bad of [{device_backup: true}, {sha256: 'b'.repeat(64)}, {source_url: 'http://untrusted.invalid'}, {bytes: 1}]) await assert.rejects(acquireRestore(path, async () => ({...v, ...bad})));
-  assert.ok(findRepository().endsWith('open-keylight'));
+  assert.equal(realpathSync.native(findRepository()), realpathSync.native(fileURLToPath(new URL('../../', import.meta.url))));
 });

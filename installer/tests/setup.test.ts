@@ -1,5 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {realpathSync} from 'node:fs';
 import {EventEmitter} from 'node:events';
 import type {Socket} from 'node:dgram';
 import {createHash} from 'node:crypto';
@@ -69,7 +70,7 @@ async function withBundle(fn: (root: string, manifest: any) => Promise<void>) {
 }
 test('bundle binds all six contents and derives paths; changed artifact or manifest rejects', async () => {
   await withBundle(async (root, v) => {
-    const result = await findBundle(undefined, root); assert.equal(result.version, '0.2.0-alpha.1'); assert.equal(result.files.low1, join(root, 'LOW1.oklnxp'));
+    const result = await findBundle(undefined, root); assert.equal(result.version, '0.2.0-alpha.1'); assert.equal(realpathSync.native(result.files.low1), realpathSync.native(join(root, 'LOW1.oklnxp')));
     await writeFile(join(root, 'app.bin'), Buffer.alloc(400)); await assert.rejects(loadBundle(join(root, 'bundle.json')));
     for (const path of ['../app.bin', '/app.bin', 'C:/app.bin', 'nested\\app.bin', 'a//b', './app.bin']) {
       v.esp.path = path; await writeFile(join(root, 'bundle.json'), JSON.stringify(v)); await assert.rejects(loadBundle(join(root, 'bundle.json')));
