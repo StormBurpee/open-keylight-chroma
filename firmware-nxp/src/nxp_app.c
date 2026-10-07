@@ -114,7 +114,13 @@ static uint8_t dispatch(nxp_state *s, const uint8_t tag[6], const uint8_t *q, ui
             write_be32(b + 16, now_ms); write_be32(b + 20, s->reset_cause);
             r[5] = 24; return STATUS_OK;
         }
-        if (op == 0x87 && !n) { r[5] = 4; b[1] = 1; return STATUS_OK; }
+        if (op == 0x87 && !n) {
+            r[5] = 4; b[1] = 1;
+#if defined(NXP_PRODUCTION_LIGHTING) && NXP_PRODUCTION_LIGHTING
+            b[2] = 1; /* Reference lighting 0.1.1.0; diagnostics remain 0.1.0.0. */
+#endif
+            return STATUS_OK;
+        }
         if (op == 0x84 && !n) { r[5] = 1; b[0] = s->boot_requested; return STATUS_OK; }
         if (op == 0xfe && !n) {
             if (!s->part_id) return 4;

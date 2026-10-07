@@ -198,6 +198,26 @@ static int off_trial_permitted(nxp_board *b) {
 int nxp_board_prepare_pwm_off_trial(nxp_board *b) { return off_trial_permitted(b) && prepare_pwm(b); }
 int nxp_board_connect_pwm_off_trial(nxp_board *b) { return off_trial_permitted(b) && connect_pwm(b); }
 int nxp_board_stop_pwm_off_trial(nxp_board *b) { return off_trial_permitted(b) && stop_pwm(b); }
+#if defined(NXP_PRODUCTION_LIGHTING) && NXP_PRODUCTION_LIGHTING
+static int settle_pwm_reductions(nxp_board *b) {
+    static const uint32_t base[2] = {WHITE, COLOR};
+    static const uint32_t period[2] = {254, 25499};
+    unsigned attempt, timer;
+    /* Counter wrap, rather than compare readback, proves an old HIGH latch
+     * has reached its reset boundary (UM10462 section16.7.13). Poll both
+     * timers together; no timer reset, GPIO blanking or interrupt masking. */
+    for (attempt = 0; attempt < 8192 && b->pwm_reduction_pending; ++attempt) {
+        for (timer = 0; timer < 2; ++timer) if (b->pwm_reduction_pending & (1u << timer)) {
+            uint32_t counter = read_reg(b, base[timer] + 8);
+            if (counter > period[timer]) return 0;
+            if (counter < b->pwm_reduction_counter[timer])
+                b->pwm_reduction_pending &= (uint8_t)~(1u << timer);
+            b->pwm_reduction_counter[timer] = counter;
+        }
+    }
+    return !b->pwm_reduction_pending;
+}
+#endif
 int nxp_board_apply_pwm(nxp_board *b, const nxp_pwm_frame *f) {
     if (!b || !b->pwm_started || b->pwm_fault || !qualified(b, NXP_QUAL_PWM_REQUIRED) || !f ||
         f->red_match > 25500 || f->green_match > 25500 || f->blue_match > 25500 ||
@@ -218,11 +238,27 @@ int nxp_board_apply_pwm(nxp_board *b, const nxp_pwm_frame *f) {
     static const uint32_t address[5] = {COLOR + 0x24, COLOR + 0x1c, COLOR + 0x18, WHITE + 0x18, WHITE + 0x1c};
     const uint32_t target[5] = {f->red_match, f->green_match, f->blue_match, f->cool_match, f->warm_match};
     uint32_t previous[5];
+    unsigned increases = 0, reduced_timers = 0;
     unsigned i;
-    for (i = 0; i < 5; ++i) previous[i] = read_reg(b, address[i]);
+    for (i = 0; i < 5; ++i) {
+        previous[i] = read_reg(b, address[i]);
+        if (previous[i] > (i < 3 ? 25500u : 255u)) goto failed;
+        increases |= target[i] < previous[i];
+        if (target[i] > previous[i]) reduced_timers |= i < 3 ? 2u : 1u;
+    }
     for (i = 0; i < 5; ++i) if (target[i] >= previous[i]) write_reg(b, address[i], target[i]);
     for (i = 0; i < 5; ++i)
         if (target[i] >= previous[i] && read_reg(b, address[i]) != target[i]) goto failed;
+    /* Sample after the last reduction write: a reset before that write would
+     * not prove the new match had cleared the old latch. An all-decrease call
+     * need not wait, but its pending boundary survives a rapid subsequent up. */
+    for (i = 0; i < 2; ++i) if (reduced_timers & (1u << i)) {
+        uint32_t counter = read_reg(b, (i ? COLOR : WHITE) + 8);
+        if (counter > (i ? 25499u : 254u)) goto failed;
+        b->pwm_reduction_counter[i] = counter;
+        b->pwm_reduction_pending |= (uint8_t)(1u << i);
+    }
+    if (increases && !settle_pwm_reductions(b)) goto failed;
     for (i = 0; i < 5; ++i) if (target[i] < previous[i]) write_reg(b, address[i], target[i]);
 #else
     write_reg(b, COLOR + 0x24, f->red_match); write_reg(b, COLOR + 0x1c, f->green_match);

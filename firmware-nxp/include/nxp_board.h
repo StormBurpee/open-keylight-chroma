@@ -28,6 +28,12 @@ typedef struct {
     uint16_t received, queued, expected;
     uint8_t active, fault, spi_started, pwm_started, pwm_fault;
     uint32_t errors;
+#if defined(NXP_PRODUCTION_LIGHTING) && NXP_PRODUCTION_LIGHTING
+    /* Compare writes do not clear an already-HIGH PWM latch. Preserve pending
+     * reductions across separate apply calls until a timer reset is observed. */
+    uint32_t pwm_reduction_counter[2];
+    uint8_t pwm_reduction_pending;
+#endif
 } nxp_board;
 
 /* All writes pass through this mockable register interface. Initialization
@@ -36,6 +42,9 @@ void nxp_board_init(nxp_board *board, const nxp_register_io *io,
                     const nxp_board_config *config, nxp_link *link);
 int nxp_board_start_spi(nxp_board *board);
 int nxp_board_start_pwm(nxp_board *board);
+/* Production apply may wait one timer cycle for reduced output latches before
+ * raising other channels. Call with interrupts enabled; polling is bounded and
+ * a stalled/corrupt timer invokes the sticky fail-dark path. */
 int nxp_board_apply_pwm(nxp_board *board, const nxp_pwm_frame *frame);
 /* Qualified GPIO-low handoff, verified before holding timers in reset. A failed
  * mux/DIR/pad readback leaves the timers running and latches pwm_fault. A fault

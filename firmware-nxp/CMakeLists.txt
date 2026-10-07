@@ -54,7 +54,7 @@ add_test(NAME nxp_pwm_low COMMAND test_nxp_pwm_low)
 
 # Reference lighting has independent fail-dark/update-order tests; its macro
 # cannot alter either frozen diagnostic binary.
-foreach(name pwm_production power_handoff)
+foreach(name pwm_production power_handoff pwm_temporal)
   add_executable(test_nxp_${name} tests/test_${name}.c src/nxp_app.c src/nxp_board.c)
   target_compile_definitions(test_nxp_${name} PRIVATE NXP_PRODUCTION_LIGHTING=1)
   target_include_directories(test_nxp_${name} PRIVATE include)

@@ -100,7 +100,7 @@ manifest = {"name": "Open Keylight Chroma NXP " + ("reference-board lighting can
             "sha256": hashlib.sha256(image).hexdigest(), "stack_top": hex(stack), "reset_vector": hex(reset),
             "output_enable": lighting, "physical_spi_adapter_present": True, "physical_spi_service_enabled": trial or lighting,
             "boot_output": "dark until owned typed confirmation" if lighting else "diagnostic profile",
-            "reference_lighting": lighting,
+            "reference_lighting": lighting, "firmware_version": "0.1.1.0" if lighting else "0.1.0.0",
             "experimental_pwm_low_trial": args.pwm_low_trial,
             "experimental_spi_only_trial": args.spi_only_trial, "experimental_pwm_off_trial": args.pwm_off_trial,
             "spi_mode": args.spi_mode if (trial or lighting) else None,

@@ -32,6 +32,13 @@ static unsigned pad(model *m, unsigned i) {
 static uint32_t read_register(void *user, uint32_t a) {
     model *m = user; unsigned i; uint32_t v = 0;
     if (a == GPIO + 0x2100) { for (i = 0; i < 5; ++i) v |= pad(m, i) << pins[i]; return v; }
+    /* This basic register model advances counters for the bounded boundary
+     * wait. The separate temporal suite models actual per-cycle PWM latches. */
+    if (a == WHITE + 8 || a == COLOR + 8) {
+        uint32_t period = a == WHITE + 8 ? 255u : 25500u;
+        v = (get(m, a) + (a == WHITE + 8 ? 3u : 256u)) % period;
+        set(m, a, v); return v;
+    }
     return get(m, a);
 }
 static void write_register(void *user, uint32_t a, uint32_t v) {
