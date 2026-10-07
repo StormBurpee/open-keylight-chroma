@@ -1,0 +1,3 @@
+import type {PlanSummary} from '../src/model.js';
+export const summary: PlanSummary = {profile: 'keylight-chroma-1.0.13', target_ip: '192.168.1.25', target_name: 'Studio light', device_id: 'keylight-aabbcc', manifest_sha256: 'a'.repeat(64), packages: {identity: '1'.repeat(64), OFF1: '2'.repeat(64), LOW1: '3'.repeat(64), lighting: '4'.repeat(64)}, restore_sha256: '5'.repeat(64), restore_provenance: 'A fixture only; no hardware or vendor bytes.', esp: {version: '0.2.0-alpha.1', sha256: '6'.repeat(64), elf_sha256: '7'.repeat(64), bytes: 1200000}, device_operations: 0};
+summary.controller_version = '0.1.1.0';

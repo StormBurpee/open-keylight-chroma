@@ -1,0 +1,30 @@
+{
+  "name": "@open-keylight/installer",
+  "version": "0.2.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "tsx src/cli.tsx",
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts tests/*.test.tsx",
+    "bundle": "node build.mjs",
+    "test:bundle": "node tests/bundle-smoke.mjs",
+    "capture:demo": "node capture-demo.mjs"
+  },
+  "dependencies": {
+    "ink": "8.0.0",
+    "react": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.0",
+    "@types/react": "19.3.0",
+    "esbuild": "0.28.2",
+    "ink-testing-library": "4.0.0",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}
