@@ -23,7 +23,8 @@ typedef struct {
     nxp_register_io io;
     nxp_board_config config;
     nxp_link *link;
-    uint8_t rx[NXP_SPI_SIZE], tx[NXP_SPI_SIZE];
+    /* A reply is one prequeued stream across length/body CS pulses. */
+    uint8_t rx[NXP_SPI_SIZE + 2], tx[NXP_SPI_SIZE + 2];
     uint16_t received, queued, expected;
     uint8_t active, fault, spi_started, pwm_started;
     uint32_t errors;
@@ -44,8 +45,9 @@ int nxp_board_trial_dark(nxp_board *board);
  * only an already-enabled WWDT inside its window; never alter TC/MOD/clocks. */
 int nxp_board_service_watchdog(nxp_board *board);
 /* IRQ service only drains/fills bounded FIFOs. Complete request processing is
- * in poll, called with SSP IRQ masked. Poll must run between CS transactions.
- * This scheduling/timing contract still requires on-board qualification. */
+ * in poll, called with SSP IRQ masked. READY separates request/reply exchanges;
+ * length/body replies need neither a main-loop poll nor an IRQ in the CS gap.
+ * Physical timing still requires on-board qualification. */
 void nxp_board_spi_irq(nxp_board *board);
 void nxp_board_poll(nxp_board *board, uint32_t now_ms);
 

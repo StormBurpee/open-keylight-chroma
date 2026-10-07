@@ -24,4 +24,6 @@ On the reference LPC11U35/501 board, a minimal original application was installe
 
 This establishes the minimal application-entry and recovery path for that board and the need to protect installation from other transport activity. It does **not** qualify the full replacement application's SPI timing, watchdog behavior, lighting channels, PWM, current limits, or every failure mode. Consult [the NXP application qualification notes](../firmware-nxp/README.md) for those separate gates. Emulator and host-test results remain distinct from measurements on hardware.
 
+A later SPI-only candidate also returned to the resident loader without a power cycle, approximately 30.5 seconds after commit. No application reply was received and no trial confirmation was sent. This timing is consistent with its 30-second recovery guard, but the missing application response means that SPI interoperability and the complete trial sequence remain unqualified.
+
 This repository contains original source and documentation. It does not redistribute the installed loader, vendor application binaries, or private device captures. The public controller application builder is not an installer; follow the explicitly reviewed qualification procedure for a particular candidate and board.

@@ -31,10 +31,12 @@ static void reset_ssp(nxp_board *b) {
 static void prepare(nxp_board *b) {
     unsigned i;
     b->received = b->queued = 0; b->active = b->fault = 0;
-    b->expected = b->link->phase == NXP_LINK_LENGTH ? 2 : NXP_SPI_SIZE;
-    for (i = 0; i < NXP_SPI_SIZE; ++i) b->rx[i] = b->tx[i] = 0;
-    if (b->link->phase == NXP_LINK_LENGTH) b->tx[1] = b->link->response_size;
-    if (b->link->phase == NXP_LINK_BODY) for (i = 0; i < NXP_SPI_SIZE; ++i) b->tx[i] = b->link->response[i];
+    b->expected = b->link->phase == NXP_LINK_LENGTH ? (uint16_t)(2u + b->link->response_size) : NXP_SPI_SIZE;
+    for (i = 0; i < sizeof(b->rx); ++i) b->rx[i] = b->tx[i] = 0;
+    if (b->link->phase == NXP_LINK_LENGTH) {
+        b->tx[1] = b->link->response_size;
+        for (i = 0; i < b->link->response_size; ++i) b->tx[i + 2] = b->link->response[i];
+    }
     reset_ssp(b);
     /* FIFO depth is eight words. Bounded loops never trust a stuck status bit. */
     for (i = 0; i < 8 && b->queued < b->expected && (read_reg(b, SSP + 0xc) & 2u); ++i)
@@ -152,7 +154,26 @@ void nxp_board_poll(nxp_board *b, uint32_t now_ms) {
         return;
     }
     if (b->active || b->fault) {
-        result = b->fault ? NXP_BAD_PACKET : nxp_link_transaction(b->link, b->rx, b->received, ignored, sizeof(ignored), now_ms);
+        result = NXP_BAD_PACKET;
+        if (!b->fault) {
+            if (b->link->phase == NXP_LINK_REQUEST) {
+                result = nxp_link_transaction(b->link, b->rx, b->received, ignored, sizeof(ignored), now_ms);
+            } else if (b->received == b->expected ||
+                       (b->link->phase == NXP_LINK_LENGTH && b->received == 2)) {
+                if (b->link->phase == NXP_LINK_LENGTH)
+                    result = nxp_link_transaction(b->link, b->rx, 2, ignored, sizeof(ignored), now_ms);
+                else result = NXP_OK;
+                if (result == NXP_OK && b->link->phase == NXP_LINK_BODY) {
+                    if (b->received == 2) {
+                        /* Keep the already queued body and cumulative RX.
+                         * The master need not wait or let main run here. */
+                        b->active = 0; return;
+                    }
+                    result = nxp_link_transaction(b->link, b->rx + 2, b->received - 2u,
+                                                  ignored, sizeof(ignored), now_ms);
+                }
+            }
+        }
         if (result != NXP_OK) { if (b->errors != UINT32_MAX) ++b->errors; nxp_link_cancel(b->link); }
         prepare(b);
     } else if (nxp_link_expire(b->link, now_ms) == NXP_EXPIRED) {

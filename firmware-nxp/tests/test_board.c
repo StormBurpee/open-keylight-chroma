@@ -46,15 +46,85 @@ static void initialize(bus *b, nxp_board *board, nxp_state *state, nxp_link *lin
 static void make_version(uint8_t *q) {
     memset(q, 0, 97); q[0] = 2; q[5] = 1; q[8] = 4; q[14] = q[95] = 0x87;
 }
-static void clocks(bus *b, nxp_board *board, const uint8_t *in, uint8_t *out, unsigned count, uint32_t now) {
+static void clocks_without_poll(bus *b, nxp_board *board, const uint8_t *in, uint8_t *out, unsigned count) {
     unsigned i, j; b->selected = 1;
     for (i = 0; i < count; ++i) {
         CHECK(b->tx_count); out[i] = b->tx[0];
         for (j = 1; j < b->tx_count; ++j) b->tx[j - 1] = b->tx[j];
         --b->tx_count; CHECK(b->rx_count < 8); b->rx[(b->rx_read + b->rx_count) & 7] = in[i]; ++b->rx_count;
-        if ((i & 3) == 3 || i + 1 == count) nxp_board_spi_irq(board);
+        if (b->rx_count >= 4) nxp_board_spi_irq(board);
     }
-    b->selected = 0; nxp_board_poll(board, now);
+    b->selected = 0;
+}
+static void clocks(bus *b, nxp_board *board, const uint8_t *in, uint8_t *out, unsigned count, uint32_t now) {
+    clocks_without_poll(b, board, in, out, count); nxp_board_poll(board, now);
+}
+static void response_handoff_tests(void) {
+    bus b; nxp_board board; nxp_state state; nxp_link link;
+    uint8_t q[97], length[2], rx[97], dummy[97] = {0}; unsigned i, before, gap, cut;
+    for (gap = 0; gap < 3; ++gap) {
+        initialize(&b, &board, &state, &link, NXP_QUAL_SPI_REQUIRED);
+        CHECK(nxp_board_start_spi(&board)); make_version(q);
+        clocks(&b, &board, q, rx, 97, 1);
+        before = b.writes;
+        /* The real ESP performs two SPI calls without another READY wait.
+         * Neither IRQ nor main-loop service is guaranteed in the CS gap. */
+        clocks_without_poll(&b, &board, dummy, length, 2);
+        if (gap == 1) nxp_board_spi_irq(&board);
+        if (gap == 2) {
+            nxp_board_poll(&board, 2);
+            nxp_board_poll(&board, 3); /* Idle repeated polls keep the body. */
+        }
+        clocks_without_poll(&b, &board, dummy, rx, 97);
+        CHECK(length[0] == 0 && length[1] == 97);
+        CHECK(!memcmp(rx, q, 6) && rx[7] == 2 && rx[14] == 0x87 && rx[16] == 1);
+        CHECK(!memcmp(rx, link.response, 97));
+        for (i = before; i < b.writes; ++i) CHECK(b.log_address[i] != 0x40048004);
+        nxp_board_poll(&board, 4);
+        CHECK(!board.errors && !nxp_link_ready(&link));
+        /* The next request still starts at byte zero after both phases. */
+        clocks(&b, &board, q, rx, 97, 5);
+        CHECK(!board.errors && nxp_link_ready(&link));
+    }
+    for (gap = 0; gap < 2; ++gap) for (cut = 0; cut < 97; ++cut) {
+        initialize(&b, &board, &state, &link, NXP_QUAL_SPI_REQUIRED);
+        CHECK(nxp_board_start_spi(&board)); make_version(q);
+        clocks(&b, &board, q, rx, 97, 1);
+        clocks_without_poll(&b, &board, dummy, length, 2);
+        if (gap) nxp_board_poll(&board, 2);
+        if (cut) {
+            clocks(&b, &board, dummy, rx, cut, 3);
+            CHECK(board.errors == 1 && !nxp_link_ready(&link));
+        } else {
+            /* An abandoned body expires from original preparation, even if
+             * no main-loop poll occurred at the length boundary. */
+            nxp_board_poll(&board, 100);
+            CHECK(!board.errors && nxp_link_ready(&link));
+            nxp_board_poll(&board, 101);
+            CHECK(board.errors == 1 && !nxp_link_ready(&link));
+        }
+        clocks(&b, &board, q, rx, 97, 102);
+        CHECK(board.errors == 1 && nxp_link_ready(&link));
+    }
+    for (cut = 0; cut < 2; ++cut) {
+        initialize(&b, &board, &state, &link, NXP_QUAL_SPI_REQUIRED);
+        CHECK(nxp_board_start_spi(&board)); make_version(q);
+        clocks(&b, &board, q, rx, 97, 1);
+        dummy[cut] = 1;
+        clocks_without_poll(&b, &board, dummy, length, 2);
+        dummy[cut] = 0;
+        clocks_without_poll(&b, &board, dummy, rx, 97);
+        nxp_board_poll(&board, 2);
+        CHECK(board.errors == 1 && !nxp_link_ready(&link));
+    }
+    /* A valid unchanged connection event has a two-byte zero reply only. */
+    initialize(&b, &board, &state, &link, NXP_QUAL_SPI_REQUIRED);
+    CHECK(nxp_board_start_spi(&board));
+    memset(q, 0, sizeof(q)); q[0] = 2; q[5] = 1; q[6] = 11;
+    clocks(&b, &board, q, rx, 9, 1);
+    CHECK(b.tx_count == 2 && board.expected == 2 && nxp_link_ready(&link));
+    clocks(&b, &board, dummy, length, 2, 2);
+    CHECK(!length[0] && !length[1] && !nxp_link_ready(&link) && !board.errors);
 }
 static void tests(void) {
     bus b; nxp_board board; nxp_state state; nxp_link link; nxp_pwm_frame frame;
@@ -89,7 +159,7 @@ static void tests(void) {
     CHECK(nxp_board_start_spi(&board) && !board.pwm_started && b.tx_count == 8);
     CHECK(stored(&b, 0x400440ac) == 0x12 && stored(&b, 0x4004409c) == 0x13); /* Port1 starts at0x60. */
     CHECK(stored(&b, 0x40058000) == 7 && stored(&b, 0x40058004) == 6);
-    make_version(q); clocks(&b, &board, q, rx, 97, 1); CHECK(link.phase == NXP_LINK_LENGTH && b.tx_count == 2);
+    make_version(q); clocks(&b, &board, q, rx, 97, 1); CHECK(link.phase == NXP_LINK_LENGTH && b.tx_count == 8);
     clocks(&b, &board, dummy, rx, 2, 2); CHECK(rx[0] == 0 && rx[1] == 97 && link.phase == NXP_LINK_BODY);
     clocks(&b, &board, dummy, rx, 97, 3); CHECK(rx[7] == 2 && rx[12] == 4 && rx[16] == 1 && !nxp_link_ready(&link));
     clocks(&b, &board, q, rx, 97, 4); nxp_board_poll(&board, 104);
@@ -128,4 +198,4 @@ static void tests(void) {
         CHECK((b.log_address[i] < 0x40014000 || b.log_address[i] >= 0x40015000) &&
               (b.log_address[i] < 0x40018000 || b.log_address[i] >= 0x40019000));
 }
-int main(void) { tests(); printf("%u checks passed; gated register/FIFO adapter simulation; no hardware I/O.\n", checks); return 0; }
+int main(void) { response_handoff_tests(); tests(); printf("%u checks passed; gated register/FIFO adapter simulation; no hardware I/O.\n", checks); return 0; }
