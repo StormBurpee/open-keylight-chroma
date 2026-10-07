@@ -298,8 +298,83 @@ static void finish_tests(void) {
         CHECK(disk_present == (fault != 22));
     }
 }
+static okl_loader_audit rejection_for(const app_controller_job *j) {
+    okl_loader_audit a=audit_for(j);
+    a.phase=OKL_LOADER_PRECOMMIT_FAILED;a.result=OKL_LOADER_INVALID;
+    return a;
+}
+static void rejection_tests(void) {
+    initialize();app_controller_job j=running();okl_loader_audit a=rejection_for(&j);
+    app_controller_worker_outcome proof={APP_CONTROLLER_READ_ONLY_UNSUPPORTED,true};
+    CHECK(!app_controller_update_persist(j.id,&a) && disk_present);
+    CHECK(app_controller_update_reject(j.id,&a,OKL_LOADER_INVALID,&proof));
+    CHECK(frees==1 && !app.updating && !disk_present && !app_controller_update_blocked());
+    CHECK(!app.controller_ready && !app.reported_valid && !strcmp(app.controller_status,"starting"));
+    check_json("failed","invalid",true,false,false);
+    CHECK(!app_controller_update_reject(j.id,&a,OKL_LOADER_INVALID,&proof) && frees==1);
+    CHECK(!app_controller_update_finish(j.id,&a,OKL_LOADER_INVALID,false,NULL) && frees==1);
+    ready();uint32_t next=0;CHECK(app_controller_update_begin(&next)==200 && next>j.id);
+    app_controller_update_cancel_upload(next);
+    reset(true);CHECK(app_controller_update_init()==ESP_OK && !app_controller_update_blocked());
+
+    /* Each disqualifying fact leaves the durable record in place. Do not
+     * confuse a correlated unsupported getter with timeout/mutation proof. */
+    for(unsigned fault=0;fault<22;++fault) {
+        initialize();j=running();a=rejection_for(&j);proof=(app_controller_worker_outcome){APP_CONTROLLER_READ_ONLY_UNSUPPORTED,true};
+        CHECK(!app_controller_update_persist(j.id,&a));
+        switch(fault) {
+        case 0:proof.entry=APP_CONTROLLER_ENTRY_UNPROVEN;break;
+        case 1:proof.entry=APP_CONTROLLER_MUTATION_ATTEMPTED;break;
+        case 2:proof.synchronized=false;break;
+        case 3:a.loader_verified=1;break;
+        case 4:a.erase_attempted=1;break;
+        case 5:a.program_blocks_acked=1;break;
+        case 6:a.readback_blocks_verified=1;break;
+        case 7:a.complete_bank_verified=1;break;
+        case 8:a.commit_attempted=1;break;
+        case 9:a.abort_attempted=1;break;
+        case 10:a.commit_delivery=OKL_LOADER_MAYBE_SENT;break;
+        case 11:a.abort_delivery=OKL_LOADER_SENT_COMPLETE;break;
+        case 12:a.quiet_completed=1;break;
+        case 13:a.reset_boundary_established=1;break;
+        case 14:a.persistence_failed=1;break;
+        case 15:a.cancelled_after_commit=1;break;
+        case 16:a.quiet_started_us=1;break;
+        case 17:a.quiet_finished_us=1;break;
+        case 18:a.observation.kind=OKL_LOADER_OBSERVATION_RESIDENT;break;
+        case 19:a.phase=OKL_LOADER_ENTERING;break;
+        case 20:job.audit.erase_attempted=1;break; /* Returned audit cannot erase historical evidence. */
+        default:atomic_store(&blocked,true);break;
+        }
+        unsigned calls=nvs_calls;
+        CHECK(!app_controller_update_reject(j.id,&a,OKL_LOADER_INVALID,&proof));
+        CHECK(nvs_calls==calls && !frees && disk_present && app.updating);
+        CHECK(!app_controller_update_finish(j.id,&a,OKL_LOADER_INVALID,false,NULL));
+        CHECK(frees==1 && app_controller_update_blocked());
+        reset(true);CHECK(app_controller_update_init()==ESP_OK && app_controller_update_blocked());
+    }
+    for(unsigned fault=0;fault<4;++fault) {
+        initialize();j=running();a=rejection_for(&j);proof=(app_controller_worker_outcome){APP_CONTROLLER_READ_ONLY_UNSUPPORTED,true};
+        CHECK(!app_controller_update_persist(j.id,&a));
+        if(fault==0)fail_open=1;
+        if(fault==1)fail_erase=1;
+        if(fault>=2)fail_commit=1;
+        if(fault==3)commit_despite_error=true;
+        CHECK(!app_controller_update_reject(j.id,&a,OKL_LOADER_INVALID,&proof));
+        CHECK(frees==1 && app_controller_update_blocked() && !app.updating && !app.controller_ready);
+        CHECK(disk_present==(fault!=3));
+        check_json("recovery_required","persist",true,false,true);
+        CHECK(!app_controller_update_finish(j.id,&a,OKL_LOADER_INVALID,false,NULL) && frees==1);
+    }
+    /* In-RAM evidence is never enough to clear a reloaded pending journal. */
+    initialize();j=running();a=rejection_for(&j);proof=(app_controller_worker_outcome){APP_CONTROLLER_READ_ONLY_UNSUPPORTED,true};
+    CHECK(!app_controller_update_persist(j.id,&a));reset(true);CHECK(app_controller_update_init()==ESP_OK);
+    unsigned calls=nvs_calls;
+    CHECK(!app_controller_update_reject(j.id,&a,OKL_LOADER_INVALID,&proof) && nvs_calls==calls);
+    CHECK(disk_present && app_controller_update_blocked());
+}
 int main(void) {
-    admission_tests(); package_tests(); persistence_tests(); reboot_tests(); finish_tests();
+    admission_tests(); package_tests(); persistence_tests(); reboot_tests(); finish_tests(); rejection_tests();
     reset(false); CHECK(!locked);
     printf("controller job: %u assertions passed\n", checks);
     return 0;

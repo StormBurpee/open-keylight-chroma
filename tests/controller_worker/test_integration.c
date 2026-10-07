@@ -30,12 +30,14 @@ typedef struct {
     unsigned wrong_part, wrong_version, wrong_role, wrong_caps, non_dark, changed_status;
     unsigned entry_fault, send_fault, boundary_fault, observation_fault, acquire_fault;
     unsigned postcommit_queries, observation_reads, persist_count;
+    unsigned unsupported_query, malformed_query, claim_fault, poison_query, release_poison;
     bool original, loader, observing;
     okl_loader_phase persisted;
     okl_loader_delivery delivery;
     okl_light_state state;
     okl_nxp driver;
     app_controller_job job;
+    app_controller_worker_outcome outcome;
 } model;
 static model m;
 static uint32_t read32(const uint8_t *p) { return (uint32_t)p[0]<<24 | (uint32_t)p[1]<<16 | (uint32_t)p[2]<<8 | p[3]; }
@@ -88,12 +90,18 @@ static okl_result native_execute(okl_nxp *d,const okl_request *q,okl_reply *r,ui
         return OKL_OK;
     }
     if(m.observing)++m.postcommit_queries;
+    if(m.queries==m.poison_query)d->needs_recovery=1;
+    if(m.queries==m.malformed_query)r->report.size=1;
+    if(m.queries==m.unsupported_query) {
+        r->acknowledged=0;r->report.status=5;r->report.size=0;return OKL_REMOTE;
+    }
     if(m.queries==m.fail_query || (m.observing && m.observation_fault==9))return OKL_TIMEOUT;
     return OKL_OK;
 }
 static okl_result native_claim(okl_nxp *d,const uint8_t *name,size_t n,uint64_t deadline) {
     call(d,deadline,600000);CHECK(m.persisted==OKL_LOADER_ENTERING && !m.loader && !m.commits);
-    CHECK(n==13 && !memcmp(name,"Open Keylight",13));++m.claims;return OKL_OK;
+    CHECK(n==13 && !memcmp(name,"Open Keylight",13));++m.claims;
+    return m.claim_fault?OKL_TIMEOUT:OKL_OK;
 }
 static okl_result native_read(okl_nxp *d,okl_light_state *s,uint64_t deadline) {
     call(d,deadline,800000);CHECK(!m.loader);++m.reads;*s=m.state;
@@ -110,6 +118,7 @@ void app_nxp_loader_release(okl_nxp *d,uint32_t id) {
     CHECK(d==&m.driver && id==11 && m.leased);
     if(m.entries || m.commits || m.aborts)CHECK(m.now-m.reset_at>=OKL_LOADER_QUIET_US);
     m.leased=0;++m.ended;
+    if(m.release_poison)d->needs_recovery=1;
 }
 okl_result app_nxp_loader_enter(okl_nxp *d,uint32_t id,okl_loader_source source,okl_loader_delivery *sent,uint64_t deadline) {
     call(d,deadline,2000000);CHECK(id==11 && source==m.job.source && !m.state.effect && !m.state.white_brightness);
@@ -190,7 +199,7 @@ static void reset(bool original) {
     CHECK(okl_loader_prepare(&m.job.image,m.package,sizeof(m.package),&ops)==OKL_LOADER_OK);
 }
 static okl_loader_result run(okl_loader_audit *a) {
-    okl_loader_result r=app_controller_worker_run(&m.driver,&m.job,a);
+    okl_loader_result r=app_controller_worker_run(&m.driver,&m.job,a,&m.outcome);
     CHECK(!m.leased && m.ended==!m.acquire_fault && m.entries<=1 && m.commits<=1 && m.aborts<=1);
     CHECK(!(m.commits && m.aborts));return r;
 }
@@ -203,6 +212,7 @@ int main(void) {
         CHECK(m.exchanges==898 && m.programs==448 && m.readbacks==448 && m.waits==600);
         CHECK(a.program_blocks_acked==448 && a.readback_blocks_verified==448 && a.quiet_completed && a.reset_boundary_established);
         CHECK(m.postcommit_queries==3 && m.observation_reads==1 && m.state.temperature_kelvin==4700);
+        CHECK(m.outcome.entry==APP_CONTROLLER_MUTATION_ATTEMPTED && m.outcome.synchronized);
     }
     for(unsigned fault=0;fault<10;++fault) {
         reset(fault!=0);
@@ -252,6 +262,40 @@ int main(void) {
         reset(true);m.fail_persist=(int)phase;CHECK(run(&a)!=OKL_LOADER_OK && a.persistence_failed);
         if(phase<=OKL_LOADER_ENTERING)CHECK(!m.claims && !m.entries && !m.exchanges);
         if(phase==OKL_LOADER_COMMITTING)CHECK(!m.commits && m.aborts==1);
+    }
+    /* A stock-style unsupported FE is safe rejection only after complete
+     * correlated reads, before claim, with a synchronized released lease. */
+    reset(false);m.unsupported_query=3;CHECK(run(&a)==OKL_LOADER_INVALID);
+    CHECK(m.outcome.entry==APP_CONTROLLER_READ_ONLY_UNSUPPORTED && m.outcome.synchronized);
+    CHECK(a.phase==OKL_LOADER_PRECOMMIT_FAILED && a.result==OKL_LOADER_INVALID && !a.persistence_failed);
+    CHECK(!m.claims && !m.writes && !m.entries && !m.exchanges && !m.commits && !m.aborts);
+    for(unsigned variant=0;variant<7;++variant) {
+        reset(true);
+        if(variant==0)m.unsupported_query=1;
+        if(variant==1)m.unsupported_query=2;
+        if(variant==2)m.unsupported_query=3;
+        if(variant==3)m.wrong_role=1;
+        if(variant==4)m.wrong_caps=1;
+        if(variant==5)m.wrong_part=1;
+        if(variant==6){m.original=false;m.job.source=OKL_LOADER_FROM_LEGACY_1_3;m.wrong_version=1;}
+        CHECK(run(&a)==OKL_LOADER_INVALID && m.outcome.entry==APP_CONTROLLER_READ_ONLY_UNSUPPORTED);
+        CHECK(m.outcome.synchronized && !m.claims && !m.writes && !m.entries);
+    }
+    for(unsigned variant=0;variant<7;++variant) {
+        reset(true);
+        if(variant==0)m.fail_query=3;
+        if(variant==1)m.malformed_query=3;
+        if(variant==2){m.unsupported_query=3;m.poison_query=3;}
+        if(variant==3){m.unsupported_query=3;m.release_poison=1;}
+        if(variant==4){m.unsupported_query=3;m.fail_persist=OKL_LOADER_PRECOMMIT_FAILED;}
+        if(variant==5)m.claim_fault=1;
+        if(variant==6)m.fail_write=1;
+        CHECK(run(&a)!=OKL_LOADER_INVALID);
+        if(variant<3)CHECK(m.outcome.entry==APP_CONTROLLER_ENTRY_UNPROVEN);
+        if(variant==3)CHECK(!m.outcome.synchronized);
+        if(variant==4)CHECK(a.persistence_failed);
+        if(variant>=5)CHECK(m.outcome.entry==APP_CONTROLLER_MUTATION_ATTEMPTED && m.claims==1);
+        CHECK(!m.entries && !m.exchanges);
     }
     printf("%u real controller-worker/core integration assertions across %u cases passed\n",checks,cases);
     return 0;

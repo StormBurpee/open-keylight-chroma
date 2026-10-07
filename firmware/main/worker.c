@@ -256,20 +256,34 @@ static void worker_task(void *unused) {
     uint64_t next_health = app_now_ms() + HEALTH_INTERVAL_MS;
     kl_transition transition = {0};
     bool rendering = false;
+    bool pending_off = false;
+    uint32_t pending_off_revision = 0;
     for (;;) {
         app_controller_job job;
         if (app_controller_update_take(&job)) {
+            app_lock();
+            bool accepted_off = !app.desired.power && app.output_revision != seen_revision;
+            uint32_t accepted_off_revision = app.output_revision;
+            app_unlock();
             rendering = false;
             okl_loader_audit audit;
-            okl_loader_result updated = app_controller_worker_run(&nxp, &job, &audit);
+            app_controller_worker_outcome outcome;
+            okl_loader_result updated = app_controller_worker_run(&nxp, &job, &audit, &outcome);
             bool confirmed = false;
             if (updated == OKL_LOADER_OK) {
                 lifecycle.confirmation_uncertain = false;
                 result = bootstrap(&current, &seen_revision, false, &job.image.version);
                 confirmed = result == OKL_OK && lifecycle.backend == CONTROLLER_ORIGINAL && lifecycle.status.trial_confirmed;
             }
-            bool durable = app_controller_update_finish(job.id, &audit, updated, confirmed,
+            bool rejected = updated == OKL_LOADER_INVALID &&
+                app_controller_update_reject(job.id, &audit, updated, &outcome);
+            bool durable = !rejected && app_controller_update_finish(job.id, &audit, updated, confirmed,
                 "Controller update unresolved; explicit recovery required");
+            /* A successful update executes Off itself. Read-only rejection
+             * must preserve a newly accepted Off from the receive window,
+             * without reviving an older scene or retrying an attempted Off. */
+            pending_off = rejected && accepted_off;
+            pending_off_revision = accepted_off_revision;
             app_lock();
             seen_revision = app.output_revision;
             app.controller_ready = durable;
@@ -304,7 +318,9 @@ static void worker_task(void *unused) {
         }
         if (!ready) { rendering = false; vTaskDelay(pdMS_TO_TICKS(10)); continue; }
         app_lock(); kl_state target = app.desired; uint32_t revision = app.output_revision; app_unlock();
-        if (revision != seen_revision) {
+        bool apply_pending_off = pending_off && revision == pending_off_revision && !target.power;
+        if (revision != seen_revision || apply_pending_off) {
+            pending_off = false;
             seen_revision = revision;
             if (nxp.needs_recovery) {
                 result = okl_nxp_recover(&nxp, nxp.transport.now_us(NULL) + 250000);

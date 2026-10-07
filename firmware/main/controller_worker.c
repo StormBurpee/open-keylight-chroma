@@ -6,7 +6,13 @@
 #include "mbedtls/sha256.h"
 #include <string.h>
 
-typedef struct { okl_nxp *driver; const app_controller_job *job; uint64_t deadline; } update_context;
+typedef struct {
+    okl_nxp *driver;
+    const app_controller_job *job;
+    uint64_t deadline;
+    bool leased;
+    app_controller_worker_outcome outcome;
+} update_context;
 
 static uint64_t clock_us(void *user) {
     update_context *c = user;
@@ -36,10 +42,15 @@ static int original_identity(update_context *c, okl_controller_status *status) {
 }
 static int begin(void *user, uint64_t deadline) {
     update_context *c = user; c->deadline = deadline;
-    return app_nxp_loader_acquire(c->driver, c->job->id, deadline) == OKL_OK ? 0 : -1;
+    c->leased = app_nxp_loader_acquire(c->driver, c->job->id, deadline) == OKL_OK;
+    return c->leased ? 0 : -1;
 }
 static void end(void *user) {
     update_context *c = user; app_nxp_loader_release(c->driver, c->job->id);
+    /* Release propagates any non-idle physical phase to needs_recovery. The
+     * sole worker still owns execution; no other SPI caller can intervene. */
+    c->outcome.synchronized = c->leased && !c->driver->needs_recovery;
+    c->leased = false;
 }
 static int persist(void *user, const okl_loader_audit *audit) {
     update_context *c = user; return app_controller_update_persist(c->job->id, audit);
@@ -59,23 +70,47 @@ static okl_result output(void *user, const okl_request *request) {
     update_context *c = user; okl_reply reply;
     return okl_nxp_execute(c->driver, request, &reply, bounded(c, 150000));
 }
+static bool unsupported_reply(okl_result result, const okl_reply *reply, uint8_t opcode) {
+    return result == OKL_REMOTE && reply->received && !reply->acknowledged &&
+        reply->report.status == 5 && !reply->report.command_class &&
+        reply->report.opcode == opcode && !reply->report.size;
+}
+static int reject_unsupported(update_context *c) {
+    if (c->outcome.entry == APP_CONTROLLER_ENTRY_UNPROVEN && !c->driver->needs_recovery)
+        c->outcome.entry = APP_CONTROLLER_READ_ONLY_UNSUPPORTED;
+    return -1;
+}
 static int enter(void *user, okl_loader_source source, uint64_t deadline) {
     update_context *c = user; c->deadline = deadline;
     okl_reply reply; okl_firmware_version version; okl_controller_status status;
     const uint8_t legacy[4] = {1, 3, 0, 0};
     if (source != OKL_LOADER_FROM_ORIGINAL && source != OKL_LOADER_FROM_LEGACY_1_3) return -1;
-    if (query(c, OKL_GET_FIRMWARE, &reply) != OKL_OK || okl_reply_decode_firmware(&version, &reply) != OKL_OK) return -1;
-    okl_result result = query(c, OKL_GET_CONTROLLER_STATUS, &reply);
+    okl_result result = query(c, OKL_GET_FIRMWARE, &reply);
+    if (unsupported_reply(result, &reply, 0x87)) return reject_unsupported(c);
+    if (result != OKL_OK || okl_reply_decode_firmware(&version, &reply) != OKL_OK) return -1;
+    if (source == OKL_LOADER_FROM_LEGACY_1_3 && memcmp(version.component, legacy, 4))
+        return reject_unsupported(c);
+    result = query(c, OKL_GET_CONTROLLER_STATUS, &reply);
     if (source == OKL_LOADER_FROM_ORIGINAL) {
-        if (result != OKL_OK || okl_reply_decode_controller_status(&status, &reply) != OKL_OK ||
-            original_identity(c, &status)) return -1;
+        if (unsupported_reply(result, &reply, 0xfc)) return reject_unsupported(c);
+        if (result != OKL_OK || okl_reply_decode_controller_status(&status, &reply) != OKL_OK) return -1;
+        if (!qualified(&status)) return reject_unsupported(c);
     } else {
-        uint32_t part;
-        if (memcmp(version.component, legacy, 4) || result != OKL_REMOTE || !reply.received ||
-            reply.report.status != 5 || reply.report.command_class || reply.report.opcode != 0xfc || reply.report.size ||
-            query(c, OKL_GET_PART_ID, &reply) != OKL_OK || okl_reply_decode_part_id(&part, &reply) != OKL_OK ||
-            part != OKL_LOADER_PART_ID) return -1;
+        if (!unsupported_reply(result, &reply, 0xfc)) {
+            /* A valid original identity disproves the admitted legacy source;
+             * malformed or merely missing status remains unproven. */
+            if (result == OKL_OK && okl_reply_decode_controller_status(&status, &reply) == OKL_OK)
+                return reject_unsupported(c);
+            return -1;
+        }
     }
+    uint32_t part;
+    result = query(c, OKL_GET_PART_ID, &reply);
+    if (unsupported_reply(result, &reply, 0xfe)) return reject_unsupported(c);
+    if (result != OKL_OK || okl_reply_decode_part_id(&part, &reply) != OKL_OK) return -1;
+    if (part != OKL_LOADER_PART_ID || (source == OKL_LOADER_FROM_ORIGINAL && part != status.part_id))
+        return reject_unsupported(c);
+    c->outcome.entry = APP_CONTROLLER_MUTATION_ATTEMPTED;
     if (okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000)) != OKL_OK) return -1;
     /* The durable ENTERING journal exists before either Off write. Verify
      * native Off settings, never replay the previous scene. These getters do
@@ -124,12 +159,19 @@ static int observe(void *user, okl_loader_observation *observation, uint64_t dea
     value.dark_state_verified = state.effect == 0 && state.white_brightness == 0;
     *observation = value; return 0;
 }
-okl_loader_result app_controller_worker_run(okl_nxp *driver, const app_controller_job *job, okl_loader_audit *audit) {
-    if (!driver || !job || !audit) return OKL_LOADER_INVALID;
+okl_loader_result app_controller_worker_run(okl_nxp *driver, const app_controller_job *job,
+                                          okl_loader_audit *audit, app_controller_worker_outcome *outcome) {
+    if (outcome) memset(outcome, 0, sizeof(*outcome));
+    if (!driver || !job || !audit || !outcome) return OKL_LOADER_INVALID;
     update_context context = {.driver = driver, .job = job};
     okl_loader_ops ops = {.user = &context, .sha256 = digest, .now_us = clock_us,
         .begin = begin, .end = end, .persist = persist, .enter_loader = enter,
         .exchange = exchange, .send_only = send_only, .wait_until = wait_until,
         .cancelled = cancelled, .reset_boundary = reset_boundary, .observe_readonly = observe, .progress = progress};
-    return okl_loader_run(&job->image, job->source, &ops, clock_us(&context) + UINT64_C(120000000), audit);
+    okl_loader_result result = okl_loader_run(&job->image, job->source, &ops,
+        clock_us(&context) + UINT64_C(120000000), audit);
+    *outcome = context.outcome;
+    if (outcome->entry == APP_CONTROLLER_READ_ONLY_UNSUPPORTED && outcome->synchronized &&
+        !audit->persistence_failed && result == OKL_LOADER_IO) audit->result = result = OKL_LOADER_INVALID;
+    return result;
 }

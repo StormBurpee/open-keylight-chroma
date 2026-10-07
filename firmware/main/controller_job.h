@@ -13,6 +13,20 @@ typedef struct {
     okl_loader_source source;
 } app_controller_job;
 
+/* Volatile evidence produced only by the sole worker's update adapter. A
+ * read-only rejection requires fully correlated replies and known idle after
+ * releasing the lease. Set MUTATION_ATTEMPTED before invoking ownership claim,
+ * even if that call later fails; no later observation may downgrade it. */
+typedef enum {
+    APP_CONTROLLER_ENTRY_UNPROVEN,
+    APP_CONTROLLER_READ_ONLY_UNSUPPORTED,
+    APP_CONTROLLER_MUTATION_ATTEMPTED
+} app_controller_entry_outcome;
+typedef struct {
+    app_controller_entry_outcome entry;
+    bool synchronized;
+} app_controller_worker_outcome;
+
 /* Call once after NVS initialization, before starting the controller worker.
  * A pending, malformed or unreadable journal blocks automatic bootstrap;
  * it is evidence of an interrupted job, never an instruction to resume it. */
@@ -35,5 +49,11 @@ int app_controller_update_persist(uint32_t id, const okl_loader_audit *audit);
 bool app_controller_update_finish(uint32_t id, const okl_loader_audit *audit,
                                   okl_loader_result result, bool confirmed,
                                   const char *error);
+/* Separate failed-job path, never successful installation. True means a
+ * synchronized, read-only incompatibility was durably cleared. Readiness stays
+ * closed until fresh normal bootstrap; no interrupted journal can use this. */
+bool app_controller_update_reject(uint32_t id, const okl_loader_audit *audit,
+                                  okl_loader_result result,
+                                  const app_controller_worker_outcome *outcome);
 
 #endif

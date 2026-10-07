@@ -1994,7 +1994,8 @@
               "queued",
               "running",
               "completed",
-              "recovery_required"
+              "recovery_required",
+              "failed"
             ]
           },
           "phase": {

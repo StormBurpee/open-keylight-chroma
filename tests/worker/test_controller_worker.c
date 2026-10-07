@@ -108,7 +108,9 @@ static void reset(bool original) {
 int main(void) {
     for(unsigned original=0;original<2;++original) {
         reset(original!=0);okl_loader_audit audit={0};
-        CHECK(app_controller_worker_run(&test_driver,&test_job,&audit)==OKL_LOADER_OK);
+        app_controller_worker_outcome outcome;
+        CHECK(app_controller_worker_run(&test_driver,&test_job,&audit,&outcome)==OKL_LOADER_OK);
+        CHECK(outcome.entry==APP_CONTROLLER_MUTATION_ATTEMPTED && outcome.synchronized);
         CHECK(writes==2 && claims==1 && reads==2 && entries==1 && boundaries==1 && waits==300 && ended==1 && !leases);
         CHECK(persists==1 && progresses==1 && native.temperature_kelvin==4700);
     }

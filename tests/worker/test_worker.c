@@ -45,8 +45,9 @@ static okl_controller_status remote_status;
 static uint64_t boot_at, reset_at;
 static bool reset_done;
 static bool journal_blocked, job_queued, finish_durable, finished_confirmed, off_on_read;
-static unsigned transport_inits, job_runs, job_finishes;
+static unsigned transport_inits, job_runs, job_finishes, job_rejections;
 static okl_loader_result job_result;
+static bool job_read_only_rejection;
 
 bool app_controller_update_blocked(void) { return journal_blocked; }
 bool app_controller_update_take(app_controller_job *out) {
@@ -55,14 +56,24 @@ bool app_controller_update_take(app_controller_job *out) {
     memset(out, 0, sizeof(*out)); out->id = 7; out->image.version.component[1] = 1;
     return true;
 }
-okl_loader_result app_controller_worker_run(okl_nxp *driver, const app_controller_job *job, okl_loader_audit *audit) {
+okl_loader_result app_controller_worker_run(okl_nxp *driver, const app_controller_job *job,
+                                          okl_loader_audit *audit, app_controller_worker_outcome *outcome) {
     CHECK(driver == &nxp && job->id == 7 && !app.controller_ready && app.updating && !locks); ++job_runs;
     memset(audit, 0, sizeof(*audit));
+    *outcome=(app_controller_worker_outcome){job_read_only_rejection?
+        APP_CONTROLLER_READ_ONLY_UNSUPPORTED:APP_CONTROLLER_MUTATION_ATTEMPTED,true};
     if (job_result == OKL_LOADER_OK) {
         original = true; boot_at = now; remote_status.trial_confirmed = 0;
         controller = (okl_light_state){.temperature_kelvin = 5000};
     }
     return job_result;
+}
+bool app_controller_update_reject(uint32_t id, const okl_loader_audit *audit,
+                                  okl_loader_result result, const app_controller_worker_outcome *outcome) {
+    CHECK(id==7 && audit && result==OKL_LOADER_INVALID && outcome && !locks);++job_rejections;
+    if(!job_read_only_rejection || !finish_durable)return false;
+    app.updating=false;journal_blocked=false;
+    snprintf(app.operation,sizeof(app.operation),"idle");return true;
 }
 bool app_controller_update_finish(uint32_t id, const okl_loader_audit *audit, okl_loader_result result, bool confirmed, const char *error) {
     CHECK(id == 7 && audit && result == job_result && error && !app.controller_ready && !locks); ++job_finishes;
@@ -208,7 +219,8 @@ static void reset(void) {
     remote_status = (okl_controller_status){.role = OKL_ROLE_LIGHTING, .capabilities = 3,
         .part_id = CONTROLLER_PART_ID, .reset_cause = 0x13};
     journal_blocked = job_queued = finished_confirmed = off_on_read = false; finish_durable = true;
-    transport_inits = job_runs = job_finishes = 0; job_result = OKL_LOADER_OK;
+    transport_inits = job_runs = job_finishes = job_rejections = 0; job_result = OKL_LOADER_OK;
+    job_read_only_rejection=false;
     controller = (okl_light_state){.effect = 1, .color_count = 1, .colors = {255, 0, 32},
                                   .color_brightness = 102, .temperature_kelvin = 4500};
 }
@@ -364,6 +376,28 @@ static void test_update_worker_gates(void) {
         if (!failure) CHECK(!app.desired.power && app.desired.effect == KL_EFFECT_NONE && app.reported_valid && app.output_revision == 10);
         else CHECK(journal_blocked && app.output_revision == 9 && !app.controller_ready);
     }
+    for(unsigned failure=0;failure<2;++failure) {
+        reset();job_queued=true;job_result=OKL_LOADER_INVALID;job_read_only_rejection=true;
+        app.desired.power=true;app.desired.effect=KL_EFFECT_AURORA;app.output_revision=9;
+        stop_after=4;delay_step=1000;if(failure)finish_durable=false;
+        run();CHECK(job_runs==1 && job_rejections==1 && job_finishes==failure);
+        CHECK(!writes && !confirmations && app.output_revision==9); /* Old effect never resumes. */
+        CHECK(app.controller_ready==!failure && journal_blocked==(failure!=0));
+        if(!failure)CHECK(versions>1 && reads>1 && !app.updating); /* Fresh ordinary bootstrap. */
+    }
+    for(unsigned failure=0;failure<3;++failure) {
+        reset();app.updating=true;off_on_read=true;job_queued=true;
+        job_result=OKL_LOADER_INVALID;job_read_only_rejection=true;stop_after=5;delay_step=1000;
+        if(failure==1)fail_write=1;
+        if(failure==2)finish_durable=false;
+        run();CHECK(job_rejections==1);
+        if(!failure)CHECK(writes==2 && !controller.effect && !controller.white_brightness && app.completed_revision==1);
+        if(failure==1)CHECK(writes==1 && !app.completed_revision); /* Failed Off is not replayed after health recovery. */
+        if(failure==2)CHECK(!writes && journal_blocked && !app.controller_ready);
+    }
+    reset();job_queued=true;job_result=OKL_LOADER_INVALID;job_read_only_rejection=true;
+    app.desired.power=false;app.output_revision=9;stop_after=4;delay_step=1000;
+    run();CHECK(!writes && app.controller_ready); /* Already consumed Off is not a new request. */
 }
 int main(void) {
     test_startup(); test_startup_queued_transition(); test_setup_and_frame_failures();

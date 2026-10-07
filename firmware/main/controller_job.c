@@ -8,7 +8,7 @@
 #include <string.h>
 
 enum job_state { JOB_IDLE, JOB_RECEIVING, JOB_QUEUED, JOB_RUNNING,
-                 JOB_SUCCEEDED, JOB_RECOVERY_REQUIRED };
+                 JOB_SUCCEEDED, JOB_RECOVERY_REQUIRED, JOB_FAILED };
 static struct {
     bool initialized;
     enum job_state state;
@@ -252,8 +252,55 @@ bool app_controller_update_finish(uint32_t id, const okl_loader_audit *audit,
     return complete;
 }
 
+static bool read_only_failure(const okl_loader_audit *a) {
+    return a && a->phase == OKL_LOADER_PRECOMMIT_FAILED &&
+        (a->result == OKL_LOADER_IO || a->result == OKL_LOADER_INVALID) &&
+        !a->loader_verified && !a->erase_attempted && !a->complete_bank_verified &&
+        !a->program_blocks_acked && !a->readback_blocks_verified &&
+        !a->commit_attempted && !a->abort_attempted && !a->quiet_completed &&
+        !a->reset_boundary_established && !a->persistence_failed && !a->cancelled_after_commit &&
+        a->commit_delivery == OKL_LOADER_NOT_SENT && a->abort_delivery == OKL_LOADER_NOT_SENT &&
+        !a->quiet_started_us && !a->quiet_finished_us &&
+        a->observation.kind == OKL_LOADER_OBSERVATION_UNKNOWN;
+}
+
+bool app_controller_update_reject(uint32_t id, const okl_loader_audit *audit,
+                                  okl_loader_result result,
+                                  const app_controller_worker_outcome *outcome) {
+    app_lock();
+    /* The live worker proof cannot be reconstructed from a journal after a
+     * reboot. Check both the manager's last persisted audit and the returned
+     * one; neither may contain a loader operation or storage failure. */
+    bool proven = job.state == JOB_RUNNING && job.id == id && !atomic_load(&blocked) &&
+        outcome && outcome->entry == APP_CONTROLLER_READ_ONLY_UNSUPPORTED && outcome->synchronized &&
+        result == OKL_LOADER_INVALID && audit_valid(audit) && audit->result == result &&
+        (job.source == OKL_LOADER_FROM_ORIGINAL || job.source == OKL_LOADER_FROM_LEGACY_1_3) &&
+        read_only_failure(audit) && read_only_failure(&job.audit);
+    if (!proven) { app_unlock(); return false; }
+    job.audit = *audit;
+    bool cleared = write_journal(NULL) == ESP_OK;
+    job.confirmed = false;
+    job.state = cleared ? JOB_FAILED : JOB_RECOVERY_REQUIRED;
+    app.controller_ready = false; app.reported_valid = false; app.reported_fields = 0;
+    if (cleared) {
+        snprintf(job.error, sizeof(job.error), "Unsupported controller target; update rejected before any mutation");
+        snprintf(app.controller_status, sizeof(app.controller_status), "starting");
+        snprintf(app.operation, sizeof(app.operation), "idle"); app.error[0] = 0;
+    } else {
+        job.audit.result = OKL_LOADER_PERSIST;
+        disable_locked("Controller rejection journal clear failed; explicit recovery required");
+    }
+    uint8_t *package = job.package;
+    job.package = NULL; job.image.package = NULL; job.image.size = 0;
+    app.updating = false;
+    app_event_locked("update", cleared ? "controller.rejected" : "controller.unresolved", job.error);
+    app_unlock();
+    free(package);
+    return cleared;
+}
+
 cJSON *app_controller_update_json(void) {
-    static const char *states[] = {"idle", "receiving", "queued", "running", "completed", "recovery_required"};
+    static const char *states[] = {"idle", "receiving", "queued", "running", "completed", "recovery_required", "failed"};
     static const char *phases[] = {"idle", "validated", "entering", "ready", "erasing", "programming",
         "verifying", "committing", "quiet", "observing", "application_seen", "precommit_failed", "commit_unresolved"};
     static const char *results[] = {"ok", "invalid", "busy", "cancelled", "timeout", "io", "protocol", "verify", "persist", "unresolved"};
@@ -272,7 +319,8 @@ cJSON *app_controller_update_json(void) {
     if (id) cJSON_AddNumberToObject(json, "job_id", id);
     else cJSON_AddNullToObject(json, "job_id");
     cJSON_AddStringToObject(json, "phase", phases[audit.phase]);
-    if (state == JOB_SUCCEEDED || state == JOB_RECOVERY_REQUIRED) cJSON_AddStringToObject(json, "result", results[audit.result]);
+    if (state == JOB_SUCCEEDED || state == JOB_RECOVERY_REQUIRED || state == JOB_FAILED)
+        cJSON_AddStringToObject(json, "result", results[audit.result]);
     else cJSON_AddNullToObject(json, "result");
     cJSON_AddNumberToObject(json, "program_blocks_acked", audit.program_blocks_acked);
     cJSON_AddNumberToObject(json, "readback_blocks_verified", audit.readback_blocks_verified);
