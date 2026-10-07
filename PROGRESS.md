@@ -4,7 +4,9 @@
 
 The corrected ESP application booted with controller readiness and passed four fresh native-readback checks: white at 5% and 5300 K, Off, static RGB at 5%, and Off. Each check matched its accepted revision and confirmed fields. The operator explicitly confirmed the trial based on these API/controller checks; optical behavior remains unverified. This is an original ESP application with the working legacy NXP controller.
 
-The first live browser visit then exposed a frontend defect: the transport stored the native `fetch` function as an object method, producing an illegal receiver in Chromium. API qualification and demo-mode UI tests had not exercised this browser requirement. The default transport now delegates through `globalThis.fetch`. A receiver-sensitive regression fails the prior code and passes the correction; all 69 dashboard tests and the production asset build pass. Live deployment and browser verification of this correction are the next checks.
+The first live browser visit then exposed a frontend defect: the transport stored the native `fetch` function as an object method, producing an illegal receiver in Chromium. API qualification and demo-mode UI tests had not exercised this browser requirement. The default transport now delegates through `globalThis.fetch`. A receiver-sensitive regression fails the prior code and passes the correction; all 69 dashboard tests and the production asset build pass.
+
+The correction was delivered through the original ESP application's authenticated OTA endpoint, which accepted the application and restarted into a fresh trial. All four served dashboard assets matched the pinned build hashes. White, colour and Off again passed controller readback checks; the trial was explicitly confirmed. Chromium then showed Connected while loading the dashboard directly from the physical lamp. No host service is needed to use it. The update indicator is still being implemented; this trial did not exercise it. GitHub CI passed for the deployed source commit `1212dc4`.
 
 ## 2026-10-07 — first independent ESP boot
 
