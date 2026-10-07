@@ -25,6 +25,24 @@ function fixture() {
 }
 
 describe("HTTP transport", () => {
+  it("calls the default browser fetch with its required global receiver", async () => {
+    const original = globalThis.fetch;
+    const received: unknown[] = [];
+    globalThis.fetch = async function (this: unknown, input, options) {
+      if (this !== globalThis) throw new TypeError("Illegal invocation");
+      received.push([input, options?.method]);
+      return new Response('{"connected":true}', { status: 200 });
+    };
+    try {
+      const api = new HttpTransport();
+      await expect(api.request("GET", "/device")).resolves.toEqual({
+        connected: true,
+      });
+      expect(received).toEqual([["/api/v1/device", "GET"]]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
   it("sends same-origin bearer mutations and exact actor metadata", async () => {
     const fetcher = vi
       .fn()

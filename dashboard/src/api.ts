@@ -113,7 +113,9 @@ export function assertState(value: LightState): void {
 export class HttpTransport implements Transport {
   readonly demo = false;
   token = "";
-  constructor(private fetcher: typeof fetch = fetch) {}
+  constructor(
+    private fetcher: typeof fetch = (...args) => globalThis.fetch(...args),
+  ) {}
   async request<T>(
     method: string,
     path: string,

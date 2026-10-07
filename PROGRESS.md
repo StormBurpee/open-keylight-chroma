@@ -1,5 +1,11 @@
 # Development record
 
+## ESP control qualification and browser correction
+
+The corrected ESP application booted with controller readiness and passed four fresh native-readback checks: white at 5% and 5300 K, Off, static RGB at 5%, and Off. Each check matched its accepted revision and confirmed fields. The operator explicitly confirmed the trial based on these API/controller checks; optical behavior remains unverified. This is an original ESP application with the working legacy NXP controller.
+
+The first live browser visit then exposed a frontend defect: the transport stored the native `fetch` function as an object method, producing an illegal receiver in Chromium. API qualification and demo-mode UI tests had not exercised this browser requirement. The default transport now delegates through `globalThis.fetch`. A receiver-sensitive regression fails the prior code and passes the correction; all 69 dashboard tests and the production asset build pass. Live deployment and browser verification of this correction are the next checks.
+
 ## 2026-10-07 — first independent ESP boot
 
 The first independent ESP application reached 100% OTA acceptance, booted, imported the existing Wi-Fi credentials and served its embedded API on the original network address. Its observed free heap was 179,452 bytes. The NXP version getter returned 1.3.0.0, but a subsequent capability query was rejected by its retained ownership gate. Lighting readiness stayed closed; no control qualification or trial confirmation was attempted. At the application trial deadline, the lamp returned to the previously installed ESP image in the original fallback slot without a power cycle. This verifies this healthy-app fallback path, not recovery from an early crash.
