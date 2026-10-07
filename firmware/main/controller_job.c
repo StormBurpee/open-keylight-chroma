@@ -3,6 +3,7 @@
 #include "controller_diagnostic.h"
 #include "mbedtls/sha256.h"
 #include "nvs.h"
+#include "esp_system.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,7 @@ static struct {
     uint8_t requested_role;
     uint32_t resident_proof_job_id;
     app_controller_worker_outcome diagnostic;
+    bool recovery_available, recovery_only, allow_legacy_reconcile, recovery_taken;
     char error[81];
 } job;
 static atomic_bool blocked = true;
@@ -131,12 +133,33 @@ esp_err_t app_controller_update_init(void) {
     else {
         job.state = JOB_RECOVERY_REQUIRED;
         bool valid = result == ESP_OK && size == sizeof(record) && decode_journal(record);
+        job.recovery_available = valid && esp_reset_reason() == ESP_RST_POWERON;
+        job.allow_legacy_reconcile = valid && job.source == OKL_LOADER_FROM_LEGACY_1_3 &&
+            job.audit.phase == OKL_LOADER_PRECOMMIT_FAILED &&
+            !job.audit.erase_attempted && !job.audit.commit_attempted && !job.audit.abort_attempted &&
+            !job.audit.program_blocks_acked && !job.audit.readback_blocks_verified && !job.audit.complete_bank_verified;
         job.audit.result = OKL_LOADER_UNRESOLVED;
         disable_locked(valid ? "Interrupted controller update; explicit recovery required" :
             "Controller update journal unavailable or invalid; explicit recovery required");
     }
     app_unlock();
     return ESP_OK;
+}
+
+int app_controller_recovery_begin(uint32_t expected_job_id, bool acknowledged) {
+    if (!acknowledged || !expected_job_id) return 400;
+    app_lock();
+    if (job.id != expected_job_id || app.updating || job.state == JOB_RUNNING || job.state == JOB_QUEUED) {
+        app_unlock(); return 409;
+    }
+    if (!job.initialized || !atomic_load(&blocked) || !job.recovery_available ||
+        app_now_ms() >= 180000 || esp_reset_reason() != ESP_RST_POWERON) {
+        app_unlock(); return 503;
+    }
+    job.recovery_only = true; job.state = JOB_QUEUED; app.updating = true;
+    job.error[0] = 0; memset(&job.diagnostic, 0, sizeof(job.diagnostic));
+    app_event_locked("owner", "controller.recovery.queued", "Power-cycle acknowledged; explicit read-only classification queued");
+    app_unlock(); return 202;
 }
 
 int app_controller_update_begin(uint32_t *id) {
@@ -162,6 +185,7 @@ int app_controller_update_begin_role(uint32_t *id, uint8_t role) {
     else { app_unlock(); return 503; }
     job.id = ++job.next_id; job.state = JOB_RECEIVING; job.source = source;
     job.confirmed = false; job.target_known = false; job.error[0] = 0;
+    job.recovery_only = false;
     job.requested_role = role;
     memset(&job.diagnostic, 0, sizeof(job.diagnostic));
     memset(&job.image, 0, sizeof(job.image)); memset(&job.audit, 0, sizeof(job.audit));
@@ -199,14 +223,17 @@ void app_controller_update_cancel_upload(uint32_t id) {
 bool app_controller_update_take(app_controller_job *out) {
     if (!out) return false;
     app_lock();
-    bool available = job.state == JOB_QUEUED && (!atomic_load(&blocked) ||
+    bool available = job.state == JOB_QUEUED && (job.recovery_only || !atomic_load(&blocked) ||
         (job.source == OKL_LOADER_FROM_FRESH_RESIDENT && job.resident_proof_job_id));
     if (available) {
-        *out = (app_controller_job){job.id, job.package, job.image, job.source, job.resident_proof_job_id};
+        *out = (app_controller_job){job.id, job.package, job.image, job.source, job.resident_proof_job_id,
+            job.recovery_only, job.allow_legacy_reconcile};
+        job.recovery_taken = job.recovery_only;
+        job.recovery_available = false;
         job.resident_proof_job_id = 0;
         /* A new explicit job owns recovery. Durable errors reassert this gate;
          * the journal remains until normal success, never on admission. */
-        atomic_store(&blocked, false);
+        if (!job.recovery_only) atomic_store(&blocked, false);
         job.state = JOB_RUNNING;
         app.controller_ready = false; app.reported_valid = false; app.reported_fields = 0;
         snprintf(app.operation, sizeof(app.operation), "pending");
@@ -214,9 +241,42 @@ bool app_controller_update_take(app_controller_job *out) {
     app_unlock(); return available;
 }
 
+bool app_controller_recovery_finish(uint32_t id, const app_controller_worker_outcome *outcome) {
+    app_lock();
+    if (job.state != JOB_RUNNING || job.id != id || !job.recovery_taken || !job.recovery_only) {
+        app_unlock(); return false;
+    }
+    job.recovery_taken = false;
+    if (outcome) job.diagnostic = *outcome;
+    bool resident = outcome && outcome->synchronized && !outcome->legacy_reconciled && outcome->resident_proof_job_id == id;
+    bool legacy = outcome && outcome->synchronized && !outcome->resident_proof_job_id && outcome->legacy_reconciled && job.allow_legacy_reconcile;
+    bool cleared = legacy && write_journal(NULL) == ESP_OK;
+    job.resident_proof_job_id = resident ? id : 0;
+    job.state = cleared ? JOB_FAILED : JOB_RECOVERY_REQUIRED;
+    atomic_store(&blocked, !cleared);
+    job.confirmed = false; app.controller_ready = false; app.reported_valid = false; app.reported_fields = 0;
+    app.controller_connected = resident || cleared;
+    snprintf(app.controller_status, sizeof(app.controller_status), "%s", resident ? "loader" : cleared ? "starting" : "fault");
+    snprintf(app.operation, sizeof(app.operation), "%s", cleared ? "idle" : "pending");
+    snprintf(job.error, sizeof(job.error), "%s", resident || cleared ? "" :
+        legacy ? "Recovery journal could not be cleared; lighting remains blocked" :
+        outcome && outcome->diagnostic_error[0] ? outcome->diagnostic_error : "Recovery classification failed; no retry performed");
+    snprintf(app.error, sizeof(app.error), "%s", job.error);
+    app.updating = false;
+    app_event_locked("owner", resident || cleared ? "controller.recovered" : "controller.recovery.failed",
+        resident ? "Fresh resident verified; submit a new explicit package" :
+        cleared ? "Unchanged legacy application verified Off; ordinary bootstrap may resume" : job.error);
+    app_unlock(); return cleared;
+}
+
 void app_controller_update_progress(uint32_t id, const okl_loader_audit *audit) {
     app_lock();
     if (job.state == JOB_RUNNING && job.id == id && audit_valid(audit)) job.audit = *audit;
+    app_unlock();
+}
+void app_controller_update_record_outcome(uint32_t id, const app_controller_worker_outcome *outcome) {
+    app_lock();
+    if (job.state == JOB_RUNNING && job.id == id && outcome) job.diagnostic = *outcome;
     app_unlock();
 }
 
@@ -391,6 +451,9 @@ cJSON *app_controller_update_json(void) {
     bool target_known = job.target_known;
     uint8_t role = job.image.role;
     bool resident_ready = job.resident_proof_job_id != 0;
+    bool recovery_available = job.recovery_available && !app.updating &&
+        esp_reset_reason() == ESP_RST_POWERON && app_now_ms() < 180000;
+    bool recovery_attempted = job.recovery_only;
     app_controller_worker_outcome diagnostic = job.diagnostic;
     okl_loader_audit audit = job.audit; bool recovery = atomic_load(&blocked);
     uint8_t digest[32]; memcpy(digest, job.image.bank_sha256, 32);
@@ -420,6 +483,27 @@ cJSON *app_controller_update_json(void) {
     else cJSON_AddNullToObject(json, "target_role");
     cJSON_AddBoolToObject(json, "diagnostic_trial_observed", diagnostic.diagnostic_trial_observed);
     cJSON_AddBoolToObject(json, "resident_recovery_ready", resident_ready);
+    cJSON_AddBoolToObject(json, "power_cycle_recovery_available", recovery_available);
+    cJSON_AddBoolToObject(json, "recovery_attempted", recovery_attempted);
+    cJSON_AddBoolToObject(json, "legacy_reconciled", diagnostic.legacy_reconciled && !recovery);
+    cJSON *wire = cJSON_AddObjectToObject(json, "transport_diagnostic");
+    cJSON_AddStringToObject(wire, "stage", diagnostic.stage);
+    cJSON_AddNumberToObject(wire, "result", diagnostic.transport_result);
+    cJSON_AddBoolToObject(wire, "parsed_reply_received", diagnostic.reply_received);
+    cJSON_AddBoolToObject(wire, "raw_reply_received", diagnostic.raw_reply_received);
+    cJSON_AddBoolToObject(wire, "snapshot_available", diagnostic.transport_snapshot);
+    cJSON_AddNumberToObject(wire, "phase", diagnostic.transport_phase);
+    cJSON_AddBoolToObject(wire, "ready", diagnostic.ready != 0);
+    cJSON_AddNumberToObject(wire, "reply_kind", diagnostic.reply_kind);
+    char tag[13];
+    for (unsigned i = 0; i < 6; ++i) snprintf(tag + i * 2, 3, "%02x", diagnostic.routing_tag[i]);
+    cJSON_AddStringToObject(wire, "routing_tag", tag);
+    cJSON_AddNumberToObject(wire, "reply_status", diagnostic.reply_status);
+    cJSON_AddNumberToObject(wire, "reply_class", diagnostic.reply_class);
+    cJSON_AddNumberToObject(wire, "reply_opcode", diagnostic.reply_opcode);
+    cJSON_AddNumberToObject(wire, "reply_size", diagnostic.reply_size);
+    if (diagnostic.reply_sha256[0]) cJSON_AddStringToObject(wire, "report_sha256", diagnostic.reply_sha256);
+    else cJSON_AddNullToObject(wire, "report_sha256");
     if (role == OKL_ROLE_SPI_DIAGNOSTIC && target_known) {
         cJSON *detail = cJSON_AddObjectToObject(json, "diagnostic");
         cJSON_AddStringToObject(detail, "profile", "OFF1");

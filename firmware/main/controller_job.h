@@ -12,6 +12,7 @@ typedef struct {
     okl_loader_image image;
     okl_loader_source source;
     uint32_t resident_proof_job_id;
+    bool recovery_only, allow_legacy_reconcile;
 } app_controller_job;
 
 /* Volatile evidence produced only by the sole worker's update adapter. A
@@ -31,6 +32,15 @@ typedef struct {
     uint32_t resident_proof_job_id;
     uint32_t diagnostic_words[224];
     char diagnostic_error[81];
+    bool legacy_reconciled;
+    char stage[32];
+    int transport_result;
+    bool reply_received;
+    uint8_t reply_status, reply_class, reply_opcode, reply_size;
+    char reply_sha256[65];
+    bool transport_snapshot, raw_reply_received;
+    unsigned transport_phase, ready, reply_kind;
+    uint8_t routing_tag[6];
 } app_controller_worker_outcome;
 
 /* Call once after NVS initialization, before starting the controller worker.
@@ -41,6 +51,8 @@ bool app_controller_update_blocked(void); /* Safe while app.mutex is held. */
 int app_controller_update_begin(uint32_t *job_id);
 /* Explicit bench admission; role must be diagnostic1 or production2. */
 int app_controller_update_begin_role(uint32_t *job_id, uint8_t role);
+int app_controller_recovery_begin(uint32_t expected_job_id, bool power_cycle_acknowledged);
+bool app_controller_recovery_finish(uint32_t id, const app_controller_worker_outcome *outcome);
 /* 202 transfers ownership; every other result leaves ownership with caller. */
 int app_controller_update_submit(uint32_t id, uint8_t *package, size_t size);
 void app_controller_update_cancel_upload(uint32_t id);
@@ -51,6 +63,7 @@ cJSON *app_controller_update_json(void);
  * the worker before entry; cached admission is not a device measurement. */
 bool app_controller_update_take(app_controller_job *out);
 void app_controller_update_progress(uint32_t id, const okl_loader_audit *audit);
+void app_controller_update_record_outcome(uint32_t id, const app_controller_worker_outcome *outcome);
 int app_controller_update_persist(uint32_t id, const okl_loader_audit *audit);
 /* True only for verified, typed-confirmed success AND durable journal clear.
  * False keeps normal bootstrap/output gated, even if confirmation succeeded. */

@@ -53,6 +53,8 @@ static bool reset_done;
 static bool journal_blocked, job_queued, finish_durable, finished_confirmed, off_on_read;
 static unsigned transport_inits, job_runs, job_finishes, job_rejections;
 static unsigned diagnostic_finishes;
+static bool recovery_job, recovery_clear;
+static unsigned recovery_jobs, recovery_finishes;
 static uint8_t job_role;
 static okl_loader_result job_result;
 static bool job_read_only_rejection;
@@ -67,11 +69,25 @@ void app_update_indicator_snapshot(kl_update_indicator *out) { CHECK(!locks); *o
 
 bool app_controller_update_blocked(void) { return journal_blocked; }
 bool app_controller_update_take(app_controller_job *out) {
-    if (!job_queued || journal_blocked) return false;
+    if (!job_queued || (journal_blocked && !recovery_job)) return false;
     CHECK(!locks); job_queued = false; app.updating = true; app.controller_ready = false;
     memset(out, 0, sizeof(*out)); out->id = 7; out->image.version.component[1] = 1;
     out->image.role = job_role;
+    out->recovery_only = recovery_job;
     return true;
+}
+void app_controller_worker_recover(okl_nxp *driver,const app_controller_job *job,
+                                   const uint8_t identity[6],app_controller_worker_outcome *outcome) {
+    CHECK(driver==&nxp && job->recovery_only && job->id==7 && identity==app.mac && !locks);
+    CHECK(journal_blocked && !versions && !claims && !writes && !transport_inits);
+    ++recovery_jobs;memset(outcome,0,sizeof(*outcome));
+    CHECK(app_nxp_transport_init(driver,identity)==ESP_OK);
+    controller=(okl_light_state){.temperature_kelvin=5000};
+    outcome->legacy_reconciled=recovery_clear;
+}
+bool app_controller_recovery_finish(uint32_t id,const app_controller_worker_outcome *outcome) {
+    CHECK(id==7 && outcome && !locks && recovery_jobs==1);++recovery_finishes;
+    journal_blocked=!recovery_clear;app.updating=false;return recovery_clear;
 }
 okl_loader_result app_controller_worker_run(okl_nxp *driver, const app_controller_job *job,
                                           okl_loader_audit *audit, app_controller_worker_outcome *outcome) {
@@ -91,6 +107,9 @@ bool app_controller_update_reject(uint32_t id, const okl_loader_audit *audit,
     if(!job_read_only_rejection || !finish_durable)return false;
     app.updating=false;journal_blocked=false;
     snprintf(app.operation,sizeof(app.operation),"idle");return true;
+}
+void app_controller_update_record_outcome(uint32_t id,const app_controller_worker_outcome *outcome) {
+    CHECK(id==7 && outcome && !locks);
 }
 bool app_controller_update_finish(uint32_t id, const okl_loader_audit *audit, okl_loader_result result, bool confirmed, const char *error) {
     CHECK(id == 7 && audit && result == job_result && error && !app.controller_ready && !locks); ++job_finishes;
@@ -292,6 +311,7 @@ static void reset(void) {
     journal_blocked = job_queued = finished_confirmed = off_on_read = false; finish_durable = true;
     transport_inits = job_runs = job_finishes = job_rejections = 0; job_result = OKL_LOADER_OK;
     diagnostic_finishes = 0; job_role = OKL_ROLE_LIGHTING;
+    recovery_job=recovery_clear=false;recovery_jobs=recovery_finishes=0;
     job_read_only_rejection=false;
     memset(&upload,0,sizeof(upload));upload_at=upload_terminal_at=off_at=0;upload_success=false;
     queued_duration=600;frame_latency=encoding_at=stolen_at=corrupt_read=owner_reads=0;owner_result=OKL_OK;
@@ -550,6 +570,14 @@ static void test_health_and_reset_no_replay(void) {
     CHECK(versions == 3 && status_reads == 3 && !confirmations && app.controller_ready);
 }
 static void test_update_worker_gates(void) {
+    for(unsigned cleared=0;cleared<2;++cleared) {
+        reset();journal_blocked=true;job_queued=true;recovery_job=true;recovery_clear=cleared!=0;
+        app.desired.power=true;app.desired.effect=KL_EFFECT_AURORA;app.output_revision=9;
+        stop_after=4;delay_step=1000;run();
+        CHECK(recovery_jobs==1 && recovery_finishes==1 && !job_runs && !job_finishes && !diagnostic_finishes);
+        CHECK(!writes && !confirmations && app.output_revision==9 && app.controller_ready==(cleared!=0));
+        CHECK(journal_blocked==(cleared==0) && transport_inits==1);
+    }
     reset(); journal_blocked = true; stop_after = 3; delay_step = 1000; run();
     CHECK(!transport_inits && !versions && !status_reads && !claims && !writes && !confirmations);
     reset(); app.updating = true; stop_after = 3; delay_step = 1000; run();

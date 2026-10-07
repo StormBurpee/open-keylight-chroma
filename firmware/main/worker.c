@@ -367,7 +367,17 @@ static void worker_task(void *unused) {
             indicator.active = false; indicator.finished = true;
             okl_loader_audit audit;
             app_controller_worker_outcome outcome;
+            if (job.recovery_only) {
+                app_controller_worker_recover(&nxp, &job, app.mac, &outcome);
+                (void)app_controller_recovery_finish(job.id, &outcome);
+                pending_off = false;
+                app_lock(); seen_revision = app.output_revision; app.controller_ready = false; app_unlock();
+                app_mqtt_publish();
+                next_health = app_now_ms() + HEALTH_INTERVAL_MS;
+                continue;
+            }
             okl_loader_result updated = app_controller_worker_run(&nxp, &job, &audit, &outcome);
+            app_controller_update_record_outcome(job.id, &outcome);
             bool confirmed = false;
             bool diagnostic = job.image.role == OKL_ROLE_SPI_DIAGNOSTIC;
             if (updated == OKL_LOADER_OK && job.image.role == OKL_ROLE_LIGHTING) {

@@ -30,6 +30,12 @@ static app_controller_job test_job;
 static update_context context;
 #define CHECK(value) do { ++checks; if (!(value)) { fprintf(stderr,"FAIL controller worker %d: %s\n",__LINE__,#value);exit(1); } } while (0)
 static uint64_t test_clock(void *unused) { (void)unused;return current_us; }
+esp_err_t app_nxp_transport_init(okl_nxp *driver,const uint8_t identity[6]) {
+    (void)driver;(void)identity;CHECK(false);return ESP_ERR_NO_MEM;
+}
+okl_result app_nxp_transport_snapshot(okl_nxp *driver,app_nxp_transport_diagnostic *out,uint64_t deadline) {
+    CHECK(driver==&test_driver && deadline>current_us);memset(out,0,sizeof(*out));return OKL_OK;
+}
 int mbedtls_sha256(const unsigned char *data,size_t size,unsigned char out[32],int is224) {
     CHECK(data && size && !is224);memset(out,0x42,32);return 0;
 }

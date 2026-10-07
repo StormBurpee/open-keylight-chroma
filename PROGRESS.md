@@ -135,3 +135,23 @@ Targeted verification passed 4,041,255 real adapter/core assertions, 10,347 jour
 ## Dashboard behavior review
 
 Independent control-flow tests exposed two stale-draft regressions: opening Effects during a colour preview prevented later state updates, and recalling a scene from Light could leave the old colour draft visible. Both cases failed before the shared draft-cancellation fix and pass afterward. Seven new integration tests also cover pointer cancellation against newer controller state, main-tab cancellation with no late write, actual scene save/recall, retained fade duration, and a rejected scene request without retry. The targeted suite and TypeScript build pass; these checks use the explicitly isolated transport and make no hardware claims.
+
+## Native off-only controller qualification path
+
+Explicit diagnostic uploads now preserve the role1 recovery deadline, issue one fixed OFF1 action, validate all five captured GPIO/timer phases through fourteen bounded pages, and never send FD. The journal and lighting gate remain closed. After the fixed recovery deadline and protected silence, an exact resident response can create a volatile one-use capability for another explicit package; no generic journal clear or automatic retry was added. The native adapter also handles the exact legacy ownership denial before its required part proof.
+
+Offline validation passed 4,258,487 actual adapter/core assertions across 1,009 cases, 11,265 manager assertions, 175,244 HTTP assertions, and the worker/transport suites. Independent reviewers checked the profile ABI, token invalidation, no-FD behavior and retained journal. These results prepare a hardware trial; they do not establish physical PWM behavior or native controller installation reliability.
+
+## Native handoff failure and loader envelope correction
+
+ESP application `0.1.2-dev` was installed, its served assets and five control checks verified, and its trial explicitly confirmed. The following native NXP diagnostic attempt stopped before any acknowledged program or readback block, without attempting commit. The ESP remains reachable and its controller journal keeps ordinary output blocked.
+
+Independent instruction replay of the resident loader reproduced a response-envelope mismatch: it returns a zero device tag with kind zero, while the native adapter required its own tag. The correction accepts that observed envelope only within the typed loader transport; normal application replies retain their identity checks. This is a demonstrated compatibility defect and a likely explanation for the live failure, whose original audit did not retain the precise failing exchange. Recovery and a new live trial are pending.
+
+The authenticated recovery action now requires an acknowledged whole-light power cycle, a fresh ESP power-on reset and an untouched controller transport. It classifies the peer once after silence, retaining the journal when it establishes a fresh loader for a subsequent explicit upload. Only an entry-only failure with independently verified unchanged legacy firmware and Off state can clear its journal. Cached transport diagnostics retain the response envelope and failing stage. The 19 existing host suites, the new fixed-diagnostic codec suite, recovery request schema checks and ESP-IDF build pass. Deployment verification will identify the running ELF as well as its version.
+
+## Explicit controller recovery and failure evidence
+
+An authenticated recovery request now requires a confirmed ESP image, matching valid journal, explicit whole-light power-cycle acknowledgment, fresh ESP POWERON and pristine SPI. The worker waits silently, probes once, and can retain a fresh resident capability for a new explicit package without clearing the journal or replaying output. A narrowly proven unchanged legacy application after an entry-only failure may instead be checked Off and durably reconciled. Warm OTA boots, corrupt journals, stale requests, ambiguous bus state and failed journal clearing remain blocked.
+
+The cached audit now includes the precise operation stage, transport result, complete raw envelope tag/kind and report digest, separately labelled from parsed/correlated replies. Evidence is captured before cleanup can replace the failed response. Targeted actual-source tests cover physical-reset admission, one-shot consumption, no initial SPI, no loader writes/FD, all recovery exchange failures, strict legacy identity/Off/release, journal persistence errors and no old-scene replay. Manager and worker sanitizer suites pass; the independent actual recovery-adapter harness covers 315 deterministic cases. This slice is prepared for hardware recovery, not a claim that recovery has already succeeded.

@@ -15,7 +15,7 @@ compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
 if not compiler:
     raise SystemExit("Set CC to an ASan-capable C compiler; libcJSON development files required")
 stubs = OUT / "stubs"
-for name in ("esp_err.h", "freertos/FreeRTOS.h", "freertos/semphr.h", "nvs.h", "mbedtls/sha256.h"):
+for name in ("esp_err.h", "esp_system.h", "freertos/FreeRTOS.h", "freertos/semphr.h", "nvs.h", "mbedtls/sha256.h"):
     path = stubs / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('#include "job_mocks.h"\n')

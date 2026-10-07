@@ -24,12 +24,53 @@ static uint64_t bounded(update_context *c, uint64_t duration) {
     uint64_t now = clock_us(c);
     return c->deadline - (now < c->deadline ? now : c->deadline) < duration ? c->deadline : now + duration;
 }
+static void trace_wire(update_context *c) {
+    if (!c->driver->transport.now_us) return;
+    app_nxp_transport_diagnostic snapshot;
+    if (app_nxp_transport_snapshot(c->driver, &snapshot, clock_us(c) + 150000) != OKL_OK) return;
+    c->outcome.transport_snapshot = true;
+    c->outcome.transport_phase = snapshot.phase;
+    c->outcome.ready = snapshot.ready;
+    c->outcome.raw_reply_received = snapshot.has_report != 0;
+    c->outcome.reply_kind = snapshot.reply_kind;
+    memcpy(c->outcome.routing_tag, snapshot.routing_tag, 6);
+    if (!snapshot.has_report) return;
+    uint8_t sha[32];
+    if (!mbedtls_sha256(snapshot.report, 90, sha, 0)) {
+        for (unsigned i = 0; i < 32; ++i) snprintf(c->outcome.reply_sha256 + i * 2, 3, "%02x", sha[i]);
+        c->outcome.reply_status = snapshot.report[0]; c->outcome.reply_size = snapshot.report[5];
+        c->outcome.reply_class = snapshot.report[6]; c->outcome.reply_opcode = snapshot.report[7];
+    }
+}
+static void trace(update_context *c, const char *stage, okl_result result, const okl_reply *reply) {
+    snprintf(c->outcome.stage, sizeof(c->outcome.stage), "%s", stage);
+    c->outcome.transport_result = result;
+    c->outcome.reply_received = reply && reply->received;
+    c->outcome.reply_status = c->outcome.reply_class = c->outcome.reply_opcode = c->outcome.reply_size = 0;
+    c->outcome.reply_sha256[0] = 0;
+    c->outcome.transport_snapshot = c->outcome.raw_reply_received = false;
+    c->outcome.transport_phase = c->outcome.ready = c->outcome.reply_kind = 0;
+    memset(c->outcome.routing_tag, 0, sizeof(c->outcome.routing_tag));
+    if (reply && reply->received) {
+        c->outcome.reply_status = reply->report.status;
+        c->outcome.reply_class = reply->report.command_class;
+        c->outcome.reply_opcode = reply->report.opcode;
+        c->outcome.reply_size = reply->report.size;
+    }
+    /* Cache at the failing operation, before Abort or lease cleanup can
+     * replace the transport's last body. This helper clocks no SPI bytes. */
+    trace_wire(c);
+}
 static int digest(void *user, const uint8_t *data, size_t size, uint8_t out[32]) {
     (void)user; return mbedtls_sha256(data, size, out, 0);
 }
 static okl_result query(update_context *c, okl_command command, okl_reply *reply) {
     okl_request request; okl_result result = okl_request_get(&request, command);
-    return result == OKL_OK ? okl_nxp_execute(c->driver, &request, reply, bounded(c, 150000)) : result;
+    memset(reply, 0, sizeof(*reply));
+    if (result == OKL_OK) result = okl_nxp_execute(c->driver, &request, reply, bounded(c, 150000));
+    trace(c, command == OKL_GET_FIRMWARE ? "identity.version" : command == OKL_GET_PART_ID ?
+        "identity.part" : "identity.status", result, reply);
+    return result;
 }
 static bool qualified(const okl_controller_status *s) {
     return s->abi_major == 1 && !s->abi_minor && s->role == OKL_ROLE_LIGHTING &&
@@ -118,7 +159,9 @@ static int enter(void *user, okl_loader_source source, uint64_t deadline) {
          * Claim is a mutation even if its reply is lost: this path can never
          * use the read-only journal-rejection shortcut afterward. */
         c->outcome.entry = APP_CONTROLLER_MUTATION_ATTEMPTED;
-        if (okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000)) != OKL_OK) return -1;
+        result = okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000));
+        trace(c, "entry.claim", result, NULL);
+        if (result != OKL_OK) return -1;
         claimed = true;
         result = query(c, OKL_GET_CONTROLLER_STATUS, &reply);
     }
@@ -142,33 +185,52 @@ static int enter(void *user, okl_loader_source source, uint64_t deadline) {
     if (part != OKL_LOADER_PART_ID || (source == OKL_LOADER_FROM_ORIGINAL && part != status.part_id))
         return reject_unsupported(c);
     c->outcome.entry = APP_CONTROLLER_MUTATION_ATTEMPTED;
-    if (!claimed && okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000)) != OKL_OK) return -1;
+    if (!claimed) {
+        result = okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000));
+        trace(c, "entry.claim", result, NULL);
+        if (result != OKL_OK) return -1;
+    }
     /* The durable ENTERING journal exists before either Off write. Verify
      * native Off settings, never replay the previous scene. These getters do
      * not measure pin/optical darkness or legacy fade completion. */
     okl_light_state state;
-    if (okl_nxp_read_state(c->driver, &state, bounded(c, 800000)) != OKL_OK) return -1;
+    result = okl_nxp_read_state(c->driver, &state, bounded(c, 800000));
+    trace(c, "entry.state", result, NULL);
+    if (result != OKL_OK) return -1;
     uint8_t effect = state.effect; kl_state off = kl_state_default(); off.power = false;
-    if (kl_output_prepare(&off, false, NULL, &effect, output, c) != OKL_OK ||
-        okl_nxp_read_state(c->driver, &state, bounded(c, 800000)) != OKL_OK ||
-        state.effect || state.white_brightness) return -1;
+    result = kl_output_prepare(&off, false, NULL, &effect, output, c);
+    trace(c, "entry.off", result, NULL);
+    if (result != OKL_OK) return -1;
+    result = okl_nxp_read_state(c->driver, &state, bounded(c, 800000));
+    if (result == OKL_OK && (state.effect || state.white_brightness)) result = OKL_VERIFY;
+    trace(c, "entry.off_readback", result, NULL);
+    if (result != OKL_OK) return -1;
     if (source == OKL_LOADER_FROM_ORIGINAL) {
         if (query(c, OKL_GET_CONTROLLER_STATUS, &reply) != OKL_OK ||
             okl_reply_decode_controller_status(&status, &reply) != OKL_OK || !qualified(&status)) return -1;
     }
     okl_loader_delivery delivery;
     result = app_nxp_loader_enter(c->driver, c->job->id, source, &delivery, bounded(c, 2000000));
+    trace(c, "entry.send", result, NULL);
     /* Even a failed invocation may have reset the peer. Stay silent once;
      * neither a missing ACK nor READY-high permits retrying the mutation. */
     uint64_t quiet_end = clock_us(c) + OKL_LOADER_QUIET_US;
     while (clock_us(c) < quiet_end) wait_until(c, quiet_end);
-    if (result != OKL_OK || delivery != OKL_LOADER_SENT_COMPLETE) return -1;
-    return app_nxp_loader_reset_boundary(c->driver, c->job->id, 0x84, delivery, deadline) == OKL_OK ? 0 : -1;
+    if (result != OKL_OK) return -1;
+    if (delivery != OKL_LOADER_SENT_COMPLETE) {
+        trace(c, "entry.delivery", OKL_PROTOCOL, NULL); return -1;
+    }
+    result = app_nxp_loader_reset_boundary(c->driver, c->job->id, 0x84, delivery, deadline);
+    trace(c, "entry.reset_boundary", result, NULL);
+    return result == OKL_OK ? 0 : -1;
 }
 static int exchange(void *user, const uint8_t request[90], uint8_t response[90],
                     okl_loader_delivery *delivery, uint64_t deadline) {
     update_context *c = user; c->deadline = deadline;
-    return app_nxp_loader_exchange(c->driver, c->job->id, request, response, delivery, bounded(c, 2000000)) == OKL_OK ? 0 : -1;
+    okl_result result = app_nxp_loader_exchange(c->driver, c->job->id, request, response, delivery, bounded(c, 2000000));
+    trace(c, request[7] == 0x80 ? "loader.information" : request[7] == 1 ? "loader.start" :
+        request[7] == 2 ? "loader.program" : "loader.readback", result, NULL);
+    return result == OKL_OK ? 0 : -1;
 }
 static int send_only(void *user, const uint8_t request[90], okl_loader_delivery *delivery, uint64_t deadline) {
     update_context *c = user; c->deadline = deadline;
@@ -271,4 +333,81 @@ okl_loader_result app_controller_worker_run(okl_nxp *driver, const app_controlle
     if (outcome->entry == APP_CONTROLLER_READ_ONLY_UNSUPPORTED && outcome->synchronized &&
         !audit->persistence_failed && result == OKL_LOADER_IO) audit->result = result = OKL_LOADER_INVALID;
     return result;
+}
+
+void app_controller_worker_recover(okl_nxp *driver, const app_controller_job *job,
+                                   const uint8_t identity[6], app_controller_worker_outcome *outcome) {
+    if (!outcome) return;
+    memset(outcome, 0, sizeof(*outcome));
+    if (!driver || !job || !job->recovery_only || !identity || driver->transport.now_us ||
+        driver->transport.transfer || driver->transport.user) {
+        snprintf(outcome->stage, sizeof(outcome->stage), "recovery.pristine");
+        snprintf(outcome->diagnostic_error, sizeof(outcome->diagnostic_error), "Recovery requires pristine SPI after physical power cycle");
+        outcome->transport_result = OKL_NEEDS_RECOVERY; return;
+    }
+    update_context c = {.driver=driver, .job=job};
+    okl_result result = app_nxp_transport_init(driver, identity) == ESP_OK ? OKL_OK : OKL_IO;
+    trace(&c, "recovery.initialize", result, NULL);
+    if (result != OKL_OK) goto finish;
+    c.deadline = clock_us(&c) + UINT64_C(40000000);
+    if (begin(&c, c.deadline)) { result=OKL_NEEDS_RECOVERY; trace(&c,"recovery.lease",result,NULL); goto finish; }
+    uint64_t quiet = clock_us(&c) + UINT64_C(33000000);
+    while (clock_us(&c) < quiet) wait_until(&c, quiet);
+    uint8_t request[90], response[90], args[80]={0}; okl_loader_delivery delivery;
+    (void)okl_report_encode(request,0,0x10,0x80,args,80);
+    result=app_nxp_loader_exchange(driver,job->id,request,response,&delivery,bounded(&c,2000000));
+    trace(&c,"recovery.information",result,NULL);
+    if (result != OKL_OK) goto finish;
+    if (delivery != OKL_LOADER_SENT_COMPLETE) {
+        result=OKL_PROTOCOL; trace(&c,"recovery.information_delivery",result,NULL); goto finish;
+    }
+    if (okl_loader_information_valid(response)) {
+        result=app_nxp_loader_preserve_resident(driver,job->id,bounded(&c,150000));
+        trace(&c,"recovery.resident",result,NULL);
+        if (result==OKL_OK) c.outcome.resident_proof_job_id=job->id;
+        goto finish;
+    }
+    okl_report report;
+    if (!job->allow_legacy_reconcile || okl_report_decode(&report,response,90)!=OKL_OK ||
+        report.transaction || report.command_class!=0x10 || report.opcode!=0x80 || report.size ||
+        (report.status!=5 && report.status!=8)) {
+        result=OKL_PROTOCOL; trace(&c,"recovery.classify",result,NULL); goto finish;
+    }
+    okl_reply reply; okl_firmware_version version; uint32_t part;
+    const uint8_t legacy[4]={1,3,0,0};
+    result=query(&c,OKL_GET_FIRMWARE,&reply);
+    if (result!=OKL_OK) goto finish;
+    if (okl_reply_decode_firmware(&version,&reply)!=OKL_OK || memcmp(version.component,legacy,4)) {
+        result=OKL_VERIFY; trace(&c,"recovery.version",result,&reply); goto finish;
+    }
+    c.outcome.entry=APP_CONTROLLER_MUTATION_ATTEMPTED;
+    result=okl_nxp_claim(driver,(const uint8_t *)"Open Keylight",13,bounded(&c,600000));
+    trace(&c,"recovery.claim",result,NULL); if(result!=OKL_OK)goto finish;
+    result=query(&c,OKL_GET_CONTROLLER_STATUS,&reply);
+    if(!unsupported_reply(result,&reply,0xfc)) {
+        if (result==OKL_OK) { result=OKL_VERIFY; trace(&c,"recovery.status",result,&reply); }
+        goto finish;
+    }
+    result=query(&c,OKL_GET_PART_ID,&reply);
+    if(result!=OKL_OK)goto finish;
+    if(okl_reply_decode_part_id(&part,&reply)!=OKL_OK || part!=OKL_LOADER_PART_ID) {
+        result=OKL_VERIFY; trace(&c,"recovery.part",result,&reply); goto finish;
+    }
+    okl_light_state state;
+    result=okl_nxp_read_state(driver,&state,bounded(&c,800000));
+    trace(&c,"recovery.state",result,NULL);if(result!=OKL_OK)goto finish;
+    uint8_t effect=state.effect;kl_state off=kl_state_default();off.power=false;
+    result=kl_output_prepare(&off,false,NULL,&effect,output,&c);
+    trace(&c,"recovery.off",result,NULL);if(result!=OKL_OK)goto finish;
+    result=okl_nxp_read_state(driver,&state,bounded(&c,800000));
+    if(result==OKL_OK && (state.effect || state.white_brightness))result=OKL_VERIFY;
+    trace(&c,"recovery.off_readback",result,NULL);if(result!=OKL_OK)goto finish;
+    result=okl_nxp_release(driver,bounded(&c,600000));
+    trace(&c,"recovery.release",result,NULL);
+    if(result==OKL_OK)c.outcome.legacy_reconciled=true;
+finish:
+    if(c.leased)end(&c);
+    if(!c.outcome.resident_proof_job_id && !c.outcome.legacy_reconciled)
+        snprintf(c.outcome.diagnostic_error,sizeof(c.outcome.diagnostic_error),"Recovery failed at %.31s (%d); no retry",c.outcome.stage,c.outcome.transport_result);
+    *outcome=c.outcome;
 }

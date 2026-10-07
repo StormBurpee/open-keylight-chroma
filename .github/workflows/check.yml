@@ -13,8 +13,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: sudo apt-get update && sudo apt-get install -y libcjson-dev clang lld llvm
+      - run: sudo apt-get update && sudo apt-get install -y libcjson-dev clang lld llvm python3-jsonschema
       - run: cmake -S . -B build/host -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" && cmake --build build/host && ctest --test-dir build/host --output-on-failure
+      - run: python3 tests/config/test_contract.py && python3 tests/services/test_recovery_contract.py
       - run: python3 firmware-nxp/build.py
   interfaces:
     runs-on: ubuntu-24.04

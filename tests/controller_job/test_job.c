@@ -19,10 +19,13 @@ static size_t disk_size, pending_size;
 static bool disk_present, pending_present, dirty;
 static int fail_open, fail_read, fail_set, fail_erase, fail_commit, fail_hash;
 static bool commit_despite_error;
+static int reset_reason;
+static uint64_t elapsed_ms;
 
 void app_lock(void) { CHECK(!locked); locked = 1; }
 void app_unlock(void) { CHECK(locked == 1); locked = 0; }
-uint64_t app_now_ms(void) { return 0; }
+uint64_t app_now_ms(void) { return elapsed_ms; }
+int esp_reset_reason(void) { return reset_reason; }
 void app_event_locked(const char *actor, const char *event, const char *detail) {
     CHECK(locked == 1); CHECK(actor && event && detail);
 }
@@ -83,6 +86,7 @@ static void reset(bool retain_disk) {
     atomic_store(&blocked, true); ready(); frees = 0; nvs_calls = 0;
     fail_open = fail_read = fail_set = fail_erase = fail_commit = fail_hash = 0;
     dirty = false; commit_despite_error = false;
+    reset_reason = ESP_RST_POWERON; elapsed_ms = 0;
     if (!retain_disk) { memset(disk, 0, sizeof(disk)); disk_present = false; disk_size = 0; }
 }
 static void initialize(void) {
@@ -432,9 +436,116 @@ static void diagnostic_tests(void) {
         CHECK(!job.resident_proof_job_id && app_controller_update_begin(&id)==503);
     }
 }
+static uint32_t recovery_journal(unsigned changed) {
+    initialize(); app_controller_job j=running();
+    job.source=j.source=OKL_LOADER_FROM_LEGACY_1_3;
+    okl_loader_audit a=audit_for(&j);a.phase=OKL_LOADER_PRECOMMIT_FAILED;a.result=OKL_LOADER_IO;
+    if(changed==1)a.erase_attempted=1;
+    if(changed==2)a.commit_attempted=1;
+    if(changed==3)a.abort_attempted=1;
+    if(changed==4)a.program_blocks_acked=1;
+    if(changed==5)a.readback_blocks_verified=1;
+    if(changed==6)a.complete_bank_verified=1;
+    if(changed==7)a.phase=OKL_LOADER_ENTERING;
+    if(changed==8)job.source=a.source=OKL_LOADER_FROM_ORIGINAL;
+    CHECK(!app_controller_update_persist(j.id,&a));
+    reset(true);CHECK(app_controller_update_init()==ESP_OK && app_controller_update_blocked());
+    CHECK(job.recovery_available && job.allow_legacy_reconcile==(changed==0));
+    return j.id;
+}
+static void recovery_tests(void) {
+    initialize();app_controller_job traced=running();
+    app_controller_worker_outcome captured={.transport_snapshot=true,.raw_reply_received=true,
+        .transport_phase=3,.ready=1,.reply_kind=0,.reply_status=2,.reply_class=16,.reply_opcode=128,.reply_size=80};
+    strcpy(captured.stage,"loader.information");memset(captured.reply_sha256,'a',64);captured.reply_sha256[64]=0;
+    unsigned trace_calls=nvs_calls;
+    app_controller_update_record_outcome(traced.id+1,&captured);CHECK(!job.diagnostic.stage[0]);
+    app_controller_update_record_outcome(traced.id,&captured);CHECK(nvs_calls==trace_calls);
+    cJSON *trace_json=app_controller_update_json();cJSON *wire=cJSON_GetObjectItemCaseSensitive(trace_json,"transport_diagnostic");
+    CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(wire,"parsed_reply_received")));
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(wire,"raw_reply_received")));
+    CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(wire,"routing_tag")->valuestring,"000000000000"));
+    CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(wire,"report_sha256")->valuestring,captured.reply_sha256));
+    CHECK(cJSON_GetObjectItemCaseSensitive(wire,"reply_opcode")->valueint==128);cJSON_Delete(trace_json);
+    initialize();CHECK(app_controller_recovery_begin(1,true)==409);
+    uint32_t id=recovery_journal(0);
+    unsigned calls=nvs_calls;
+    CHECK(app_controller_recovery_begin(id,false)==400);
+    CHECK(app_controller_recovery_begin(0,true)==400);
+    CHECK(app_controller_recovery_begin(id+1,true)==409);
+    reset_reason=3;CHECK(app_controller_recovery_begin(id,true)==503);
+    reset_reason=ESP_RST_POWERON;elapsed_ms=180000;CHECK(app_controller_recovery_begin(id,true)==503);
+    elapsed_ms=179999;app.updating=true;CHECK(app_controller_recovery_begin(id,true)==409);app.updating=false;
+    CHECK(nvs_calls==calls && disk_present && !job.recovery_only);
+    CHECK(app_controller_recovery_begin(id,true)==202);
+    CHECK(app_controller_recovery_begin(id,true)==409);
+    app_controller_job j;CHECK(app_controller_update_take(&j));
+    CHECK(j.recovery_only && j.allow_legacy_reconcile && !j.package && j.id==id);
+    CHECK(app_controller_update_blocked() && !job.recovery_available && !app.controller_ready);
+    CHECK(!app_controller_update_take(&j));
+    app_controller_worker_outcome proof={.synchronized=true,.resident_proof_job_id=id};
+    CHECK(!app_controller_recovery_finish(id+1,&proof));
+    CHECK(app.updating && job.state==JOB_RUNNING);
+    CHECK(!app_controller_recovery_finish(id,&proof));
+    CHECK(!app.updating && disk_present && app_controller_update_blocked() && job.resident_proof_job_id==id);
+    CHECK(nvs_calls==calls && !frees);
+    CHECK(app_controller_recovery_begin(id,true)==503);
+    CHECK(!app_controller_recovery_finish(id,&proof));
+    cJSON *json=app_controller_update_json();CHECK(json);
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json,"resident_recovery_ready")));
+    CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(json,"legacy_reconciled")));
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json,"recovery_attempted")));
+    cJSON_Delete(json);
+    uint32_t next;CHECK(app_controller_update_begin_role(&next,1)==200 && next==id+1);
+    CHECK(job.source==OKL_LOADER_FROM_FRESH_RESIDENT && job.resident_proof_job_id==id);
+    app_controller_update_cancel_upload(next);
+
+    for(unsigned invalid=0;invalid<5;++invalid) {
+        id=recovery_journal(0);CHECK(app_controller_recovery_begin(id,true)==202);
+        CHECK(app_controller_update_take(&j));calls=nvs_calls;
+        proof=(app_controller_worker_outcome){.synchronized=true,.resident_proof_job_id=id};
+        if(invalid==0)proof.synchronized=false;
+        if(invalid==1)proof.resident_proof_job_id=id+1;
+        if(invalid==2)proof.resident_proof_job_id=0;
+        if(invalid==3)proof.legacy_reconciled=true; /* contradictory proof */
+        CHECK(!app_controller_recovery_finish(id,invalid==4?NULL:&proof));
+        CHECK(!job.resident_proof_job_id && disk_present && app_controller_update_blocked() && nvs_calls==calls);
+        CHECK(!app.updating && !app.controller_ready && app_controller_recovery_begin(id,true)==503);
+    }
+    for(unsigned changed=0;changed<9;++changed) {
+        id=recovery_journal(changed);CHECK(app_controller_recovery_begin(id,true)==202);
+        CHECK(app_controller_update_take(&j));calls=nvs_calls;
+        proof=(app_controller_worker_outcome){.synchronized=true,.legacy_reconciled=true};
+        CHECK(app_controller_recovery_finish(id,&proof)==(changed==0));
+        CHECK(app_controller_update_blocked()==(changed!=0) && disk_present==(changed!=0));
+        CHECK(!app.controller_ready && !app.updating && !frees);
+        CHECK((nvs_calls>calls)==(changed==0));
+    }
+    for(unsigned failure=0;failure<4;++failure) {
+        id=recovery_journal(0);CHECK(app_controller_recovery_begin(id,true)==202);CHECK(app_controller_update_take(&j));
+        if(failure==0)fail_open=1;
+        if(failure==1)fail_erase=1;
+        if(failure>=2)fail_commit=1;
+        if(failure==3)commit_despite_error=true;
+        proof=(app_controller_worker_outcome){.synchronized=true,.legacy_reconciled=true};
+        CHECK(!app_controller_recovery_finish(id,&proof));
+        CHECK(app_controller_update_blocked() && !app.controller_ready && !app.updating && !job.resident_proof_job_id);
+    }
+    /* A valid journal is required even after power-on. Warm OTA, corrupt or
+     * unreadable storage never establishes a fresh reset through software. */
+    for(unsigned failure=0;failure<3;++failure) {
+        id=recovery_journal(0);reset(true);
+        if(failure==0)reset_reason=3;
+        if(failure==1)disk[30]^=1;
+        if(failure==2)fail_read=1;
+        CHECK(app_controller_update_init()==ESP_OK && app_controller_update_blocked());
+        CHECK(!job.recovery_available);
+        CHECK(app_controller_recovery_begin(id,true)!=202);
+    }
+}
 int main(void) {
     admission_tests(); package_tests(); persistence_tests(); reboot_tests(); finish_tests(); rejection_tests(); diagnostic_tests();
-    reset(false); CHECK(!locked);
+    recovery_tests();reset(false); CHECK(!locked);
     printf("controller job: %u assertions passed\n", checks);
     return 0;
 }

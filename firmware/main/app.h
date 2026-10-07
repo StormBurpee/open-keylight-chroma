@@ -77,6 +77,7 @@ void app_button_start(void);
  * package only on 202; the caller frees it on all other outcomes. */
 int app_controller_update_begin(uint32_t *job_id);
 int app_controller_update_begin_role(uint32_t *job_id, uint8_t role);
+int app_controller_recovery_begin(uint32_t expected_job_id, bool power_cycle_acknowledged);
 int app_controller_update_submit(uint32_t job_id, uint8_t *package, size_t size);
 void app_controller_update_cancel_upload(uint32_t job_id);
 cJSON *app_controller_update_json(void);

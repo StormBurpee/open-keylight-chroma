@@ -12,6 +12,8 @@ typedef int nvs_handle_t;
 #define ESP_ERR_NVS_INVALID_LENGTH 2
 #define NVS_READONLY 0
 #define NVS_READWRITE 1
+#define ESP_RST_POWERON 1
+int esp_reset_reason(void);
 esp_err_t nvs_open(const char *, int, nvs_handle_t *);
 esp_err_t nvs_get_blob(nvs_handle_t, const char *, void *, size_t *);
 esp_err_t nvs_set_blob(nvs_handle_t, const char *, const void *, size_t);

@@ -13,6 +13,10 @@ static blob stored[16], pending;
 static unsigned stored_count, locked, writes, commits, closes, random_counter, recovery_requests;
 static unsigned issued_routes, submit_calls, settings_calls, update_calls, confirm_calls, session_closes;
 static unsigned controller_update_calls, controller_status_calls;
+static unsigned controller_recovery_calls;
+static uint32_t controller_recovery_id;
+static int controller_recovery_result = 202;
+static bool trial_pending;
 static unsigned request_reads, response_code, server_handlers;
 static uint64_t now_ms, receive_delay;
 static size_t body_used, chunk;
@@ -90,7 +94,7 @@ int mbedtls_sha256(const unsigned char *value, size_t size, unsigned char *out, 
 const esp_app_desc_t *esp_app_get_description(void) { return &descriptor; }
 unsigned esp_get_free_heap_size(void) { return 100000; }
 unsigned esp_reset_reason(void) { return 1; }
-bool app_trial_pending(void) { return false; }
+bool app_trial_pending(void) { return trial_pending; }
 esp_err_t app_trial_confirm(void) { ++confirm_calls; return ESP_OK; }
 cJSON *app_state_json(void) { return cJSON_CreateObject(); }
 int app_submit(const kl_patch *patch, const char *actor, uint32_t revision, bool expected) {
@@ -104,6 +108,10 @@ esp_err_t http_scenes(httpd_req_t *request) { return http_json(request, 200, cJS
 esp_err_t http_update(httpd_req_t *request) { ++update_calls; return http_json(request, 202, cJSON_CreateObject()); }
 esp_err_t http_controller_update(httpd_req_t *request) { ++controller_update_calls; return http_json(request, 202, cJSON_CreateObject()); }
 cJSON *app_controller_update_json(void) { ++controller_status_calls; return cJSON_CreateObject(); }
+int app_controller_recovery_begin(uint32_t id, bool acknowledged) {
+    CHECK(acknowledged); ++controller_recovery_calls; controller_recovery_id=id;
+    return controller_recovery_result;
+}
 static const char *header(const char *name) {
     if (!strcmp(name, "Host")) return header_host;
     if (!strcmp(name, "Origin")) return header_origin;
@@ -356,7 +364,7 @@ static void http_tests(void) {
     cJSON *reply = cJSON_Parse(response_body); CHECK(reply); const cJSON *value = cJSON_GetObjectItemCaseSensitive(reply, "token");
     CHECK(cJSON_IsString(value) && strlen(value->valuestring) == 64); memcpy(token, value->valuestring, 65); cJSON_Delete(reply);
     snprintf(auth, sizeof(auth), "Bearer %s", token);
-    const char *write_routes[] = {"/api/v1/state", "/api/v1/settings", "/api/v1/scenes/1", "/api/v1/confirm", "/api/v1/update", "/api/v1/controller/update", "/api/v1/clients/0123456789abcdef"};
+    const char *write_routes[] = {"/api/v1/state", "/api/v1/settings", "/api/v1/scenes/1", "/api/v1/confirm", "/api/v1/update", "/api/v1/controller/update", "/api/v1/controller/recover", "/api/v1/clients/0123456789abcdef"};
     for (unsigned i = 0; i < sizeof(write_routes)/sizeof(write_routes[0]); ++i) {
         request_reset("{}"); request.uri = write_routes[i]; request.method = HTTP_POST; request.content_len = 2;
         CHECK(route(&request) == ESP_OK && response_code == 401 && !request_reads);
@@ -394,6 +402,42 @@ static void http_tests(void) {
     CHECK(route(&request) == ESP_OK && response_code == 202 && controller_update_calls == 1);
     request.method = HTTP_DELETE;
     CHECK(route(&request) == ESP_OK && response_code == 405 && controller_update_calls == 1);
+    const char *bad_recovery[] = {"{}", "[]", "null", "{\"job_id\":1}",
+        "{\"job_id\":1,\"power_cycle_acknowledged\":false}",
+        "{\"job_id\":1,\"power_cycle_acknowledged\":1}",
+        "{\"job_id\":0,\"power_cycle_acknowledged\":true}",
+        "{\"job_id\":-1,\"power_cycle_acknowledged\":true}",
+        "{\"job_id\":1.5,\"power_cycle_acknowledged\":true}",
+        "{\"job_id\":4294967296,\"power_cycle_acknowledged\":true}",
+        "{\"job_id\":\"1\",\"power_cycle_acknowledged\":true}",
+        "{\"job_id\":true,\"power_cycle_acknowledged\":true}",
+        "{\"job_id\":1,\"power_cycle_acknowledged\":true,\"extra\":0}",
+        "{\"job_id\":1,\"job_id\":2,\"power_cycle_acknowledged\":true}"};
+    for (unsigned i=0;i<sizeof(bad_recovery)/sizeof(bad_recovery[0]);++i) {
+        request_reset(bad_recovery[i]); header_auth=auth;
+        request.uri="/api/v1/controller/recover"; request.method=HTTP_POST; request.content_len=strlen(body);
+        CHECK(route(&request)==ESP_OK && response_code==400 && !controller_recovery_calls);
+    }
+    request_reset("{\"job_id\":4294967295,\"power_cycle_acknowledged\":true}");
+    request.uri="/api/v1/controller/recover"; request.method=HTTP_POST; request.content_len=strlen(body);
+    header_auth=auth; header_origin="http://evil";
+    CHECK(route(&request)==ESP_OK && response_code==403 && !controller_recovery_calls && !request_reads);
+    header_origin="http://192.0.2.1";
+    CHECK(route(&request)==ESP_OK && response_code==202 && controller_recovery_calls==1 && controller_recovery_id==UINT32_MAX);
+    reply=cJSON_Parse(response_body);
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(reply,"accepted")) &&
+        cJSON_GetObjectItemCaseSensitive(reply,"job_id")->valuedouble==UINT32_MAX); cJSON_Delete(reply);
+    for (int failure_code=0;failure_code<3;++failure_code) {
+        const int statuses[]={400,409,503}; controller_recovery_result=statuses[failure_code];
+        request_reset("{\"job_id\":1,\"power_cycle_acknowledged\":true}"); header_auth=auth;
+        request.uri="/api/v1/controller/recover"; request.method=HTTP_POST; request.content_len=strlen(body);
+        CHECK(route(&request)==ESP_OK && response_code==(unsigned)statuses[failure_code]);
+    }
+    request_reset("{\"job_id\":1,\"power_cycle_acknowledged\":true}"); header_auth=auth;
+    request.uri="/api/v1/controller/recover"; request.method=HTTP_POST; request.content_len=strlen(body);
+    trial_pending=true; unsigned prior_recovery_calls=controller_recovery_calls;
+    CHECK(route(&request)==ESP_OK && response_code==409 && controller_recovery_calls==prior_recovery_calls);
+    trial_pending=false; controller_recovery_result=202;
     request_reset("{\"power\":true}"); header_auth = auth; request.uri = "/api/v1/state"; request.method = HTTP_PATCH; request.content_len = strlen(body);
     CHECK(route(&request) == ESP_OK && response_code == 202 && submit_calls == 1);
     const char *bad_json[] = {"{", "{}{}", "{\"label\":\"a\",\"label\":\"b\"}", "{\"label\":\"\\u0000evil\"}", "[]", "{\"label\":1}", "{\"label\":\"a\",\"extra\":0}"};

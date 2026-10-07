@@ -9,13 +9,16 @@
 static okl_result native_execute(okl_nxp *, const okl_request *, okl_reply *, uint64_t);
 static okl_result native_claim(okl_nxp *, const uint8_t *, size_t, uint64_t);
 static okl_result native_read(okl_nxp *, okl_light_state *, uint64_t);
+static okl_result native_release(okl_nxp *, uint64_t);
 #define okl_nxp_execute native_execute
 #define okl_nxp_claim native_claim
 #define okl_nxp_read_state native_read
+#define okl_nxp_release native_release
 #include "../../firmware/main/controller_worker.c"
 #undef okl_nxp_execute
 #undef okl_nxp_claim
 #undef okl_nxp_read_state
+#undef okl_nxp_release
 #include "../controller_job/off_fixture.h"
 
 static unsigned checks, cases;
@@ -49,6 +52,11 @@ static uint32_t read32(const uint8_t *p) { return (uint32_t)p[0]<<24 | (uint32_t
 static void word(uint8_t *p,uint32_t n) { p[0]=(uint8_t)(n>>24);p[1]=(uint8_t)(n>>16);p[2]=(uint8_t)(n>>8);p[3]=(uint8_t)n; }
 static void little(uint8_t *p,uint32_t n) { p[3]=(uint8_t)(n>>24);p[2]=(uint8_t)(n>>16);p[1]=(uint8_t)(n>>8);p[0]=(uint8_t)n; }
 static uint64_t test_clock(void *unused) { (void)unused;return m.now; }
+esp_err_t app_nxp_transport_init(okl_nxp *d,const uint8_t id[6]) { (void)d;(void)id;CHECK(false);return -1; }
+okl_result app_nxp_transport_snapshot(okl_nxp *d,app_nxp_transport_diagnostic *out,uint64_t deadline) {
+    (void)out;CHECK(d==&m.driver && deadline>m.now);return OKL_IO;
+}
+static okl_result native_release(okl_nxp *d,uint64_t deadline) { (void)d;(void)deadline;CHECK(false);return OKL_IO; }
 /* Equality oracle for SHA boundary injection. Real SHA256/package admission is
  * independently tested by tests/loader's Python hashlib-to-C integration. */
 int mbedtls_sha256(const unsigned char *p,size_t n,unsigned char out[32],int is224) {

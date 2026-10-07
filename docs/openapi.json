@@ -3,7 +3,7 @@
   "info": {
     "title": "Open Keylight Chroma local API",
     "version": "1.0.0",
-    "description": "Contract for the original ESP application, reviewed against the handlers. This is not a hardware qualification or release claim. HTTP uses port 80 on a trusted LAN; no TLS listener or cross-origin API. Host must be the device IP, hostname, hostname.local, or setup IP 192.168.4.1, optionally followed by :80. If supplied, Origin must equal http:// plus the exact Host value. API routes accept no query parameters. Public reads expose metadata; mutations and client listing require a paired bearer token, except POST /pair. JSON bodies are 1–2048 bytes, read within 10 seconds; malformed, duplicate or unknown fields and NUL are rejected. String limits are UTF-8 byte limits, recorded by x-maxUtf8Bytes and x-minUtf8Bytes. JSON replies use Cache-Control: no-store and Connection: close. Errors can follow partial hardware/update work; do not infer that a failed command restored the previous state."
+    "description": "Contract for the original ESP application, reviewed against the handlers. This is not a hardware qualification or release claim. HTTP uses port 80 on a trusted LAN; no TLS listener or cross-origin API. Host must be the device IP, hostname, hostname.local, or setup IP 192.168.4.1, optionally followed by :80. If supplied, Origin must equal http:// plus the exact Host value. API routes accept no query parameters. Public reads expose metadata; mutations and client listing require a paired bearer token, except POST /pair. JSON bodies are 1\u00e2\u20ac\u201c2048 bytes, read within 10 seconds; malformed, duplicate or unknown fields and NUL are rejected. String limits are UTF-8 byte limits, recorded by x-maxUtf8Bytes and x-minUtf8Bytes. JSON replies use Cache-Control: no-store and Connection: close. Errors can follow partial hardware/update work; do not infer that a failed command restored the previous state."
   },
   "servers": [
     {
@@ -841,7 +841,7 @@
       "post": {
         "operationId": "uploadApplication",
         "summary": "Verify an application image and schedule reboot",
-        "description": "Application-only OTA into the existing inactive ESP slot. Requires a confirmed current trial and no concurrent upload, otherwise 409. Exact Content-Type application/octet-stream, known Content-Length of 288–1572864 bytes (also within the actual slot), lowercase X-SHA256 matching the full body, and ESP image validation are required. The total upload budget is 120 seconds. Failure schedules no reboot; the inactive slot may have been modified. Never upload a bootloader, partition table, NXP image or merged flash image. 202 schedules reboot; it does not prove the new image booted. Reconnect, verify identity and operation, then confirm its 180-second trial. Do not automatically retry an ambiguous response.",
+        "description": "Application-only OTA into the existing inactive ESP slot. Requires a confirmed current trial and no concurrent upload, otherwise 409. Exact Content-Type application/octet-stream, known Content-Length of 288\u00e2\u20ac\u201c1572864 bytes (also within the actual slot), lowercase X-SHA256 matching the full body, and ESP image validation are required. The total upload budget is 120 seconds. Failure schedules no reboot; the inactive slot may have been modified. Never upload a bootloader, partition table, NXP image or merged flash image. 202 schedules reboot; it does not prove the new image booted. Reconnect, verify identity and operation, then confirm its 180-second trial. Do not automatically retry an ambiguous response.",
         "responses": {
           "202": {
             "description": "Verify an application image and schedule reboot",
@@ -1040,6 +1040,55 @@
             "$ref": "#/components/responses/Error"
           },
           "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/controller/recover": {
+      "post": {
+        "operationId": "recoverController",
+        "summary": "Classify the controller after an acknowledged power cycle",
+        "description": "Requires a confirmed ESP application, a valid blocked controller journal, a fresh power-on reset within 180 seconds, and explicit acknowledgment that the light was disconnected from power. The sole worker initializes the untouched SPI transport, waits silently, and checks the resident loader once. A verified fresh loader admits a new explicit package while preserving the journal. An entry-only legacy failure may instead reconcile the unchanged supported application after verifying Off. It does not retry a firmware upload or confirm a diagnostic image. Poll /controller/update for the result.",
+        "security": [
+          {
+            "BearerToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ControllerRecoveryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Recovery classification queued; no installation has completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControllerUpdateAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
             "$ref": "#/components/responses/Error"
           },
           "503": {
@@ -1474,7 +1523,7 @@
                 "x-minUtf8Bytes": 8
               }
             ],
-            "description": "Empty for an open network, otherwise 8–64 UTF-8 bytes; control characters are rejected."
+            "description": "Empty for an open network, otherwise 8\u00e2\u20ac\u201c64 UTF-8 bytes; control characters are rejected."
           },
           "mqtt": {
             "type": "object",
@@ -1488,7 +1537,7 @@
                 "maxLength": 128,
                 "x-maxUtf8Bytes": 128,
                 "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
-                "description": "mqtt:// or mqtts:// with a DNS/IPv4 host and optional port 1–65535. No embedded credentials, path, query or IPv6 literal. Empty is allowed only when the resulting configuration is disabled. enabled and URI are validated together."
+                "description": "mqtt:// or mqtts:// with a DNS/IPv4 host and optional port 1\u00e2\u20ac\u201c65535. No embedded credentials, path, query or IPv6 literal. Empty is allowed only when the resulting configuration is disabled. enabled and URI are validated together."
               },
               "username": {
                 "type": "string",
@@ -1855,7 +1904,7 @@
           },
           "firmware_elf_sha256": {
             "type": "string",
-            "pattern": "^[0-9a-f]{64}$",
+            "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
             "description": "SHA-256 of the running ESP ELF, embedded by the build. This identifies the build, not the OTA binary file."
           },
           "api_version": {
@@ -2207,6 +2256,98 @@
               "snapshot_words",
               "error"
             ]
+          },
+          "power_cycle_recovery_available": {
+            "type": "boolean"
+          },
+          "recovery_attempted": {
+            "type": "boolean"
+          },
+          "legacy_reconciled": {
+            "type": "boolean"
+          },
+          "transport_diagnostic": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "stage": {
+                "type": "string",
+                "maxLength": 31
+              },
+              "result": {
+                "type": "integer"
+              },
+              "parsed_reply_received": {
+                "type": "boolean"
+              },
+              "raw_reply_received": {
+                "type": "boolean"
+              },
+              "snapshot_available": {
+                "type": "boolean"
+              },
+              "ready": {
+                "type": "boolean"
+              },
+              "phase": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5
+              },
+              "reply_kind": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "reply_status": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "reply_class": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "reply_opcode": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "reply_size": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "routing_tag": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{12}(?![\\s\\S])"
+              },
+              "report_sha256": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+              }
+            },
+            "required": [
+              "stage",
+              "result",
+              "parsed_reply_received",
+              "raw_reply_received",
+              "snapshot_available",
+              "ready",
+              "phase",
+              "reply_kind",
+              "reply_status",
+              "reply_class",
+              "reply_opcode",
+              "reply_size",
+              "routing_tag",
+              "report_sha256"
+            ],
+            "description": "Cached transport evidence for the last operation. Raw fields can describe an invalid report; they do not establish successful parsing or correlation. Unavailable snapshots use zero values with snapshot_available:false."
           }
         },
         "required": [
@@ -2246,6 +2387,24 @@
         "required": [
           "accepted",
           "job_id"
+        ]
+      },
+      "ControllerRecoveryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "power_cycle_acknowledged": {
+            "const": true
+          }
+        },
+        "required": [
+          "job_id",
+          "power_cycle_acknowledged"
         ]
       }
     }

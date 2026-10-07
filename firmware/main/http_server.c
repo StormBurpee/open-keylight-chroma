@@ -195,6 +195,23 @@ static esp_err_t route(httpd_req_t *request) {
     if (!strcmp(request->uri, "/api/v1/settings")) return http_settings(request);
     if (!strncmp(request->uri, "/api/v1/scenes", 14)) return http_scenes(request);
     if (!strcmp(request->uri, "/api/v1/update") && request->method == HTTP_POST) return http_update(request);
+    if (!strcmp(request->uri, "/api/v1/controller/recover") && request->method == HTTP_POST) {
+        if (app_trial_pending()) return http_error(request, 409, "Confirm the ESP firmware trial before controller recovery");
+        cJSON *json = http_read_json(request);
+        cJSON *ack = cJSON_GetObjectItemCaseSensitive(json, "power_cycle_acknowledged");
+        cJSON *id = cJSON_GetObjectItemCaseSensitive(json, "job_id");
+        bool valid = cJSON_IsObject(json) && cJSON_GetArraySize(json) == 2 && cJSON_IsTrue(ack) &&
+            cJSON_IsNumber(id) && id->valuedouble >= 1 && id->valuedouble <= UINT32_MAX &&
+            id->valuedouble == (uint32_t)id->valuedouble;
+        uint32_t expected = valid ? (uint32_t)id->valuedouble : 0;
+        cJSON_Delete(json);
+        if (!valid) return http_error(request, 400, "Provide job_id and an explicit power_cycle_acknowledged:true");
+        int status = app_controller_recovery_begin(expected, true);
+        if (status != 202) return http_error(request, status, "Recovery needs a fresh physical power cycle, matching journal and no earlier attempt");
+        cJSON *response = cJSON_CreateObject(); cJSON_AddBoolToObject(response, "accepted", true);
+        cJSON_AddNumberToObject(response, "job_id", expected);
+        return http_json(request, 202, response);
+    }
     if (!strcmp(request->uri, "/api/v1/controller/update")) {
         if (request->method == HTTP_GET) return http_json(request, 200, app_controller_update_json());
         if (request->method == HTTP_POST) return http_controller_update(request);

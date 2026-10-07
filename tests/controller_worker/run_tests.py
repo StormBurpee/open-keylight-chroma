@@ -40,12 +40,24 @@ print(result.stdout, end="")
 if result.returncode:
     print(result.stderr, file=sys.stderr, end="")
     result.check_returncode()
+recovery_source = HERE / "test_recovery.c"
+recovery_exe = OUT / ("test_recovery.exe" if os.name == "nt" else "test_recovery")
+recovery_command = [str(recovery_source) if part == str(sources[0]) else part for part in command]
+recovery_command[-1] = str(recovery_exe)
+subprocess.run(recovery_command, check=True)
+recovery_result = subprocess.run([str(recovery_exe)], capture_output=True, text=True, env=env)
+print(recovery_result.stdout, end="")
+if recovery_result.returncode:
+    print(recovery_result.stderr, file=sys.stderr, end="")
+    recovery_result.check_returncode()
+sources += [recovery_source]
 sources += [ROOT / "firmware/main/controller_worker.c", ROOT / "firmware/main/controller_worker.h",
+            ROOT / "firmware/main/controller_diagnostic.h",
             ROOT / "firmware/main/controller_job.h", ROOT / "firmware/main/nxp_transport.h",
             ROOT / "tests/worker/worker_mocks.h", Path(__file__),
             components / "keylight_loader/include/okl_loader.h", components / "keylight_nxp/include/okl_nxp.h"]
 report = {"status": "pass", "sanitizer": "AddressSanitizer", "device_operations": 0,
-          "output": result.stdout.strip(), "source_sha256": {
+          "output": (result.stdout + recovery_result.stdout).strip(), "source_sha256": {
               p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
           "limits": ["SPI, native driver, clock, SHA and durable storage boundaries mocked",
                      "Actual controller-worker callbacks, loader sequencing, report codec and output policy compiled",
