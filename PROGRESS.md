@@ -1,5 +1,17 @@
 # Development record
 
+## 2026-10-07 — first independent ESP boot
+
+The first independent ESP application reached 100% OTA acceptance, booted, imported the existing Wi-Fi credentials and served its embedded API on the original network address. Its observed free heap was 179,452 bytes. The NXP version getter returned 1.3.0.0, but a subsequent capability query was rejected by its retained ownership gate. Lighting readiness stayed closed; no control qualification or trial confirmation was attempted. At the application trial deadline, the lamp returned to the previously installed ESP image in the original fallback slot without a power cycle. This verifies this healthy-app fallback path, not recovery from an early crash.
+
+The preceding all-off NXP experiment stopped on a staging readback timeout before commit. It never ran. The working NXP image was restored with all 448 blocks acknowledged and read back. The timeout cause remains unresolved; no original PWM output qualification is claimed.
+
+## Dashboard art direction and implementation
+
+The dashboard now follows a generated concept refined in two passes: graphite surfaces, ivory typography, copper controls and an atmospheric colour preview. The source concept and photographic scene atlas are retained in `assets/design` with their prompts. Runtime photography is a 14,160-byte WebP; no physical lamp is depicted. Controls remain semantic HTML, React and Radix, including the keyboard-accessible hue/saturation/value picker, exact RGB and hex entry, scene recall and adjustable fades. Scenes in production come from the device; populated preview scenes are isolated demo data.
+
+Browser review covered the desktop Light, Scenes and System views, and narrow layouts at 300 and 868 CSS pixels without horizontal overflow. The production asset package is 152,536 compressed bytes, below the 235,520-byte budget. This design is implemented locally; it was not in the first ESP trial image described above.
+
 ## 2026-10-07 — independent firmware begins
 
 The preceding private hardware investigation demonstrated application OTA, RGB/white control and bounded smooth transitions in an additive stock application. That is evidence about the interface, not evidence that this independent firmware boots.
@@ -83,3 +95,7 @@ A fully correlated unsupported target can now reject an update before ownership 
 Fresh ordinary bootstrap must reopen readiness, and old effects or scenes are not replayed. A new Off accepted during package reception retains its exact revision and is attempted once after a safe rejection; a failed or already attempted Off is never replayed. Its regression failed before the worker correction and passed afterward.
 
 Targeted verification passed 4,041,255 real adapter/core assertions, 10,347 journal-manager assertions, 17,979 worker assertions, 47 startup assertions and 1,394 adapter-harness assertions. Windows and WSL sanitizer runs and the ESP-IDF build passed. These are offline results only; this change does not claim live deployment or controller-update qualification.
+
+## Dashboard behavior review
+
+Independent control-flow tests exposed two stale-draft regressions: opening Effects during a colour preview prevented later state updates, and recalling a scene from Light could leave the old colour draft visible. Both cases failed before the shared draft-cancellation fix and pass afterward. Seven new integration tests also cover pointer cancellation against newer controller state, main-tab cancellation with no late write, actual scene save/recall, retained fade duration, and a rejected scene request without retry. The targeted suite and TypeScript build pass; these checks use the explicitly isolated transport and make no hardware claims.

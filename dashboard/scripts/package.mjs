@@ -25,7 +25,9 @@ async function walk(relative = "") {
           ? "text/css; charset=utf-8"
           : name.endsWith(".js")
             ? "text/javascript; charset=utf-8"
-            : "application/octet-stream",
+            : name.endsWith(".webp")
+              ? "image/webp"
+              : "application/octet-stream",
       size: data.length,
       gzip_size: gzip.length,
       sha256: createHash("sha256").update(data).digest("hex"),

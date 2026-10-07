@@ -1,8 +1,12 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   Sun,
-  Moon,
-  Power,
   ArrowUpRight,
   Check,
   Wifi,
@@ -38,6 +42,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { WifiSetup, ClientAccess } from "./SystemAccess";
 import { ControllerUpdate } from "./ControllerUpdate";
+import { ColourWheel } from "./ColourWheel";
+import sceneAtlas from "./assets/scene-atlas.webp";
 import {
   HttpTransport,
   StudioStore,
@@ -65,6 +71,12 @@ const initial: Output = {
 const effectLabel = (name: string) =>
   ({ none: "Still light", aurora: "Aurora", breathe: "Slow breathe" })[name] ||
   name;
+const scenePosition = (state: Output) => {
+  const { r, g, b } = state.rgb;
+  const index =
+    state.mode === "white" ? 0 : b > r * 1.7 ? 1 : r > b * 1.3 && r > g ? 2 : 3;
+  return `${(index * 100) / 3}% center`;
+};
 const controllerLabel = (status?: string) =>
   ({
     starting: "Starting",
@@ -94,7 +106,7 @@ export default function App() {
           return;
         }
         const { DemoTransport } = await import("./demo");
-        transport = new DemoTransport();
+        transport = new DemoTransport(true);
       } else {
         transport = new HttpTransport();
         try {
@@ -134,6 +146,7 @@ export function Studio({ store }: { store: StudioStore }) {
   const view = useSyncExternalStore(store.subscribe, store.getSnapshot),
     { device, state, busy, stale } = view;
   const [tab, setTab] = useState("light"),
+    [lightPanel, setLightPanel] = useState("white"),
     [draft, setDraft] = useState<Output>(initial),
     [hex, setHex] = useState("#ffaa5a"),
     [hexError, setHexError] = useState("");
@@ -161,8 +174,19 @@ export function Studio({ store }: { store: StudioStore }) {
     [updating, setUpdating] = useState(false),
     [updateAccepted, setUpdateAccepted] = useState(false),
     [copied, setCopied] = useState(false);
+  const lastFade = useRef(800);
   const editing = useRef(false),
     fileRef = useRef<HTMLInputElement>(null);
+  const cancelDraft = useCallback(() => {
+    editing.current = false;
+    setHexError("");
+    const current = store.getSnapshot().state;
+    if (current) {
+      setDraft(current.desired);
+      setHex(rgbHex(current.desired.rgb));
+    }
+  }, [store]);
+  useEffect(cancelDraft, [tab, cancelDraft]);
   useEffect(() => {
     void store.connect();
     const timer = setInterval(() => {
@@ -173,13 +197,24 @@ export function Studio({ store }: { store: StudioStore }) {
   useEffect(() => {
     if (state && !editing.current) {
       setDraft(state.desired);
+      if (state.desired.transition_ms > 0)
+        lastFade.current = state.desired.transition_ms;
       setHex(rgbHex(state.desired.rgb));
     }
   }, [state]);
+  useEffect(() => {
+    if (state)
+      setLightPanel(
+        state.desired.effect === "none" ? state.desired.mode : "effects",
+      );
+  }, [state?.desired.mode, state?.desired.effect]);
   const readResources = async () => {
     setResourceError("");
     try {
-      if (tab === "scenes" && device?.capabilities.scenes) {
+      if (
+        (tab === "scenes" || tab === "light") &&
+        device?.capabilities.scenes
+      ) {
         const result = await store.transport.request<{ scenes: Scene[] }>(
           "GET",
           "/scenes",
@@ -307,6 +342,7 @@ export function Studio({ store }: { store: StudioStore }) {
     }
   };
   const applyScene = async (scene: Scene) => {
+    cancelDraft();
     try {
       await store.write(
         "POST",
@@ -401,13 +437,8 @@ export function Studio({ store }: { store: StudioStore }) {
           href={store.transport.demo ? "/?demo=1" : "/"}
           aria-label="Open Keylight home"
         >
-          <span className="brand-mark">
-            <Sun size={25} />
-          </span>
-          <span>
-            open<span className="brand-light">keylight</span>
-            <small>YOUR LIGHT. YOUR CONTROL.</small>
-          </span>
+          <span className="brand-mark" />
+          <span>OPEN KEYLIGHT</span>
         </a>
         <div className="header-right">
           <span className={"connection " + (stale ? "offline" : "")}>
@@ -428,27 +459,49 @@ export function Studio({ store }: { store: StudioStore }) {
       <main>
         <div className="intro">
           <div>
-            <p className="eyebrow">
-              THE LOCAL LIGHT STUDIO <span> / </span>{" "}
-              {device?.id || "AWAITING DEVICE"}
-            </p>
-            <h1>
-              {device?.name || "Make room for light"}
-              <span>.</span>
-            </h1>
-            <p className="intro-copy">Set the mood. Keep the moment.</p>
-          </div>
-          <div className="device-tag">
-            <span className="tag-line" />
-            <div>
-              <strong>{device?.model || "Open Keylight"}</strong>
-              <span>
+            <p className="eyebrow">YOUR STUDIO</p>
+            <div className="title-line">
+              <h1>{device?.name || "Open Keylight"}</h1>
+              <span className={"connection " + (stale ? "offline" : "")}>
+                <i />
                 {store.transport.demo
-                  ? "Interactive preview"
-                  : device
-                    ? `Firmware ${device.firmware}`
-                    : "Connect to your device to begin"}
+                  ? "Preview"
+                  : stale
+                    ? "Offline"
+                    : "Connected"}
               </span>
+            </div>
+          </div>
+          <div className="header-controls">
+            <Button
+              className={"power-button " + (draft.power ? "on" : "")}
+              aria-label={draft.power ? "Turn light off" : "Turn light on"}
+              aria-pressed={draft.power}
+              disabled={
+                !state ||
+                !authorized ||
+                busy ||
+                stale ||
+                controllerBlocked ||
+                (!draft.power && draft.recording_lock)
+              }
+              onClick={() => commit({ power: !draft.power })}
+            >
+              <span className="power-track">
+                <span />
+              </span>
+              {draft.power ? "Light on" : "Light off"}
+            </Button>
+            <div className="header-lock">
+              <LockKeyhole size={18} />
+              <Label htmlFor="recording-lock">Recording lock</Label>
+              <Switch
+                id="recording-lock"
+                aria-label="Recording lock"
+                checked={draft.recording_lock}
+                disabled={!authorized || !state || stale || busy}
+                onCheckedChange={(recording_lock) => commit({ recording_lock })}
+              />
             </div>
           </div>
         </div>
@@ -469,7 +522,7 @@ export function Studio({ store }: { store: StudioStore }) {
               </TabsTrigger>
             </TabsList>
             <span className="tab-note">
-              Made to stay local <ArrowUpRight size={13} />
+              <LockKeyhole size={13} /> LOCAL · PRIVATE
             </span>
           </div>
           {device?.trial_pending && (
@@ -544,36 +597,24 @@ export function Studio({ store }: { store: StudioStore }) {
               </Button>
             </div>
           )}
-          <TabsContent value="light" className="light-layout">
-            <section
-              className={"light-stage " + (!draft.power ? "is-off" : "")}
-              style={
-                {
-                  "--light": tint,
-                  "--level": String(draft.brightness / 100),
-                } as React.CSSProperties
-              }
-              aria-label="Approximate light preview"
-            >
-              <div className="stage-top">
-                <span className="eyebrow">LIGHT, REIMAGINED</span>
-                <span className="quiet-tag">
-                  {draft.mode === "white" ? "WHITE LIGHT" : "FULL COLOR"}
-                </span>
-              </div>
-              <div className="lamp-art" aria-hidden="true">
-                <div className="light-halo" />
-                <div className="lamp-body">
-                  <div className="lamp-panel" />
-                  <span className="lamp-insignia">OPEN / 01</span>
+          <TabsContent value="light" className="light-content">
+            <div className="light-layout">
+              <section
+                className={"light-stage " + (!draft.power ? "is-off" : "")}
+                style={
+                  {
+                    "--light": tint,
+                    "--level": String(draft.brightness / 100),
+                  } as React.CSSProperties
+                }
+                aria-label="Approximate light preview"
+              >
+                <div className="light-orb" aria-hidden="true">
+                  <div />
                 </div>
-                <div className="lamp-stem" />
-                <div className="lamp-base" />
-              </div>
-              <div className="stage-bottom">
-                <div>
-                  <p className="stage-caption">
-                    {draft.power ? "YOUR SELECTED LOOK" : "A QUIET MOMENT"}
+                <div className="stage-bottom">
+                  <p className="eyebrow">
+                    {draft.mode === "white" ? "WHITE OUTPUT" : "COLOUR OUTPUT"}
                   </p>
                   <div className="stage-value">
                     {draft.mode === "white" ? (
@@ -582,74 +623,18 @@ export function Studio({ store }: { store: StudioStore }) {
                         <span>K</span>
                       </>
                     ) : (
-                      <span className="stage-hex">
-                        {rgbHex(draft.rgb).toUpperCase()}
-                      </span>
+                      rgbHex(draft.rgb).toUpperCase()
                     )}
                   </div>
+                  <p className="stage-channels">
+                    {draft.mode === "color"
+                      ? `${draft.rgb.r} / ${draft.rgb.g} / ${draft.rgb.b}`
+                      : `${draft.brightness}% intensity`}
+                  </p>
                 </div>
-                <div className="stage-dots">
-                  <span />
-                  <span />
-                  <span />
-                </div>
-              </div>
-              <p className="preview-note">
-                A visual preview. Actual colour depends on your light and room.
-              </p>
-            </section>
-            <div className="control-rail">
-              <section className="power-row">
-                <div>
-                  <span className="eyebrow">OUTPUT</span>
-                  <h2>
-                    {draft.power
-                      ? "Let there be light."
-                      : "Ready for a little light?"}
-                  </h2>
-                </div>
-                <Button
-                  className={"power-button " + (draft.power ? "on" : "")}
-                  aria-label={draft.power ? "Turn light off" : "Turn light on"}
-                  aria-pressed={draft.power}
-                  disabled={
-                    !state ||
-                    !authorized ||
-                    busy ||
-                    stale ||
-                    controllerBlocked ||
-                    (!draft.power && draft.recording_lock)
-                  }
-                  onClick={() => commit({ power: !draft.power })}
-                >
-                  <Power size={21} />
-                </Button>
+                <span className="preview-note">Approximate colour preview</span>
               </section>
-              <section className="brightness-section">
-                <div className="control-heading">
-                  <Label htmlFor="brightness-slider">Brightness</Label>
-                  <div className="big-value">
-                    {draft.brightness}
-                    <span>%</span>
-                  </div>
-                </div>
-                <Slider
-                  id="brightness-slider"
-                  aria-label="Brightness"
-                  disabled={outputDisabled}
-                  value={[draft.brightness]}
-                  min={0}
-                  max={100}
-                  onValueChange={([v]) => setField("brightness", v)}
-                  onValueCommit={([v]) => commit({ brightness: v })}
-                />
-                <div className="range-captions">
-                  <Moon size={12} />
-                  <span>A little atmosphere</span>
-                  <Sun size={15} />
-                </div>
-              </section>
-              <section className="color-section">
+              <div className="control-rail">
                 <div
                   className="mode-buttons"
                   role="group"
@@ -657,265 +642,393 @@ export function Studio({ store }: { store: StudioStore }) {
                 >
                   <Button
                     variant="ghost"
-                    aria-pressed={draft.mode === "white"}
+                    aria-pressed={lightPanel === "white"}
                     disabled={outputDisabled || !supported.white}
-                    onClick={() => commit({ mode: "white", effect: "none" })}
+                    onClick={() => {
+                      setLightPanel("white");
+                      commit({ mode: "white", effect: "none" });
+                    }}
                   >
-                    <Sun size={15} />
                     White
                   </Button>
                   <Button
                     variant="ghost"
-                    aria-pressed={draft.mode === "color"}
+                    aria-pressed={lightPanel === "color"}
                     disabled={outputDisabled || !supported.color}
-                    onClick={() => commit({ mode: "color", effect: "none" })}
+                    onClick={() => {
+                      setLightPanel("color");
+                      commit({ mode: "color", effect: "none" });
+                    }}
                   >
-                    <span className="spectrum-dot" />
-                    Color
+                    Colour
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    aria-pressed={lightPanel === "effects"}
+                    disabled={outputDisabled || !supported.effects}
+                    onClick={() => {
+                      cancelDraft();
+                      setLightPanel("effects");
+                    }}
+                  >
+                    Effects
                   </Button>
                 </div>
-                {draft.mode === "white" ? (
-                  <div className="temperature-controls">
-                    <div className="control-heading">
-                      <Label>Temperature</Label>
-                      <output>
-                        {draft.temperature_k.toLocaleString()} <span>K</span>
-                      </output>
+                <section className="brightness-section">
+                  <div className="control-heading">
+                    <Label htmlFor="brightness-slider">Intensity</Label>
+                    <div className="big-value">
+                      {draft.brightness}
+                      <span>%</span>
                     </div>
-                    <Slider
-                      aria-label="White temperature"
-                      className="temperature-slider"
-                      disabled={outputDisabled}
-                      min={3000}
-                      max={7000}
-                      step={50}
-                      value={[draft.temperature_k]}
-                      onValueChange={([v]) => setField("temperature_k", v)}
-                      onValueCommit={([v]) => commit({ temperature_k: v })}
-                    />
-                    <div className="range-captions">
-                      <span>Warm · 3,000 K</span>
-                      <span>Cool · 7,000 K</span>
-                    </div>
-                    <div className="presets">
-                      {[
-                        [3200, "Evening"],
-                        [4200, "Balanced"],
-                        [5600, "Daylight"],
-                      ].map(([v, label]) => (
+                  </div>
+                  <Slider
+                    id="brightness-slider"
+                    aria-label="Brightness"
+                    disabled={outputDisabled}
+                    value={[draft.brightness]}
+                    min={0}
+                    max={100}
+                    onValueChange={([v]) => setField("brightness", v)}
+                    onValueCommit={([v]) => commit({ brightness: v })}
+                  />
+                </section>
+                <section className="colour-workspace">
+                  {lightPanel === "effects" ? (
+                    <div className="effect-choices">
+                      <p className="eyebrow">MOVEMENT</p>
+                      {(supported.effect_names || ["none"]).map((effect) => (
                         <button
-                          key={v}
-                          disabled={outputDisabled}
+                          key={effect}
                           className={
-                            draft.temperature_k === v ? "selected" : ""
+                            "effect-choice " +
+                            (draft.effect === effect ? "selected" : "")
                           }
-                          onClick={() => commit({ temperature_k: Number(v) })}
+                          disabled={outputDisabled}
+                          onClick={() => commit({ mode: "color", effect })}
                         >
-                          <i
-                            style={{
-                              background:
-                                v === 3200
-                                  ? "#e7b777"
-                                  : v === 4200
-                                    ? "#e6d4ac"
-                                    : "#d8e1e4",
-                            }}
-                          />
-                          {label}
+                          <span className={"effect-art effect-" + effect} />
+                          <span>
+                            <strong>{effectLabel(effect)}</strong>
+                            <small>
+                              {effect === "aurora"
+                                ? "A slow drift through colour"
+                                : effect === "breathe"
+                                  ? "A gentle rise and fall"
+                                  : "Hold a constant colour"}
+                            </small>
+                          </span>
+                          {draft.effect === effect ? (
+                            <Check size={17} />
+                          ) : (
+                            <ArrowRight size={17} />
+                          )}
                         </button>
                       ))}
                     </div>
-                  </div>
-                ) : (
-                  <div className="rgb-controls">
-                    <div className="color-entry">
-                      <input
-                        type="color"
-                        aria-label="Choose RGB color"
-                        value={rgbHex(draft.rgb)}
+                  ) : draft.mode === "white" ? (
+                    <div className="temperature-controls">
+                      <div className="control-heading">
+                        <Label>Temperature</Label>
+                        <output>
+                          {draft.temperature_k.toLocaleString()} <span>K</span>
+                        </output>
+                      </div>
+                      <Slider
+                        aria-label="White temperature"
+                        className="temperature-slider"
                         disabled={outputDisabled}
-                        onChange={(e) => {
-                          const rgb = parseHex(e.target.value)!;
-                          setField("rgb", rgb);
-                          setHex(e.target.value);
-                        }}
-                        onBlur={() => {
-                          if (editing.current) commit({ rgb: draft.rgb });
-                        }}
+                        min={3000}
+                        max={7000}
+                        step={50}
+                        value={[draft.temperature_k]}
+                        onValueChange={([v]) => setField("temperature_k", v)}
+                        onValueCommit={([v]) => commit({ temperature_k: v })}
                       />
-                      <div>
-                        <Label htmlFor="hex-color">Hex colour</Label>
-                        <Input
-                          id="hex-color"
-                          value={hex}
-                          disabled={outputDisabled}
-                          maxLength={7}
-                          aria-invalid={!!hexError}
-                          onChange={(e) => {
-                            editing.current = true;
-                            setHex(e.target.value);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              const rgb = parseHex(hex);
-                              if (rgb) {
-                                setHexError("");
-                                commit({ rgb });
-                              } else
-                                setHexError("Enter six hexadecimal digits.");
+                      <div className="range-captions">
+                        <span>Warm · 3,000 K</span>
+                        <span>Cool · 7,000 K</span>
+                      </div>
+                      <div className="presets">
+                        {[
+                          [3200, "Evening"],
+                          [4200, "Balanced"],
+                          [5600, "Daylight"],
+                        ].map(([v, label]) => (
+                          <button
+                            key={v}
+                            disabled={outputDisabled}
+                            className={
+                              draft.temperature_k === v ? "selected" : ""
                             }
-                          }}
-                        />
+                            onClick={() => commit({ temperature_k: Number(v) })}
+                          >
+                            <i
+                              style={{
+                                background:
+                                  v === 3200
+                                    ? "#e7b777"
+                                    : v === 4200
+                                      ? "#e6d4ac"
+                                      : "#d8e1e4",
+                              }}
+                            />
+                            {label}
+                          </button>
+                        ))}
                       </div>
-                      <Button
-                        variant="outline"
+                    </div>
+                  ) : (
+                    <div className="rgb-controls">
+                      <ColourWheel
+                        compact
+                        value={draft.rgb}
                         disabled={outputDisabled}
-                        onClick={() => {
-                          const rgb = parseHex(hex);
-                          if (rgb) {
-                            setHexError("");
-                            commit({ rgb });
-                          } else setHexError("Enter six hexadecimal digits.");
+                        onChange={(rgb) => {
+                          setField("rgb", rgb);
+                          setHex(rgbHex(rgb));
                         }}
-                      >
-                        Apply
-                      </Button>
-                    </div>
-                    {hexError && (
-                      <p className="inline-error" role="alert">
-                        {hexError}
-                      </p>
-                    )}
-                    <div className="color-swatches">
-                      {[
-                        "#edac65",
-                        "#ed725d",
-                        "#9ab6a4",
-                        "#7eafd6",
-                        "#dfdde5",
-                        "#ff0020",
-                      ].map((color) => (
-                        <button
-                          key={color}
-                          aria-label={`Set color ${color}`}
-                          style={{ background: color }}
-                          disabled={outputDisabled}
-                          onClick={() => commit({ rgb: parseHex(color)! })}
-                        />
-                      ))}
-                    </div>
-                    {(["r", "g", "b"] as const).map((channel) => (
-                      <div className="channel" key={channel}>
-                        <Label>{channel.toUpperCase()}</Label>
-                        <Slider
-                          aria-label={`${channel.toUpperCase()} channel`}
-                          disabled={outputDisabled}
-                          min={0}
-                          max={255}
-                          value={[draft.rgb[channel]]}
-                          onValueChange={([v]) => {
-                            setField("rgb", { ...draft.rgb, [channel]: v });
-                            setHex(rgbHex({ ...draft.rgb, [channel]: v }));
-                          }}
-                          onValueCommit={([v]) =>
-                            commit({ rgb: { ...draft.rgb, [channel]: v } })
-                          }
-                        />
-                        <output>{draft.rgb[channel]}</output>
+                        onCommit={(rgb) => {
+                          setHexError("");
+                          commit({ rgb });
+                        }}
+                        onCancel={cancelDraft}
+                      />
+                      <div className="colour-numbers">
+                        <div className="color-entry">
+                          <Label htmlFor="hex-color">Hex colour</Label>
+                          <div className="hex-field">
+                            <Input
+                              id="hex-color"
+                              value={hex}
+                              disabled={outputDisabled}
+                              maxLength={7}
+                              aria-invalid={!!hexError}
+                              onChange={(e) => {
+                                editing.current = true;
+                                setHex(e.target.value);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  const rgb = parseHex(hex);
+                                  if (rgb) {
+                                    setHexError("");
+                                    commit({ rgb });
+                                  } else
+                                    setHexError(
+                                      "Enter six hexadecimal digits.",
+                                    );
+                                }
+                              }}
+                            />
+                            <Button
+                              variant="ghost"
+                              aria-label="Apply"
+                              disabled={outputDisabled}
+                              onClick={() => {
+                                const rgb = parseHex(hex);
+                                if (rgb) {
+                                  setHexError("");
+                                  commit({ rgb });
+                                } else
+                                  setHexError("Enter six hexadecimal digits.");
+                              }}
+                            >
+                              <ArrowRight size={18} />
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="rgb-numbers">
+                          {(["r", "g", "b"] as const).map((channel) => (
+                            <label key={channel}>
+                              <span>{channel.toUpperCase()}</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={255}
+                                step={1}
+                                aria-label={`${channel.toUpperCase()} channel`}
+                                disabled={outputDisabled}
+                                value={draft.rgb[channel]}
+                                onChange={(e) => {
+                                  const value = e.target.valueAsNumber;
+                                  if (
+                                    Number.isInteger(value) &&
+                                    value >= 0 &&
+                                    value <= 255
+                                  ) {
+                                    const rgb = {
+                                      ...draft.rgb,
+                                      [channel]: value,
+                                    };
+                                    setField("rgb", rgb);
+                                    setHex(rgbHex(rgb));
+                                  }
+                                }}
+                                onBlur={() => {
+                                  if (editing.current)
+                                    commit({ rgb: draft.rgb });
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter")
+                                    commit({ rgb: draft.rgb });
+                                }}
+                              />
+                            </label>
+                          ))}
+                        </div>
+                        {hexError && (
+                          <p className="inline-error" role="alert">
+                            {hexError}
+                          </p>
+                        )}
+                        <div className="color-swatches">
+                          {[
+                            "#fff2d6",
+                            "#ff8c45",
+                            "#ff0020",
+                            "#245cff",
+                            "#80ebd5",
+                            "#b28aff",
+                          ].map((color) => (
+                            <button
+                              key={color}
+                              aria-label={`Set color ${color}`}
+                              style={{ background: color }}
+                              disabled={outputDisabled}
+                              onClick={() => commit({ rgb: parseHex(color)! })}
+                            />
+                          ))}
+                        </div>
                       </div>
-                    ))}
+                    </div>
+                  )}
+                </section>
+                <div className="transition-controls">
+                  <div className="smooth-control">
+                    <Label htmlFor="smooth-transition">Smooth transition</Label>
+                    <Switch
+                      id="smooth-transition"
+                      aria-label="Smooth transition"
+                      checked={draft.transition_ms > 0}
+                      disabled={
+                        outputDisabled ||
+                        !supported.transitions ||
+                        (draft.mode === "white" &&
+                          supported.white_transitions === false)
+                      }
+                      onCheckedChange={(on) =>
+                        commit({ transition_ms: on ? lastFade.current : 0 })
+                      }
+                    />
                   </div>
-                )}
-              </section>
-              <div className="motion-row">
-                <div>
-                  <Label htmlFor="effect">A little movement</Label>
-                  <select
-                    id="effect"
-                    disabled={outputDisabled || !supported.effects}
-                    value={draft.effect}
-                    onChange={(e) => commit({ effect: e.target.value })}
-                  >
-                    {(supported.effect_names || ["none"]).map((effect) => (
-                      <option key={effect} value={effect}>
-                        {effectLabel(effect)}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="fade-control">
+                    <div>
+                      <Label>Fade duration</Label>
+                      <output>
+                        {(draft.transition_ms / 1000).toFixed(1)}
+                        <span> s</span>
+                      </output>
+                    </div>
+                    <Slider
+                      aria-label="Fade duration"
+                      min={100}
+                      max={10000}
+                      step={100}
+                      value={[draft.transition_ms || lastFade.current]}
+                      disabled={
+                        outputDisabled ||
+                        !supported.transitions ||
+                        !draft.transition_ms ||
+                        (draft.mode === "white" &&
+                          supported.white_transitions === false)
+                      }
+                      onValueChange={([v]) => setField("transition_ms", v)}
+                      onValueCommit={([v]) => commit({ transition_ms: v })}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <Label htmlFor="transition">Transition</Label>
-                  <select
-                    id="transition"
-                    value={draft.transition_ms}
-                    disabled={
-                      outputDisabled ||
-                      !supported.transitions ||
-                      (draft.mode === "white" &&
-                        supported.white_transitions === false)
-                    }
-                    onChange={(e) =>
-                      commit({ transition_ms: Number(e.target.value) })
-                    }
-                  >
-                    {[
-                      ...new Set([
-                        0,
-                        200,
-                        800,
-                        1500,
-                        3000,
-                        5000,
-                        10000,
-                        draft.transition_ms,
-                      ]),
-                    ]
-                      .sort((a, b) => a - b)
-                      .map((ms) => (
-                        <option key={ms} value={ms}>
-                          {ms ? `${ms / 1000} seconds` : "Instant"}
-                        </option>
-                      ))}
-                  </select>
-                  {draft.mode === "white" &&
-                    supported.white_transitions === false && (
-                      <p className="transition-note">
-                        Smooth transitions are available in Color mode.
-                      </p>
-                    )}
-                </div>
-              </div>
-              <div
-                className={
-                  "recording-row " + (draft.recording_lock ? "locked" : "")
-                }
-              >
-                <LockKeyhole size={18} />
-                <div>
-                  <Label htmlFor="recording-lock">Recording lock</Label>
-                  <p>
-                    {draft.recording_lock
-                      ? "Your look is held. Unlock to make changes; Off remains available."
-                      : "Hold this look against accidental changes."}
+                {draft.mode === "white" &&
+                  supported.white_transitions === false && (
+                    <p className="transition-note">
+                      Smooth transitions are available in Colour mode.
+                    </p>
+                  )}
+                {draft.recording_lock && (
+                  <p className="transition-note">
+                    Recording lock is on. Unlock to make changes; Off remains
+                    available.
                   </p>
+                )}
+                <div className="control-actions">
+                  <Button
+                    className="primary-button"
+                    disabled={
+                      !authorized ||
+                      !state ||
+                      !supported.scenes ||
+                      scenes.length >= 8 ||
+                      busy
+                    }
+                    onClick={() => {
+                      setSceneOpen(true);
+                      setSceneError("");
+                    }}
+                  >
+                    Save as scene <ArrowRight size={16} />
+                  </Button>
                 </div>
-                <Switch
-                  id="recording-lock"
-                  aria-label="Recording lock"
-                  checked={draft.recording_lock}
-                  disabled={!authorized || !state || stale || busy}
-                  onCheckedChange={(recording_lock) =>
-                    commit({ recording_lock })
-                  }
-                />
               </div>
             </div>
+            <section className="scene-strip" aria-label="Saved scenes">
+              <div className="strip-heading">
+                <h2>Scenes</h2>
+                <Button variant="ghost" onClick={() => setTab("scenes")}>
+                  View all <ArrowRight size={15} />
+                </Button>
+              </div>
+              {resourceError && (
+                <p className="inline-error" role="alert">
+                  {resourceError}
+                </p>
+              )}
+              {scenes.length ? (
+                <div className="scene-strip-grid">
+                  {scenes.slice(0, 4).map((scene) => (
+                    <button
+                      className="scene-tile"
+                      key={scene.id}
+                      disabled={outputDisabled || busy}
+                      aria-label={`Activate ${scene.name}`}
+                      onClick={() => void applyScene(scene)}
+                    >
+                      <span
+                        className="scene-photo"
+                        style={{
+                          backgroundImage: `url(${sceneAtlas})`,
+                          backgroundPosition: scenePosition(scene.state),
+                        }}
+                      />
+                      <span>
+                        {scene.name}
+                        <ArrowUpRight size={16} />
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="scene-empty-inline">
+                  <p>Your saved looks will live here.</p>
+                  <span>Set your light, then save your first scene.</span>
+                </div>
+              )}
+            </section>
           </TabsContent>
           <TabsContent value="scenes">
             <div className="section-intro">
               <div>
-                <p className="eyebrow">GOOD LOOKS, KEPT CLOSE</p>
-                <h2>Your moments of light.</h2>
+                <p className="eyebrow">SAVED ON YOUR LIGHT</p>
+                <h2>Scenes</h2>
                 <p>
                   Save the settings you come back to. Stored on your device.
                 </p>
@@ -953,6 +1066,8 @@ export function Studio({ store }: { store: StudioStore }) {
                       className="scene-art"
                       style={
                         {
+                          backgroundImage: `url(${sceneAtlas})`,
+                          backgroundPosition: scenePosition(scene.state),
                           "--scene":
                             scene.state.mode === "color"
                               ? rgbHex(scene.state.rgb)
@@ -961,7 +1076,6 @@ export function Studio({ store }: { store: StudioStore }) {
                       }
                     >
                       <span>{String(scene.id).padStart(2, "0")}</span>
-                      <Sun />
                     </div>
                     <div className="scene-info">
                       <h3>{scene.name}</h3>
@@ -987,7 +1101,7 @@ export function Studio({ store }: { store: StudioStore }) {
             ) : (
               <div className="empty-scenes">
                 <Layers size={35} />
-                <h3>The best light is worth keeping.</h3>
+                <h3>Your scenes start here.</h3>
                 <p>
                   Once you’ve found your look, save it here.
                   <br />
@@ -999,8 +1113,8 @@ export function Studio({ store }: { store: StudioStore }) {
           <TabsContent value="system">
             <div className="section-intro">
               <div>
-                <p className="eyebrow">BEHIND THE LIGHT</p>
-                <h2>A little peace of mind.</h2>
+                <p className="eyebrow">DEVICE & CONNECTIONS</p>
+                <h2>System</h2>
                 <p>
                   Local connections, honest status, and updates you control.
                 </p>
@@ -1375,7 +1489,7 @@ export function Studio({ store }: { store: StudioStore }) {
         </section>
         <footer>
           <span>
-            <Sun size={13} /> Independent. Open source. Entirely yours.
+            <Sun size={13} /> Open Keylight Chroma
           </span>
           <span>
             {store.transport.demo ? "PREVIEW SANDBOX" : "LOCAL FIRST"}

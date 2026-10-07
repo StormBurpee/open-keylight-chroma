@@ -9,7 +9,7 @@ async function setup(change?: (api: DemoTransport) => void) {
   change?.(api);
   const store = new StudioStore(api);
   render(<Studio store={store} />);
-  await screen.findByRole("heading", { name: "Studio key." });
+  await screen.findByRole("heading", { name: "Studio key" });
   await waitFor(() =>
     expect(
       screen.getByRole("button", { name: "Turn light off" }),
@@ -75,21 +75,25 @@ describe("studio controls", () => {
     const { user } = await setup((api) => {
       api.device.capabilities.white_transitions = false;
     });
-    expect(screen.getByLabelText("Transition")).toBeDisabled();
     expect(
-      screen.getByText("Smooth transitions are available in Color mode."),
+      screen.getByRole("switch", { name: "Smooth transition" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("Smooth transitions are available in Colour mode."),
     ).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Color" }));
+    await user.click(screen.getByRole("button", { name: "Colour" }));
     await waitFor(() =>
-      expect(screen.getByLabelText("Transition")).toBeEnabled(),
+      expect(
+        screen.getByRole("switch", { name: "Smooth transition" }),
+      ).toBeEnabled(),
     );
   });
   it("labels isolated preview persistently and reports only confirmed fields", async () => {
     const { user } = await setup();
     expect(screen.getByText("ISOLATED DEMO")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Color" }));
+    await user.click(screen.getByRole("button", { name: "Colour" }));
     await waitFor(() => expect(screen.getByText("Unconfirmed")).toBeVisible());
-    expect(screen.getByRole("slider", { name: "R channel" })).toBeVisible();
+    expect(screen.getByRole("spinbutton", { name: "R channel" })).toBeVisible();
   });
   it("locks every output change except Off until explicitly unlocked", async () => {
     const { user, api } = await setup();
@@ -115,9 +119,7 @@ describe("studio controls", () => {
   it("shows no fabricated scenes, saves a deliberate name, then activates it", async () => {
     const { user, api } = await setup();
     await user.click(screen.getByRole("tab", { name: "Scenes" }));
-    expect(
-      await screen.findByText("The best light is worth keeping."),
-    ).toBeVisible();
+    expect(await screen.findByText("Your scenes start here.")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Save current look" }));
     await user.type(screen.getByLabelText("Scene name"), "Interview");
     await user.click(screen.getByRole("button", { name: "Save scene" }));
@@ -130,8 +132,10 @@ describe("studio controls", () => {
       api.device.capabilities.effects = false;
       api.device.capabilities.transitions = false;
     });
-    expect(screen.getByLabelText("A little movement")).toBeDisabled();
-    expect(screen.getByLabelText("Transition")).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Effects$/ })).toBeDisabled();
+    expect(
+      screen.getByRole("switch", { name: "Smooth transition" }),
+    ).toBeDisabled();
     await user.click(screen.getByRole("tab", { name: "System" }));
     expect(
       await screen.findByText(
@@ -144,7 +148,7 @@ describe("studio controls", () => {
   });
   it("requires valid RGB input without silently changing the light", async () => {
     const { user, api } = await setup();
-    await user.click(screen.getByRole("button", { name: "Color" }));
+    await user.click(screen.getByRole("button", { name: "Colour" }));
     const input = await screen.findByLabelText("Hex colour");
     await user.clear(input);
     await user.type(input, "#zzzzzz");

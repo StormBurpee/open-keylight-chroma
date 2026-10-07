@@ -84,6 +84,41 @@ export class DemoTransport implements Transport {
       detail: "Isolated preview. No device is connected.",
     },
   ];
+  constructor(showcase = false) {
+    if (!showcase) return;
+    this.device.name = this.settings.name = "Storm Rim";
+    this.state.desired = {
+      ...this.state.desired,
+      mode: "color",
+      brightness: 72,
+      rgb: { r: 36, g: 92, b: 255 },
+      transition_ms: 1200,
+    };
+    this.state.reported = {
+      ...this.state.desired,
+      valid: true,
+      confirmed_fields: ["power", "mode", "brightness", "rgb"],
+    };
+    const base = this.state.desired;
+    this.scenes = [
+      {
+        id: 1,
+        name: "Focus",
+        state: { ...base, mode: "white", temperature_k: 4200, brightness: 80 },
+      },
+      { id: 2, name: "Blue hour", state: { ...base } },
+      {
+        id: 3,
+        name: "Ember",
+        state: { ...base, brightness: 60, rgb: { r: 255, g: 112, b: 38 } },
+      },
+      {
+        id: 4,
+        name: "Afterglow",
+        state: { ...base, brightness: 55, rgb: { r: 178, g: 138, b: 255 } },
+      },
+    ];
+  }
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     await new Promise((resolve) => setTimeout(resolve, 120));
     let value: unknown;
