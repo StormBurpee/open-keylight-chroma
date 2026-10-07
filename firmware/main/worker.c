@@ -113,6 +113,11 @@ static bool unsupported_status(okl_result result, const okl_reply *reply) {
         reply->report.command_class == 0 && reply->report.opcode == 0xfc && reply->report.size == 0;
 }
 
+static bool owner_denied_status(okl_result result, const okl_reply *reply) {
+    return result == OKL_OWNER_DENIED && reply->received && reply->report.status == 8 &&
+        reply->report.command_class == 0 && reply->report.opcode == 0xfc && reply->report.size == 0;
+}
+
 static bool lighting_status(const okl_controller_status *status) {
     return status->role == OKL_ROLE_LIGHTING && !status->boot_requested &&
         status->part_id == CONTROLLER_PART_ID &&
@@ -149,7 +154,7 @@ static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision, bool pub
                             const okl_firmware_version *expected_version) {
     okl_reply reply; okl_firmware_version version;
     okl_controller_status status = {0}; uint32_t part;
-    bool mismatch = false;
+    bool mismatch = false, admission_claimed = false;
     lifecycle_observed("starting", false);
     app_lock(); app.reported_valid = false; app.reported_fields = 0; app_unlock();
     if (nxp.needs_recovery) {
@@ -162,28 +167,40 @@ static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision, bool pub
     app_lock(); snprintf(app.controller_version, sizeof(app.controller_version), "%u.%u.%u.%u",
         version.component[0], version.component[1], version.component[2], version.component[3]); app_unlock();
     result = getter(OKL_GET_CONTROLLER_STATUS, &reply);
+    if (legacy_version(&version) && owner_denied_status(result, &reply)) {
+        /* Legacy ownership exempts the version getter, but not unknown FC.
+         * A stale owner from the previous ESP can therefore hide the expected
+         * unsupported reply. Claim once and verify it, then probe FC again;
+         * denial alone never establishes controller identity or readiness. */
+        result = okl_nxp_claim(&nxp, (const uint8_t *)"Open Keylight", 13,
+                               nxp.transport.now_us(NULL) + 600000);
+        if (result != OKL_OK) return release_if_synchronized(result);
+        admission_claimed = true;
+        result = getter(OKL_GET_CONTROLLER_STATUS, &reply);
+    }
     if (unsupported_status(result, &reply) && legacy_version(&version)) {
         lifecycle.backend = CONTROLLER_LEGACY;
     } else {
         lifecycle.backend = CONTROLLER_UNKNOWN;
         if (result != OKL_OK) {
-            if (unsupported_status(result, &reply)) { lifecycle_observed("unsupported", true); return OKL_VERIFY; }
-            return result;
+            if (unsupported_status(result, &reply)) { lifecycle_observed("unsupported", true); result = OKL_VERIFY; }
+            goto admission_failed;
         }
         result = okl_reply_decode_controller_status(&status, &reply);
-        if (result != OKL_OK) { lifecycle_observed("unsupported", true); return result; }
+        if (result != OKL_OK) { lifecycle_observed("unsupported", true); goto admission_failed; }
         lifecycle.backend = CONTROLLER_ORIGINAL; lifecycle.status = status;
         if (!lighting_status(&status)) {
             lifecycle_observed(status.role == OKL_ROLE_SPI_DIAGNOSTIC ? "diagnostic" : "unsupported", true);
-            return OKL_VERIFY;
+            result = OKL_VERIFY; goto admission_failed;
         }
         result = getter(OKL_GET_PART_ID, &reply);
         if (result == OKL_OK) result = okl_reply_decode_part_id(&part, &reply);
-        if (result != OKL_OK) return result;
-        if (part != status.part_id) { lifecycle_observed("unsupported", true); return OKL_VERIFY; }
+        if (result != OKL_OK) goto admission_failed;
+        if (part != status.part_id) { lifecycle_observed("unsupported", true); result = OKL_VERIFY; goto admission_failed; }
     }
     lifecycle_observed("starting", true);
-    result = okl_nxp_claim(&nxp, (const uint8_t *)"Open Keylight", 13, nxp.transport.now_us(NULL) + 600000);
+    result = admission_claimed ? OKL_OK : okl_nxp_claim(&nxp, (const uint8_t *)"Open Keylight", 13,
+                                                      nxp.transport.now_us(NULL) + 600000);
     if (result == OKL_OK) result = read_and_publish(true, NULL, 0, &mismatch, current);
     if (result == OKL_OK && lifecycle.backend == CONTROLLER_ORIGINAL) {
         result = controller_status(&status);
@@ -220,6 +237,8 @@ static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision, bool pub
         "Legacy 1.3 controller; no original trial confirmation" : "Original controller identity and trial verified");
     app_unlock(); if (publish_ready) app_mqtt_publish();
     return OKL_OK;
+admission_failed:
+    return admission_claimed ? release_if_synchronized(result) : result;
 }
 
 static okl_result health(void) {

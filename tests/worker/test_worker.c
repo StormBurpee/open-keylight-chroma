@@ -38,6 +38,8 @@ static bool poison_claim, poison_read, malformed_version, queued_on_read, retarg
 static bool claimed, task_failure;
 static bool poison_write;
 static bool original, confirmation_missing, lost_confirmation_ack, malformed_status, status_unsupported;
+static bool foreign_status_owner;
+static unsigned denial_variant, claimed_status_variant;
 static uint8_t legacy_minor;
 static unsigned status_reads, part_reads, confirmations;
 static uint32_t part_reply;
@@ -136,7 +138,10 @@ static okl_result worker_claim(okl_nxp *driver, const uint8_t *name, size_t size
 }
 static okl_result worker_release(okl_nxp *driver, uint64_t deadline) {
     bounded(deadline, 600000); CHECK(!driver->needs_recovery); ++releases;
-    if (release_result == OKL_OK) claimed = false;
+    if (release_result == OKL_OK) {
+        if (claimed) foreign_status_owner = false;
+        claimed = false;
+    }
     return release_result;
 }
 static okl_result worker_read(okl_nxp *driver, okl_light_state *state, uint64_t deadline) {
@@ -164,6 +169,28 @@ static okl_result worker_execute(okl_nxp *driver, const okl_request *request, ok
     }
     if (request->command == OKL_GET_CONTROLLER_STATUS) {
         ++status_reads; reply->received = 1; reply->report.opcode = 0xfc;
+        if (foreign_status_owner && !claimed) {
+            reply->report.status = 8;
+            if (denial_variant == 1) reply->received = 0;
+            if (denial_variant == 2) reply->report.status = 4;
+            if (denial_variant == 3) reply->report.command_class = 3;
+            if (denial_variant == 4) reply->report.opcode = 0xfd;
+            if (denial_variant == 5) reply->report.size = 1;
+            return OKL_OWNER_DENIED;
+        }
+        if (foreign_status_owner && claimed && claimed_status_variant) {
+            if (claimed_status_variant == 1) { reply->report.status = 8; return OKL_OWNER_DENIED; }
+            if (claimed_status_variant == 2) { reply->report.status = 4; return OKL_REMOTE; }
+            if (claimed_status_variant == 3) { driver->needs_recovery = 1; return OKL_TIMEOUT; }
+            if (claimed_status_variant == 4) { reply->report.status = 5; reply->report.size = 1; return OKL_REMOTE; }
+            reply->acknowledged = 1; reply->report.status = 2; reply->report.size = 24;
+            uint8_t *a = reply->report.arguments;
+            memcpy(a, "OKLC", 4); a[4] = 1; a[6] = OKL_ROLE_SPI_DIAGNOSTIC;
+            put_word(a + 8, OKL_CAP_RECOVERY_READY); put_word(a + 12, CONTROLLER_PART_ID);
+            if (claimed_status_variant == 6) a[0] = 'X';
+            if (claimed_status_variant == 7) { a[6] = OKL_ROLE_LIGHTING; put_word(a + 8, 3); put_word(a + 12, CONTROLLER_PART_ID ^ 1u); }
+            return OKL_OK;
+        }
         if (!original || status_unsupported) { reply->report.status = 5; return OKL_REMOTE; }
         reply->acknowledged = 1; reply->report.status = 2; reply->report.size = 24;
         uint8_t *a = reply->report.arguments;
@@ -213,6 +240,7 @@ static void reset(void) {
     poison_claim = poison_read = malformed_version = queued_on_read = retarget_after_failure = claimed = task_failure = false;
     poison_write = false;
     original = confirmation_missing = lost_confirmation_ack = malformed_status = reset_done = status_unsupported = false;
+    foreign_status_owner = false; denial_variant = claimed_status_variant = 0;
     legacy_minor = 3;
     status_reads = part_reads = confirmations = 0; boot_at = reset_at = 0;
     part_reply = CONTROLLER_PART_ID;
@@ -307,6 +335,42 @@ static void test_original_bootstrap(void) {
     controller.effect = 1; controller.color_count = 1; controller.colors[1] = 255; controller.color_brightness = 127;
     run(); CHECK(confirmations == 0 && !writes && app.controller_ready && app.desired.power);
     CHECK(app.desired.rgb.g == 255 && app.desired.brightness == 50); /* ESP-only restart adopts a confirmed peer. */
+}
+static void test_legacy_owner_admission(void) {
+    /* Actual stock semantics: version87 is exempt, FC is not. No output or FD
+     * may follow the denial until one verified claim exposes exact unsupported5. */
+    reset(); foreign_status_owner = true; run();
+    CHECK(claims == 1 && releases == 1 && versions == 1 && status_reads == 2 && reads == 1);
+    CHECK(app.controller_ready && !strcmp(app.controller_backend, "legacy") && !claimed);
+    CHECK(!writes && !confirmations && !faults && app.reported_valid);
+    CHECK(app.reported.rgb.r == 255 && app.reported.rgb.b == 32 && app.desired.power);
+    CHECK(health() == OKL_OK && claims == 1 && releases == 1); /* Released/unclaimed stock FC dispatches. */
+    foreign_status_owner = true;
+    CHECK(health() == OKL_OWNER_DENIED && claims == 1); /* Health never steals another owner. */
+    for (unsigned variant = 1; variant <= 5; ++variant) {
+        reset(); foreign_status_owner = true; denial_variant = variant; run();
+        CHECK(!claims && !reads && !writes && !confirmations && !app.controller_ready);
+    }
+    reset(); foreign_status_owner = true; legacy_minor = 4; run();
+    CHECK(!claims && !reads && !writes && !confirmations && !app.controller_ready);
+    original_reset(); foreign_status_owner = true; run();
+    CHECK(!claims && !reads && !writes && !confirmations && !app.controller_ready);
+    reset(); foreign_status_owner = true; malformed_version = true; run();
+    CHECK(!status_reads && !claims && !reads && !writes && !app.controller_ready);
+    for (unsigned variant = 1; variant <= 7; ++variant) {
+        reset(); foreign_status_owner = true; claimed_status_variant = variant; run();
+        CHECK(claims == 1 && status_reads == 2 && !reads && !writes && !confirmations && !app.controller_ready);
+        CHECK(releases == (variant == 3 ? 0u : 1u)); /* Never touch a poisoned transport. */
+        if (variant == 5) CHECK(!strcmp(app.controller_status, "diagnostic"));
+    }
+    reset(); foreign_status_owner = true; claim_result = OKL_TIMEOUT; poison_claim = true; run();
+    CHECK(claims == 1 && !releases && status_reads == 1 && !reads && !writes && !confirmations);
+    reset(); foreign_status_owner = true; claim_result = OKL_OWNER_DENIED; run();
+    CHECK(claims == 1 && releases == 1 && status_reads == 1 && !reads && !app.controller_ready);
+    reset(); foreign_status_owner = true; release_result = OKL_NOT_OWNER; run();
+    CHECK(claims == 1 && releases == 1 && reads == 1 && !writes && !confirmations && !app.controller_ready);
+    reset(); foreign_status_owner = true; app.output_revision = 42; app.desired.effect = KL_EFFECT_AURORA; run();
+    CHECK(app.controller_ready && !writes && !confirmations && app.completed_revision == 0);
 }
 static void test_original_rejections(void) {
     for (unsigned variant = 0; variant < 10; ++variant) {
@@ -403,6 +467,7 @@ int main(void) {
     test_startup(); test_startup_queued_transition(); test_setup_and_frame_failures();
     test_transition_completion();
     test_original_bootstrap(); test_original_rejections(); test_confirmation_readback_and_ambiguity();
+    test_legacy_owner_admission();
     test_health_and_reset_no_replay();
     test_update_worker_gates();
     printf("%u worker assertions passed; actual source, no device I/O.\n", checks);

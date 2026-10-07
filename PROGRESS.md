@@ -6,6 +6,8 @@ The first independent ESP application reached 100% OTA acceptance, booted, impor
 
 The preceding all-off NXP experiment stopped on a staging readback timeout before commit. It never ran. The working NXP image was restored with all 448 blocks acknowledged and read back. The timeout cause remains unresolved; no original PWM output qualification is claimed.
 
+The startup correction only permits a fully correlated ownership-denied reply after exact legacy version 1.3.0.0 to trigger one verified ownership claim. A fresh capability query must then establish the expected legacy response or pass every original-controller identity and readiness check. Cleanup remains conditional on synchronized ownership, and old output commands are discarded. Captured-instruction replay reproduced the legacy ownership exception; actual-worker tests pass 18,576 assertions plus startup and transport-adapter checks. Independent reviews passed. The corrected build awaits its next hardware trial.
+
 ## Dashboard art direction and implementation
 
 The dashboard now follows a generated concept refined in two passes: graphite surfaces, ivory typography, copper controls and an atmospheric colour preview. The source concept and photographic scene atlas are retained in `assets/design` with their prompts. Runtime photography is a 14,160-byte WebP; no physical lamp is depicted. Controls remain semantic HTML, React and Radix, including the keyboard-accessible hue/saturation/value picker, exact RGB and hex entry, scene recall and adjustable fades. Scenes in production come from the device; populated preview scenes are isolated demo data.
