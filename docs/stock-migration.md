@@ -137,12 +137,20 @@ Use the last recorded stage and its outcome to choose the next step. A stage's i
 | --- | --- |
 | Preparation or identity check failed before a mutation | Correct the artifact/target mismatch. A later attempt needs a new audit. Do not infer this case from a timeout after a mutation was sent. |
 | A controller transfer or diagnostic stopped while the stock ESP is still installed | Preserve the full audit. The explicit cold-recovery restore below is available only if the exact resident loader responds; it is not a generic restart/resume command. |
-| Original lighting controller confirmed, ESP replacement not yet accepted | The two chips may now run different firmware families. Do not restart `install`: its starting gate expects the stock controller. The cold-recovery restore below can proceed only if it establishes the exact resident loader; it refuses an active application. There is no generic continuation command for this intermediate state. |
+| Original lighting controller installed, ESP replacement not yet accepted | Choose **Finish a previous installation** in the TUI, or the explicit `finish` command below. It verifies a running original controller, ownership and Off state, then uploads only the ESP. It refuses a resident loader or unknown state. The ordinary `install` command still expects the stock controller. |
 | New original ESP observed with a pending trial | Use the printed dashboard to pair, check low-level controls, return to Off and confirm within the remaining trial time. If those checks fail, leave the trial unconfirmed and inspect the actual fallback result. |
 | ESP upload/boot outcome uncertain, or an unconfirmed ESP fell back | Identify which ESP application is actually running before choosing any tool. The original NXP controller may remain installed after ESP fallback. Neither the original stock starting state nor a responding resident loader can be assumed. |
 | Original ESP confirmed, controller journal blocks lighting | Use the authenticated native recovery contract linked below. A reboot does not clear the journal, and the stock TCP restore tool is no longer the appropriate interface. |
 
 There is no automatic path from every intermediate state back to factory firmware. If the required resident or application identity cannot be established, stop with the audit intact rather than trying another entry, commit or restore command.
+
+To finish an installation with the stock ESP and an already installed original lighting application, use a new audit:
+
+```text
+python tools/stock_migration.py finish --manifest private/migration/migration.json --audit private/migration/finish-1.jsonl --execute --exclusive-control
+```
+
+This separate three-stage path verifies the target's MAC suffix, stock ESP name/version and original controller version, ROM part and typed status. It claims the real SPI owner using a fresh nonce and verifies ownership and Off through independent getters. An already confirmed controller is not confirmed again; an unconfirmed one must be younger than 15 seconds, with confirmation and readback before a conservative 20-second deadline. A change of controller boot or ambiguous response stops the operation. The installed controller bank is retained, with no new claim of optical or electrical qualification. ESP upload and independent native acceptance use the same checks as initial installation.
 
 For an explicit controller restore while the stock ESP bridge remains installed, unplug and reconnect the **whole light**, wait at least 35 seconds, and use a new audit:
 

@@ -16,6 +16,7 @@ from unittest.mock import patch
 sys.path[:0] = [str(Path(__file__).resolve().parents[2] / "tools"), str(Path(__file__).resolve().parent)]
 import stock_migration as migration
 from test_cli import Environment, manifest_fixture
+from test_finish import ExistingPeer
 
 
 def main(argv=None):
@@ -36,6 +37,16 @@ def main(argv=None):
         case.assets = {"/index.html": b"<html>Original test page</html>",
                        "/assets/test.js": b"console.log('test')", "/assets/test.css": b"body{}"}
         environment = Environment(case)
+        session_factory = environment.session_factory
+        if argv and argv[0] == "finish":
+            peer = ExistingPeer(migration.load_plan(path))
+            environment.time, environment.session = peer.time, peer
+            def close():
+                peer.closed = environment.closed = True
+            peer.close = close
+            def session_factory(target, audit, **_kwargs):
+                peer.target, peer.audit = target, audit
+                return peer
         getter = environment.http
 
         def http(ip, requested, maximum):
@@ -51,9 +62,10 @@ def main(argv=None):
             with patch.object(migration, "inspect_nxp_loader", return_value={"reference_code_matches": True}), \
                  patch.object(migration, "transfer_controller", side_effect=environment.transfer), \
                  patch.object(migration, "transfer_esp", side_effect=environment.transfer_esp):
-                return migration.run_cli(argv, session_factory=environment.session_factory,
+                return migration.run_cli(argv, session_factory=session_factory,
                     audit_factory=environment.audit, get_http=http,
-                    clock=environment.time.now, sleep=environment.time.sleep)
+                    clock=environment.time.now, sleep=environment.time.sleep,
+                    mac_reader=lambda *_args: bytes.fromhex("021111123456"))
         finally:
             case.doCleanups()
 

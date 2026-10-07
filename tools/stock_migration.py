@@ -22,6 +22,7 @@ import sys
 import re
 import zlib
 import http.client
+import secrets
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -458,6 +459,36 @@ class StockSession:
             self.sock = None
 
 
+def read_stock_mac(target: Target, device_id: str, audit: Audit, *,
+                   socket_factory=socket.socket, clock=time.monotonic) -> bytes:
+    """One ESP-local UDP identity read; no HELLO or controller transaction.
+
+    The public device ID contains the final three MAC bytes. The complete MAC
+    is recorded, while the manifest name and stock version are checked on TCP.
+    A connected UDP socket accepts replies only from the selected IP/port.
+    """
+    require(isinstance(device_id, str) and re.fullmatch(r"keylight-[0-9a-f]{6}", device_id),
+            "Invalid expected device ID")
+    request = bytes.fromhex("aa00000589")
+    audit.record("stock_mac_read_intent", opcode=0x89, request_sha256=digest(request))
+    deadline = clock() + 2
+    with socket_factory(socket.AF_INET, socket.SOCK_DGRAM) as peer:
+        peer.settimeout(2)
+        peer.connect((target.ip, 10005))
+        require(clock() < deadline, "Stock UDP identity deadline expired")
+        peer.settimeout(deadline - clock())
+        require(peer.send(request) == len(request), "Incomplete UDP identity request")
+        reply = peer.recv(256)
+    require(clock() < deadline, "Stock UDP identity completed after deadline")
+    require(len(reply) == 11 and reply[:5] == bytes.fromhex("aa02000b89"),
+            "Stock UDP identity envelope differs")
+    mac = reply[5:]
+    require(any(mac) and not mac[0] & 1 and device_id == "keylight-" + mac[-3:].hex(),
+            "Selected device ID and stock MAC differ")
+    audit.record("stock_mac_verified", mac=mac.hex(), device_id=device_id, reply_sha256=digest(reply))
+    return mac
+
+
 def inspect_controller_package(package: bytes) -> dict:
     require(len(package) == 64 + NXP_BANK_BYTES, "Require one complete original controller package")
     require(package[:8] == b"OKLCNXP\0" and package[8:24] ==
@@ -666,6 +697,7 @@ class Migration:
         self.fresh_resident, self.current, self.record_verified = False, None, False
         self.completed_profiles, self.lighting_approved = set(), False
         self.cold_recovery = False
+        self.existing_lifecycle = None
         session.audit.record("artifacts_validated", packages=self.metadata, restore_sha256=restore_sha256)
 
     @contextmanager
@@ -696,6 +728,88 @@ class Migration:
             self.phase = "stock"
             s.audit.record("stock_identity_matched", name=s.target.name, esp_version=version.hex(),
                            silicon_verified=False, cryptographic_identity=False)
+
+    def _existing_status(self, deadline: float, *, confirmed=None):
+        """Correlated original status with a monotonically intersected boot window."""
+        s = self.session
+        before = s.clock()
+        require(before < deadline, "Existing controller admission deadline expired; no flash")
+        try:
+            status = decode_controller_status(s.exchange(0, 0xFC, deadline=deadline))
+        except ValueError as error:
+            raise ValueError("Controller is not a ready Open Keylight lighting application; no flash") from error
+        after = s.clock()
+        require(after < deadline, "Existing controller status arrived after deadline; no flash")
+        require(status["role"] == 2 and status["capabilities"] == 3
+                and status["part_id"] == 0xBC40 and not status["boot_requested"]
+                and (confirmed is None or status["confirmed"] is confirmed),
+                "Controller is not a ready Open Keylight lighting application; no flash")
+        low, high = before - status["uptime_ms"] / 1000 - .05, after - status["uptime_ms"] / 1000 + .05
+        if self.existing_lifecycle is not None:
+            previous = self.existing_lifecycle
+            low, high = max(low, previous["low"]), min(high, previous["high"])
+            require(low <= high and status["reset_cause"] == previous["status"]["reset_cause"]
+                    and status["uptime_ms"] >= previous["status"]["uptime_ms"],
+                    "Existing controller lifecycle changed; no flash")
+        self.existing_lifecycle = {"low": low, "high": high, "status": status}
+        return status
+
+    def open_existing(self, device_id: str, *, mac_reader=read_stock_mac,
+                      nonce_factory=lambda: secrets.token_hex(8)):
+        """Admit a retained original lighting app without reflashing its bank.
+
+        This is not diagnostic qualification or a continuation of an old flash.
+        Original 00/49 takes ownership from the real SPI tag, not payload MAC.
+        A fresh nonce label and C9 prove that explicit claim even when HELLO has
+        no unsolicited owner notification. Legacy claim rules stay unchanged.
+        """
+        with self._stage({"new"}, "existing_controller"):
+            s = self.session
+            mac_reader(s.target, device_id, s.audit)
+            s.connect(require_owner=False)
+            name = s.target.name.encode("utf-8")
+            require(s.network_get(0x88) == bytes([len(name)]) + name
+                    and s.network_get(0x84) == s.target.esp_version, "Existing target/stock ESP differs; no flash")
+            deadline = s.clock() + 15
+            mismatch = "Controller is not a ready Open Keylight lighting application; no flash"
+            require(s.exchange(0, 0x87, deadline=deadline).hex() == self.metadata["lighting"]["version"]
+                    and s.exchange(0, 0xFE, deadline=deadline) == b"\0\0\xbc\x40", mismatch)
+            sampled_at = s.clock()
+            initial = self._existing_status(deadline)
+            if not initial["confirmed"]:
+                require(initial["uptime_ms"] < 15000, "Original controller trial is too old; no flash")
+                deadline = min(deadline, sampled_at + (20000 - initial["uptime_ms"]) / 1000)
+            nonce = nonce_factory()
+            require(isinstance(nonce, str) and re.fullmatch(r"[0-9a-f]{16}", nonce), "Invalid fresh ownership nonce")
+            label = b"OKL finish " + nonce.encode("ascii")
+            claim = b"\1" + bytes(6) + bytes([len(label)]) + label + bytes(64 - len(label))
+            # Recheck the same boot and confirmation state immediately before
+            # the first mutation; every exchange shares the original deadline.
+            self._existing_status(deadline, confirmed=initial["confirmed"])
+            require(s.clock() < deadline, "Existing controller claim deadline expired; no flash")
+            require(s.exchange(0, 0x49, claim, mutation=True, deadline=deadline) == claim,
+                    "Original ownership ACK differs; no retry")
+            owner = s.exchange(0, 0xC9, deadline=deadline)
+            require(len(owner) == 8 + len(label) and owner[0] == 1 and any(owner[1:7])
+                    and not owner[1] & 1 and owner[7] == len(label) and owner[8:] == label,
+                    "Original ownership nonce/readback differs; no flash")
+            s.routing_identity = owner[1:7]
+            require(s.exchange(15, 0x82, bytes(2), deadline=deadline) == bytes(6)
+                    and s.exchange(3, 0x83, b"\0\x20\0", deadline=deadline) == b"\0\x20\0\0",
+                    "Existing original controller is not verified Off; no flash")
+            self._existing_status(deadline, confirmed=initial["confirmed"])
+            if not initial["confirmed"]:
+                require(s.clock() < deadline, "Original confirmation deadline expired; no flash")
+                require(s.exchange(0, 0xFD, b"OKLC", mutation=True, deadline=deadline) == b"\1",
+                        "Original confirmation ACK differs; no retry")
+            final = self._existing_status(deadline, confirmed=True)
+            require(s.exchange(15, 0x82, bytes(2), deadline=deadline) == bytes(6)
+                    and s.exchange(3, 0x83, b"\0\x20\0", deadline=deadline) == b"\0\x20\0\0",
+                    "Existing original Off readback changed; no flash")
+            self.current, self.phase = "lighting", "controller_confirmed"
+            s.audit.record("existing_controller_admitted", controller=final, native_off_verified=True,
+                           controller_flash=False, diagnostics_performed=False, optical_observation=False,
+                           confirmation_sent=not initial["confirmed"])
 
     def _claim(self):
         # The stock bridge supplies the routing tag, not the request's copied
@@ -909,6 +1023,8 @@ class Migration:
             require(self.session.network_get(0x84) == self.session.target.esp_version, "Stock ESP changed")
             require(self._original("lighting")["confirmed"], "Original controller is no longer confirmed")
             self._dark()
+            if self.existing_lifecycle is not None:
+                self._existing_status(self.session.clock() + 5, confirmed=True)
             result = transfer_esp(self.session, image)
             self.phase = "esp_trial_pending"
             self.session.audit.record("independent_esp_acceptance_required", image_sha256=expected_sha256)
@@ -1218,9 +1334,9 @@ def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.mono
 
 def run_cli(argv=None, *, input_fn=input, output_fn=console_output, session_factory=StockSession,
             audit_factory=Audit, get_http=http_get, clock=time.monotonic, sleep=time.sleep,
-            event_input=None, event_output=None) -> int:
+            event_input=None, event_output=None, mac_reader=read_stock_mac) -> int:
     parser = argparse.ArgumentParser(description="Guided, experimental migration for the reviewed Key Light Chroma stock profile")
-    parser.add_argument("command", choices=("prepare", "install", "restore"))
+    parser.add_argument("command", choices=("prepare", "install", "finish", "restore"))
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--audit", type=Path)
     parser.add_argument("--execute", action="store_true")
@@ -1270,7 +1386,7 @@ def run_cli(argv=None, *, input_fn=input, output_fn=console_output, session_fact
             if events is not None: events.emit("completed", outcome="prepared")
             return 0
         require(args.execute and args.exclusive_control and args.audit is not None,
-                "Install/restore require --execute, --exclusive-control and a new --audit path")
+                "Install/finish/restore require --execute, --exclusive-control and a new --audit path")
         require(args.command == "restore" or not args.power_cycled, "Power-cycle flag is only for explicit restore")
         require(args.command != "restore" or args.power_cycled, "Restore requires the acknowledged whole-light power cycle")
         require(events is None or args.expected_manifest_sha256 is not None,
@@ -1293,35 +1409,49 @@ def run_cli(argv=None, *, input_fn=input, output_fn=console_output, session_fact
             output_fn("Restore application version observed. Independently check normal operation; no lighting was replayed.")
             if events is not None: events.emit("completed", outcome="restored")
             return 0
-        stage("stock", 1, "Checking the selected stock light, verifying Off, and entering its controller loader.")
-        migration.open_stock(); migration.enter_stock_loader()
-        stage("stock", 1, "Fresh resident controller verified.", phase="completed")
-        stage("identity", 2, "Installing the no-PWM identity trial, then waiting 33s for resident recovery.")
-        migration.install("identity"); migration.await_recovery()
-        stage("identity", 2, "ROM part identity and resident recovery verified.", phase="completed")
-        stage("off1", 3, "Installing OFF1 and checking its all-low register record, then waiting for recovery.")
-        migration.install("OFF1"); migration.run_diagnostic(); migration.await_recovery()
-        require(prompt("off1_observation", "Did the light remain completely dark during OFF1? Type yes to proceed to five low pulses: ") == "yes",
-                "OFF1 physical observation was not accepted; no next image or automatic restore")
-        stage("off1", 3, "All-low register evidence and physical observation accepted.", phase="completed")
-        stage("low1", 4, "Watch the light: one short low pulse each of red, green, blue, warm white and cool white, with dark gaps.")
-        migration.install("LOW1"); migration.run_diagnostic(); migration.await_recovery()
-        require(prompt("low1_observation", "Were those five low pulses correct, with dark gaps and no unexpected output? Type yes: ") == "yes",
-                "LOW1 physical observation was not accepted; no production image or automatic restore")
-        migration.accept_physical_checks(off_was_dark=True, low_channels_expected=True)
-        stage("low1", 4, "Five-channel record and physical observation accepted.", phase="completed")
-        stage("lighting", 5, "Installing and verifying the original lighting controller, then confirming it once.")
-        migration.install("lighting"); migration.confirm_controller()
-        stage("lighting", 5, "Original lighting controller confirmation read back.", phase="completed")
-        stage("esp", 6, "Uploading the ESP application once. Keep power connected; acceptance and first boot are separate checks.")
+        finishing = args.command == "finish"
+        total, esp_index, native_index = (3, 2, 3) if finishing else (7, 6, 7)
+        if finishing:
+            if events is not None:
+                events.emit("status", code="installation_workflow", workflow="finish", total=3,
+                            message="Finish the ESP installation while retaining the verified original controller.",
+                            stages=[{"id": "existing", "index": 1, "label": "Verify installed controller"},
+                                    {"id": "esp", "index": 2, "label": "Install ESP firmware"},
+                                    {"id": "native", "index": 3, "label": "Verify and accept native setup"}])
+            stage("existing", 1, "Verifying the installed Open Keylight controller and Off; its firmware is retained.", total=3)
+            migration.open_existing(plan["device_id"], mac_reader=mac_reader)
+            stage("existing", 1, "Existing original controller confirmed and Off; no controller flash or diagnostic qualification performed.",
+                  phase="completed", total=3)
+        else:
+            stage("stock", 1, "Checking the selected stock light, verifying Off, and entering its controller loader.")
+            migration.open_stock(); migration.enter_stock_loader()
+            stage("stock", 1, "Fresh resident controller verified.", phase="completed")
+            stage("identity", 2, "Installing the no-PWM identity trial, then waiting 33s for resident recovery.")
+            migration.install("identity"); migration.await_recovery()
+            stage("identity", 2, "ROM part identity and resident recovery verified.", phase="completed")
+            stage("off1", 3, "Installing OFF1 and checking its all-low register record, then waiting for recovery.")
+            migration.install("OFF1"); migration.run_diagnostic(); migration.await_recovery()
+            require(prompt("off1_observation", "Did the light remain completely dark during OFF1? Type yes to proceed to five low pulses: ") == "yes",
+                    "OFF1 physical observation was not accepted; no next image or automatic restore")
+            stage("off1", 3, "All-low register evidence and physical observation accepted.", phase="completed")
+            stage("low1", 4, "Watch the light: one short low pulse each of red, green, blue, warm white and cool white, with dark gaps.")
+            migration.install("LOW1"); migration.run_diagnostic(); migration.await_recovery()
+            require(prompt("low1_observation", "Were those five low pulses correct, with dark gaps and no unexpected output? Type yes: ") == "yes",
+                    "LOW1 physical observation was not accepted; no production image or automatic restore")
+            migration.accept_physical_checks(off_was_dark=True, low_channels_expected=True)
+            stage("low1", 4, "Five-channel record and physical observation accepted.", phase="completed")
+            stage("lighting", 5, "Installing and verifying the original lighting controller, then confirming it once.")
+            migration.install("lighting"); migration.confirm_controller()
+            stage("lighting", 5, "Original lighting controller confirmation read back.", phase="completed")
+        stage("esp", esp_index, "Uploading the ESP application once. Keep power connected; acceptance and first boot are separate checks.", total=total)
         migration.install_esp(plan["esp_image"], plan["esp_metadata"]["sha256"], stock_profile=plan["profile"])
         session.close(); session = None
-        stage("esp", 6, "Stock ESP accepted the image; independent first-boot acceptance remains.", phase="completed")
-        stage("native", 7, "Waiting for native HTTP, exact image/assets, and the acceptance client's verified setup."
+        stage("esp", esp_index, "Stock ESP accepted the image; independent first-boot acceptance remains.", phase="completed", total=total)
+        stage("native", native_index, "Waiting for native HTTP, exact image/assets, and the acceptance client's verified setup."
               if events is not None else
-              "Waiting for native HTTP, exact image/assets, and your explicit dashboard confirmation.")
+              "Waiting for native HTTP, exact image/assets, and your explicit dashboard confirmation.", total=total)
         await_native_confirmation(plan, audit, get_http=get_http, clock=clock, sleep=sleep, output_fn=output_fn, events=events)
-        stage("native", 7, "Exact native image and explicit confirmation observed.", phase="completed")
+        stage("native", native_index, "Exact native image and explicit confirmation observed.", phase="completed", total=total)
         output_fn("Original controller and ESP confirmations observed; no credential was emitted by this backend."
                   if events is not None else
                   "Original controller and ESP are confirmed. The browser holds its own pairing token; no token was exported.")
@@ -1380,6 +1510,6 @@ def inspect_main() -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("prepare", "install", "restore"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("prepare", "install", "finish", "restore"):
         raise SystemExit(run_cli())
     inspect_main()

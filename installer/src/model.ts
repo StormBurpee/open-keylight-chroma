@@ -72,7 +72,15 @@ export const stages = [
   ['esp', 'Install the dashboard', 'Keep the network bridge until last'],
   ['native', 'Make it yours', 'Pair, check controls and confirm'],
 ] as const;
+export type InstallationMode = 'install' | 'finish';
+export const finishStages = [
+  ['existing', 'Check the light engine', 'Verify the installed Open Keylight controller'],
+  ['esp', 'Install the dashboard', 'Update the ESP application only'],
+  ['native', 'Make it yours', 'Pair, check controls and confirm'],
+] as const;
+export const stagesFor = (mode: InstallationMode = 'install') => mode === 'finish' ? finishStages : stages;
 export type Progress = {
+  workflow?: InstallationMode;
   stage: number; state: 'waiting' | 'running' | 'quiet' | 'prompt' | 'stopped' | 'complete';
   label: string; completed?: number; total?: number; remainingSeconds?: number;
   prompt?: {id: string; question: string};

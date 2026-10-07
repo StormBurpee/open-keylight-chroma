@@ -2,23 +2,24 @@ import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process';
 import {resolve} from 'node:path';
 import {EventLines, EventState} from './events.js';
 import {repository} from './backend.js';
-import type {PlanSummary, Progress} from './model.js';
+import type {InstallationMode, PlanSummary, Progress} from './model.js';
 import type {Accept} from './native-session.js';
 import {pythonArguments} from './python.js';
 
 export type Execution = {answer(id: string, answer: 'yes' | 'no'): void; cancel(): void; done: Promise<'installed' | 'stopped'>};
 export type Launch = (args: string[]) => ChildProcessWithoutNullStreams;
-export type Start = (plan: string, audit: string, summary: PlanSummary, update: (p: Progress) => void) => Execution;
+export type Start = (plan: string, audit: string, summary: PlanSummary, update: (p: Progress) => void, mode?: InstallationMode) => Execution;
 
 export function installationRunner(python = process.env['OKL_PYTHON'] ?? (process.platform === 'win32' ? 'python' : 'python3'), root = repository, launch?: Launch, acceptNative?: Accept): Start {
-  return (plan, audit, summary, update) => {
+  return (plan, audit, summary, update, mode = 'install') => {
     if (!audit.trim() || resolve(audit) === resolve(plan) || !/^[a-f0-9]{64}$/.test(summary.manifest_sha256)) throw new Error('Choose a new audit path separate from the verified plan.');
-    const args = pythonArguments(root, 'stock_migration.py', ['install', '--manifest', resolve(plan), '--audit', resolve(audit),
+    if (mode !== 'install' && mode !== 'finish') throw new Error('Unknown installation mode.');
+    const args = pythonArguments(root, 'stock_migration.py', [mode, '--manifest', resolve(plan), '--audit', resolve(audit),
       '--execute', '--exclusive-control', '--expected-manifest-sha256', summary.manifest_sha256, '--events-jsonl']);
     const child = launch ? launch(args) : spawn(python, args, {cwd: root, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']});
-    const state = new EventState({ip: summary.target_ip, deviceId: summary.device_id, version: summary.esp.version, elf: summary.esp.elf_sha256, manifest: summary.manifest_sha256, controllerVersion: summary.controller_version});
+    const state = new EventState({ip: summary.target_ip, deviceId: summary.device_id, version: summary.esp.version, elf: summary.esp.elf_sha256, manifest: summary.manifest_sha256, controllerVersion: summary.controller_version, workflow: mode});
     let fault: Error | undefined, stderrBytes = 0;
-    let nativeStarted = false, nativeDone: Promise<void> | undefined;
+    let nativeStarted = false, nativeDone: Promise<void> | undefined, childClosed = false;
     const publish = () => update({...state.progress});
     const write = (line: string | undefined) => {if (line && child.stdin.writable) child.stdin.write(line);};
     const cancel = () => {write(state.cancel()); publish();};
@@ -35,7 +36,7 @@ export function installationRunner(python = process.env['OKL_PYTHON'] ?? (proces
         nativeStarted = true; const action = state.progress.action;
         state.progress = {...state.progress, acceptanceState: 'running'}; publish();
         nativeDone = acceptNative(summary, {manifest: action.manifest, controllerVersion: action.controllerVersion, remainingMs: action.remainingSeconds * 1000}, audit,
-          () => !!state.progress.cancelRequested || !!fault,
+          () => !!state.progress.cancelRequested || !!fault || state.terminal === 'stopped' || (childClosed && state.terminal !== 'installed'),
           message => {state.progress = {...state.progress, label: message}; publish();})
           .then(path => {state.progress = {...state.progress, acceptanceState: 'complete', credentialPath: path, label: 'Exact application confirmed. Credentials saved privately.'}; publish();})
           .catch(fail);
@@ -46,6 +47,7 @@ export function installationRunner(python = process.env['OKL_PYTHON'] ?? (proces
     const done = new Promise<'installed' | 'stopped'>((accept, reject) => {
       child.on('error', error => {fail(error); reject(error);});
       child.on('close', async code => {
+        childClosed = true;
         try {lines.end();} catch (error) {fail(error);}
         await nativeDone;
         if (fault) return reject(fault);

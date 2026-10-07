@@ -16,6 +16,30 @@ test('preview is visibly illustrative and completed ticks are evidence-based', (
   assert.match(renderToString(<PlanCard summary={summary} />), /has not been contacted/);
 });
 
+test('finish progress labels only retained-controller checks, ESP upload and acceptance', () => {
+  const output = renderToString(<ProgressView progress={{workflow: 'finish', stage: 0, state: 'stopped', label: 'Controller unavailable'}} auditPath="/private/new-audit.jsonl" />, {columns: 96});
+  assert.match(output, /FINISH YOUR INSTALLATION/); assert.match(output, /STEP 1 \/ 3/);
+  assert.match(output, /Nothing will retry/); assert.match(output, /new-audit/);
+  assert.doesNotMatch(output, /Check darkness|Check five channels|Install the light engine/);
+});
+
+test('finish selection needs explicit review and starts once with a fresh audit', async () => {
+  const starts: {mode: string | undefined; audit: string}[] = [];
+  const screen = render(<App initialPlan="fixture.json" run={async () => summary} start={(_p, audit, _s, update, mode) => {
+    starts.push({mode, audit}); update({workflow: mode, stage: 0, state: 'stopped', label: 'Fixture stopped'});
+    return {answer: () => {}, cancel: () => {}, done: Promise.resolve('stopped')};
+  }} />);
+  await pause(30); screen.stdin.write('\r'); await pause(60); screen.stdin.write('f'); await pause(40);
+  assert.match(screen.lastFrame()!, /FINISH YOUR INSTALLATION/); assert.match(screen.lastFrame()!, /light engine is retained/);
+  screen.stdin.write('\r'); await pause(30); assert.equal(starts.length, 0);
+  screen.stdin.write(' '); await pause(30); screen.stdin.write('\r'); await pause(60);
+  assert.equal(starts.length, 1); assert.equal(starts[0]!.mode, 'finish');
+  screen.stdin.write('\x1b'); await pause(30); screen.stdin.write('f'); await pause(30);
+  screen.stdin.write(' '); await pause(30); screen.stdin.write('\r'); await pause(60);
+  assert.equal(starts.length, 2); assert.notEqual(starts[0]!.audit, starts[1]!.audit);
+  screen.unmount();
+});
+
 test('closed pairing asks for one physical hold only before native acceptance starts', () => {
   const p = {stage: 6, state: 'running' as const, label: 'Completing setup', action: {url: 'http://192.168.1.25/', pairingOpen: false, remainingSeconds: 90, manifest: 'a'.repeat(64), controllerVersion: '0.1.1.0'}};
   assert.match(renderToString(<ProgressView progress={p} />), /3 seconds/);

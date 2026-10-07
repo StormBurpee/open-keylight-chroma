@@ -9,7 +9,7 @@ import {installationRunner, type Execution} from '../src/execution.js';
 import {parseSummary, type Progress} from '../src/model.js';
 
 const python = process.env['OKL_PYTHON'] ?? (process.platform === 'win32' ? 'python' : 'python3');
-test('real Python Migration JSONL child composes with TUI prompts, native action and verified terminal result', {timeout: 20000}, async () => {
+for (const mode of ['install', 'finish'] as const) test(`real Python ${mode} JSONL child composes with TUI and verified acceptance`, {timeout: 20000}, async () => {
   const root = await mkdtemp(join(tmpdir(), 'okl actual event child '));
   try {
     const fixture = join(repository, 'tests/migration/jsonl_fixture.py');
@@ -33,9 +33,10 @@ test('real Python Migration JSONL child composes with TUI prompts, native action
         const id = progress.prompt.id; answers.add(id);
         queueMicrotask(() => job.answer(id, 'yes')); // Explicit fixture observation, never product auto-answer.
       }
-    });
+    }, mode);
     assert.equal(await job.done, 'installed');
-    assert.equal(answers.size, 2); assert.equal(nativeCalls, 1); assert.equal(stages.size, 7);
+    assert.equal(answers.size, mode === 'finish' ? 0 : 2); assert.equal(nativeCalls, 1); assert.equal(stages.size, mode === 'finish' ? 3 : 7);
+    assert.equal(latest?.workflow, mode);
     assert.equal(latest?.state, 'complete'); assert.equal(latest?.acceptanceState, 'complete');
     assert.equal(latest?.dashboardUrl, `http://${plan.target_ip}/`);
   } finally {await rm(root, {recursive: true, force: true});}

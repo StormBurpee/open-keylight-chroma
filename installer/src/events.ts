@@ -1,5 +1,5 @@
 import {StringDecoder} from 'node:string_decoder';
-import {stages, type Progress} from './model.js';
+import {stagesFor, type InstallationMode, type Progress} from './model.js';
 
 type RecordValue = Record<string, unknown>;
 const record = (v: unknown): v is RecordValue => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -15,20 +15,23 @@ export class EventState {
   private active = -1;
   private finished = new Set<number>();
   private promptIds = new Set<string>();
-  constructor(readonly target: {ip: string; deviceId: string; version: string; elf: string; manifest: string; controllerVersion?: string}) {}
+  constructor(readonly target: {ip: string; deviceId: string; version: string; elf: string; manifest: string; controllerVersion?: string; workflow?: InstallationMode}) {
+    this.progress.workflow = target.workflow ?? 'install';
+  }
 
   accept(value: unknown): void {
     requireValue(record(value) && value.v === 1 && integer(value.seq, 0, 100000) && value.seq === this.lastSequence + 1 && !this.terminal);
     const e = value;
+    const stages = stagesFor(this.target.workflow);
     requireValue(text(e.event, 40));
     switch (e.event) {
       case 'stage': {
-        requireValue(integer(e.index, 1, 7) && e.total === 7 && e.id === stages[e.index - 1]![0] && text(e.message));
+        requireValue(integer(e.index, 1, stages.length) && e.total === stages.length && e.id === stages[e.index - 1]![0] && text(e.message));
         const index = e.index - 1;
         if (e.phase === 'started') {
           requireValue(index === this.finished.size && (this.active === -1 || this.finished.has(this.active)) && !this.progress.prompt);
           this.active = index;
-          this.progress = {stage: index, state: 'running', label: e.message, finishedStages: [...this.finished], cancelRequested: this.progress.cancelRequested};
+          this.progress = {workflow: this.target.workflow ?? 'install', stage: index, state: 'running', label: e.message, finishedStages: [...this.finished], cancelRequested: this.progress.cancelRequested};
         } else {
           requireValue(e.phase === 'completed' && index === this.active && !this.finished.has(index) && !this.progress.prompt);
           this.finished.add(index);
@@ -49,14 +52,14 @@ export class EventState {
         break;
       }
       case 'prompt':
-        requireValue(this.active >= 0 && !this.progress.prompt && text(e.id, 80) && !this.promptIds.has(e.id)
+        requireValue(this.target.workflow !== 'finish' && this.active >= 0 && !this.progress.prompt && text(e.id, 80) && !this.promptIds.has(e.id)
           && ['off1_observation', 'low1_observation'].includes(String(e.kind)) && text(e.message)
           && Array.isArray(e.choices) && e.choices.length === 2 && e.choices[0] === 'yes' && e.choices[1] === 'no');
         this.promptIds.add(e.id);
         this.progress = {...this.progress, state: 'prompt', prompt: {id: e.id, question: e.message}};
         break;
       case 'action': {
-        requireValue(this.active === 6 && e.kind === 'native_acceptance' && e.device_id === this.target.deviceId
+        requireValue(this.active === stages.length - 1 && e.kind === 'native_acceptance' && e.device_id === this.target.deviceId
           && e.firmware === this.target.version && e.elf_sha256 === this.target.elf && typeof e.pairing_open === 'boolean'
           && e.manifest_sha256 === this.target.manifest && e.controller_version === this.target.controllerVersion && text(e.controller_version, 20)
           && integer(e.remaining_ms, 0, 180000) && text(e.url, 256));
@@ -68,10 +71,11 @@ export class EventState {
       }
       case 'status':
         requireValue(text(e.code, 80) && text(e.message));
+        if (e.code === 'installation_workflow') requireValue(this.active === -1 && e.workflow === (this.target.workflow ?? 'install'));
         this.progress = {...this.progress, label: e.message};
         break;
       case 'completed':
-        requireValue(e.outcome === 'installed' && this.finished.size === 7 && !this.progress.prompt);
+        requireValue(e.outcome === 'installed' && this.finished.size === stages.length && !this.progress.prompt);
         this.terminal = 'installed'; this.progress = {...this.progress, state: 'complete', label: 'Installation verified and dashboard confirmed.', action: undefined};
         break;
       case 'stopped':

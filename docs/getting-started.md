@@ -12,6 +12,8 @@ The initial stock profile is **ESP 1.0.13.0 with NXP 1.3.0.0**, using the review
 
 Initial Wi-Fi provisioning of a factory-new light is outside this installer. Once Open Keylight is installed, its dashboard handles Wi-Fi configuration without Razer software.
 
+If an earlier installation already put Open Keylight on the lighting controller but left the stock ESP, select **Finish a previous installation** with **F** at the installer's review screen. This verifies and retains the installed light engine while finishing the dashboard application. A stopped initial check also offers this option. It cannot recover an unresponsive controller or resume an incomplete flash.
+
 ## Install with the guided Windows setup
 
 The release package is designed for **Windows 10/11 x64**. It includes original firmware and the React / Ink installer. The launcher downloads verified portable Node and Python runtimes on first use—about 47 MB—without installing them globally or changing PATH.

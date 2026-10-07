@@ -5,13 +5,39 @@ import {PassThrough} from 'node:stream';
 import type {ChildProcessWithoutNullStreams} from 'node:child_process';
 import {EventLines, EventState} from '../src/events.js';
 import {installationRunner} from '../src/execution.js';
-import {stages} from '../src/model.js';
+import {stages, finishStages} from '../src/model.js';
 import {summary} from './fixtures.js';
 import {backendStream} from './backend-stream.js';
 import {parseSummary} from '../src/model.js';
 const state = () => new EventState({ip: summary.target_ip, deviceId: summary.device_id, version: summary.esp.version, elf: summary.esp.elf_sha256, manifest: summary.manifest_sha256, controllerVersion: summary.controller_version});
 const event = (s: EventState, e: Record<string, unknown>) => s.accept({v: 1, seq: s.lastSequence + 1, ...e});
 const stage = (s: EventState, n: number, phase = 'started') => event(s, {event: 'stage', id: stages[n]![0], index: n + 1, total: 7, phase, message: 'Checked'});
+
+test('finish setup is a distinct three-stage workflow; it cannot claim fresh board qualification', () => {
+  const s = new EventState({...state().target, workflow: 'finish'});
+  event(s, {event: 'status', code: 'installation_workflow', workflow: 'finish', message: 'Retain installed controller'});
+  assert.throws(() => stage(s, 0));
+  assert.throws(() => event(s, {event: 'completed', outcome: 'installed'}));
+  for (const [index, [id]] of finishStages.entries()) {
+    event(s, {event: 'stage', id, index: index + 1, total: 3, phase: 'started', message: 'Checking'});
+    assert.equal(s.progress.workflow, 'finish');
+    assert.throws(() => event(s, {event: 'status', code: 'installation_workflow', workflow: 'install', message: 'Wrong workflow'}));
+    assert.throws(() => event(s, {event: 'prompt', id: 'fake', kind: 'off1_observation', message: 'Fake diagnostic', choices: ['yes', 'no']}));
+    event(s, {event: 'stage', id, index: index + 1, total: 3, phase: 'completed', message: 'Verified'});
+  }
+  event(s, {event: 'completed', outcome: 'installed'});
+  assert.equal(s.terminal, 'installed');
+  assert.deepEqual(s.progress.finishedStages, [0, 1, 2]);
+  assert.throws(() => event(state(), {event: 'status', code: 'installation_workflow', workflow: 'finish', message: 'Unrequested workflow'}));
+});
+
+test('finish launcher sends exactly one explicit finish command and uses its matching stage schema', async () => {
+  const child = fake(); let args: string[] = [], calls = 0;
+  const job = installationRunner('python', '.', a => {args = a; calls++; return child;})('p', 'new-audit', summary, () => {}, 'finish');
+  assert.ok(args.includes('finish')); assert.ok(!args.includes('install')); assert.equal(calls, 1);
+  child.stdout.write(JSON.stringify({v: 1, seq: 0, event: 'stopped', message: 'Controller not ready', error_type: 'ValueError', automatic_retry: false, automatic_restore: false}) + '\n');
+  child.emit('close', 1); assert.equal(await job.done, 'stopped'); assert.equal(calls, 1);
+});
 
 test('seven measured stages are required; exit or counters never invent completion', () => {
   const s = state();

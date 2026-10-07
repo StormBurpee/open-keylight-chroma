@@ -1,6 +1,6 @@
 import React from 'react';
 import {Box, Text} from 'ink';
-import {artifactKeys, artifactLabels, display, stages, type Draft, type PlanSummary, type Progress} from './model.js';
+import {artifactKeys, artifactLabels, display, stagesFor, type Draft, type PlanSummary, type Progress} from './model.js';
 import type {Light} from './discovery.js';
 
 export const palette = {ink: '#EDE9DF', muted: '#8B9798', accent: '#A4E6D5', line: '#405158', amber: '#F1C477', red: '#F1948A'};
@@ -69,18 +69,24 @@ export function PlanCard({summary, details = false}: {summary: PlanSummary; deta
     <Notice>Files checked. The light has not been contacted yet.</Notice>
   </Box>;
 }
-export function ProgressView({progress, preview = false, width = 96, yes = false, running = false}: {progress: Progress; preview?: boolean; width?: number; yes?: boolean; running?: boolean}) {
+export function ProgressView({progress, preview = false, width = 96, yes = false, running = false, auditPath, canFinish = false}: {progress: Progress; preview?: boolean; width?: number; yes?: boolean; running?: boolean; auditPath?: string; canFinish?: boolean}) {
+  const stages = stagesFor(progress.workflow);
   const count = progress.completed ?? 0, total = progress.total ?? 0;
   const validCount = total > 0 && count >= 0 && count <= total;
   const bars = 24, filled = validCount ? Math.floor(count / total * bars) : 0;
-  return <Frame width={width} mode={preview ? 'INTERFACE PREVIEW · NO DEVICE ACTIVITY' : 'GUIDED INSTALLATION'} footer={preview ? 'Esc back   Ctrl+C exit' : running ? '↑↓ choose observation   Enter answer   Ctrl+C stop after this stage' : 'Esc back   Ctrl+C exit'}>
+  return <Frame width={width} mode={preview ? 'INTERFACE PREVIEW · NO DEVICE ACTIVITY' : progress.workflow === 'finish' ? 'FINISH YOUR INSTALLATION' : 'GUIDED INSTALLATION'} footer={preview ? 'Esc back   Ctrl+C exit' : running ? '↑↓ choose observation   Enter answer   Ctrl+C stop after this stage' : `${canFinish ? 'F finish a previous installation   ' : ''}Esc review   Ctrl+C exit`}>
     <Box flexDirection={width < 76 ? 'column' : 'row'} gap={2}>
       <Box flexDirection="column" width={width < 76 ? undefined : 29} flexShrink={0}>
         {stages.map(([id, title], i) => <Box key={id}><Text color={i === progress.stage ? palette.accent : palette.muted}>{progress.finishedStages?.includes(i) ? '✓' : String(i + 1).padStart(2, '0')}  {title}</Text></Box>)}
       </Box>
       <Box flexDirection="column" flexGrow={1}>
-        <Heading eyebrow={`STEP ${progress.stage + 1} / 7`} title={stages[progress.stage]?.[1] ?? 'Installer status'} detail={stages[progress.stage]?.[2]} />
+        <Heading eyebrow={`STEP ${progress.stage + 1} / ${stages.length}`} title={stages[progress.stage]?.[1] ?? 'Installer status'} detail={stages[progress.stage]?.[2]} />
         <Text color={palette.ink}>{display(progress.label)}</Text>
+        {progress.state === 'stopped' && !running && <Box marginTop={1} flexDirection="column">
+          <Text color={palette.amber}>Installation stopped. Nothing will retry automatically.</Text>
+          {canFinish && <Text color={palette.muted}>Already installed the Open Keylight light engine? Press F to verify it and finish the dashboard installation.</Text>}
+          {auditPath && <Text color={palette.muted} wrap="truncate-middle">Audit: {display(auditPath, 1000)}</Text>}
+        </Box>}
         {validCount && <Box marginTop={1} flexDirection="column"><Text color={palette.accent}>{'━'.repeat(filled)}<Text color={palette.line}>{'─'.repeat(bars - filled)}</Text></Text><Text color={palette.muted}>{count} / {total} · {Math.floor(count / total * 100)}%</Text></Box>}
         {progress.state === 'quiet' && <Notice>{`Letting the controller finish and restart${progress.remainingSeconds === undefined ? '' : ` · ${progress.remainingSeconds}s remaining`}. Keep the light powered.`}</Notice>}
         {progress.prompt && <Box marginTop={1} flexDirection="column"><Text bold color={palette.amber}>{display(progress.prompt.question)}</Text><Text color={palette.muted}>Choose only what you observed. No answer is assumed.</Text><Button label="No / unsure — stop" active={!yes} /><Button label="Yes — the observation matches" active={yes} /></Box>}
