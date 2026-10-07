@@ -83,10 +83,15 @@ static bool authorized(httpd_req_t *request) {
 
 static cJSON *device_json(void) {
     cJSON *json = cJSON_CreateObject();
+    const esp_app_desc_t *description = esp_app_get_description();
+    char elf_sha256[65];
+    for (unsigned i = 0; i < 32; ++i)
+        snprintf(elf_sha256 + i * 2, 3, "%02x", description->app_elf_sha256[i]);
     app_lock();
     cJSON_AddStringToObject(json, "id", app.id); cJSON_AddStringToObject(json, "name", app.config.name);
     cJSON_AddStringToObject(json, "model", "Open Keylight Chroma");
-    cJSON_AddStringToObject(json, "firmware", esp_app_get_description()->version);
+    cJSON_AddStringToObject(json, "firmware", description->version);
+    cJSON_AddStringToObject(json, "firmware_elf_sha256", elf_sha256);
     cJSON_AddNumberToObject(json, "api_version", 1); cJSON_AddNumberToObject(json, "uptime_ms", app_now_ms());
     cJSON_AddNumberToObject(json, "free_heap_bytes", esp_get_free_heap_size());
     cJSON_AddNumberToObject(json, "reset_reason", esp_reset_reason());

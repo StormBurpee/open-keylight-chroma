@@ -1853,6 +1853,11 @@
           "firmware": {
             "type": "string"
           },
+          "firmware_elf_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 of the running ESP ELF, embedded by the build. This identifies the build, not the OTA binary file."
+          },
           "api_version": {
             "const": 1
           },

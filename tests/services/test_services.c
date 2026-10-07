@@ -415,7 +415,10 @@ static void http_tests(void) {
 }
 static void controller_json_tests(void) {
     memset(&app,0,sizeof(app));
+    for (unsigned i=0;i<32;++i) descriptor.app_elf_sha256[i]=(uint8_t)(i*8+7);
     cJSON *document=device_json(), *controller=cJSON_GetObjectItemCaseSensitive(document,"controller");
+    CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(document,"firmware_elf_sha256")->valuestring,
+        "070f171f272f373f474f575f676f777f878f979fa7afb7bfc7cfd7dfe7eff7ff"));
     CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(controller,"ready")));
     CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(controller,"backend")->valuestring,"unknown"));
     CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(controller,"status")->valuestring,"starting"));
