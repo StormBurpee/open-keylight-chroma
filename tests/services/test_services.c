@@ -2,13 +2,22 @@
 #include <stdio.h>
 #include <string.h>
 #include "../../firmware/main/scene_store.c"
+static void *clients_test_malloc(size_t);
+static void *clients_test_calloc(size_t, size_t);
+static void clients_test_free(void *);
+#define malloc clients_test_malloc
+#define calloc clients_test_calloc
+#define free clients_test_free
 #include "../../firmware/main/storage.c"
+#undef malloc
+#undef calloc
+#undef free
 #include "../../firmware/main/http_server.c"
 
 static unsigned assertions;
 #define CHECK(x) do { ++assertions; if (!(x)) { fprintf(stderr, "%s:%u: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 app_context app;
-typedef struct { char key[32]; unsigned char data[4096]; size_t size; } blob;
+typedef struct { char key[32]; unsigned char data[32768]; size_t size; } blob;
 static blob stored[16], pending;
 static unsigned stored_count, locked, writes, commits, closes, random_counter, recovery_requests;
 static unsigned issued_routes, submit_calls, settings_calls, update_calls, confirm_calls, session_closes;
@@ -22,7 +31,11 @@ static uint64_t now_ms, receive_delay;
 static size_t body_used, chunk;
 static int failure, sha_failure, recv_failure;
 static const char *read_failure_key;
-static bool commit_persists_on_failure;
+static bool commit_persists_on_failure, set_persists_on_failure;
+static bool json_fail_allocations, json_fail_after_pair_commit;
+static unsigned client_allocations, client_fail_allocation, client_live_allocations;
+static esp_partition_t nvs_partition = {.size = 16384};
+static bool partition_missing;
 static bool namespace_absent;
 static unsigned flash_depth, flash_entries;
 static bool flash_failure, write_handle;
@@ -30,6 +43,23 @@ static const char *header_host, *header_origin, *header_auth, *header_type, *bod
 static char response_body[16384];
 static bool connection_close;
 static esp_app_desc_t descriptor = {.version = "host-test"};
+
+static void *clients_test_malloc(size_t size) {
+    if (++client_allocations == client_fail_allocation) return NULL;
+    void *p = malloc(size); if (p) ++client_live_allocations; return p;
+}
+static void *clients_test_calloc(size_t count, size_t size) {
+    if (++client_allocations == client_fail_allocation) return NULL;
+    void *p = calloc(count, size); if (p) ++client_live_allocations; return p;
+}
+static void clients_test_free(void *p) {
+    if (p) { CHECK(client_live_allocations); --client_live_allocations; free(p); }
+}
+static void *json_test_malloc(size_t size) { return json_fail_allocations ? NULL : malloc(size); }
+const esp_partition_t *esp_partition_find_first(int type, int subtype, const char *name) {
+    CHECK(type == ESP_PARTITION_TYPE_DATA && subtype == ESP_PARTITION_SUBTYPE_DATA_NVS && !strcmp(name, "nvs"));
+    return partition_missing ? NULL : &nvs_partition;
+}
 
 uint64_t app_now_ms(void) { return now_ms; }
 void app_lock(void) { CHECK(!locked); locked = 1; }
@@ -65,8 +95,14 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *out, size_t *
 }
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *data, size_t size) {
     CHECK(handle == 1 && size <= sizeof(pending.data) && flash_depth == 1 && write_handle); ++writes;
-    if (failure == 2) return ESP_FAIL;
+    if (failure == 6) return ESP_ERR_NVS_NOT_ENOUGH_SPACE;
+    if (failure == 2 && !set_persists_on_failure) return ESP_FAIL;
     snprintf(pending.key, sizeof(pending.key), "%s", key); memcpy(pending.data, data, size); pending.size = size;
+    if (failure == 2) {
+        blob *entry = find_blob(key);
+        if (!entry) { CHECK(stored_count < 16); entry = &stored[stored_count++]; }
+        *entry = pending; return ESP_FAIL;
+    }
     return ESP_OK;
 }
 esp_err_t nvs_get_u8(nvs_handle_t handle, const char *key, uint8_t *out) {
@@ -85,7 +121,9 @@ esp_err_t nvs_commit(nvs_handle_t handle) {
     CHECK(handle == 1 && flash_depth == 1 && write_handle); ++commits; if (failure == 3 && !commit_persists_on_failure) return ESP_FAIL;
     blob *entry = find_blob(pending.key);
     if (!entry) { CHECK(stored_count < 16); entry = &stored[stored_count++]; }
-    *entry = pending; return failure == 3 ? ESP_FAIL : ESP_OK;
+    *entry = pending;
+    if (json_fail_after_pair_commit && !strcmp(pending.key, "clients_v2")) json_fail_allocations = true;
+    return failure == 3 ? ESP_FAIL : ESP_OK;
 }
 void nvs_close(nvs_handle_t handle) {
     CHECK(handle == 1 || handle == 2);
@@ -166,16 +204,25 @@ static void request_reset(const char *data) {
     response_code = request_reads = session_closes = 0; connection_close = false; response_body[0] = 0;
 }
 static void reset(void) {
+    cJSON_InitHooks(NULL); json_fail_allocations = json_fail_after_pair_commit = false;
     CHECK(!locked && !flash_depth && !write_handle);
+    clients_test_free(app.clients); app.clients = NULL; CHECK(!client_live_allocations);
+    clients_writable = true; clients_auth_uncertain = false;
+    client_allocations = client_fail_allocation = 0; nvs_partition.size = 16384; partition_missing = false;
     flash_entries=0;flash_failure=false;
     memset(&app, 0, sizeof(app)); memset(stored, 0, sizeof(stored)); memset(&pending, 0, sizeof(pending));
     snprintf(app.ip, sizeof(app.ip), "192.0.2.1"); snprintf(app.hostname, sizeof(app.hostname), "keylight-test");
     now_ms = 100; stored_count = writes = commits = closes = random_counter = recovery_requests = 0;
     issued_routes = submit_calls = settings_calls = update_calls = confirm_calls = server_handlers = 0;
-    failure = sha_failure = 0; read_failure_key = NULL; commit_persists_on_failure = namespace_absent = false; scene_store_ready = false;
+    failure = sha_failure = 0; read_failure_key = NULL;
+    set_persists_on_failure = commit_persists_on_failure = namespace_absent = false; scene_store_ready = false;
     request_reset("{}");
 }
-static void pair(char token[65], const char *label) { app_pair_window(); CHECK(app_issue_token(label, token) == ESP_OK); CHECK(app_token_valid(token)); }
+static void pair(char token[65], const char *label) {
+    app_pair_window(); esp_err_t result = app_issue_token(label, token);
+    if (result != ESP_OK) fprintf(stderr, "Pair fixture failed: %s, result %d, count %zu, random %u\n", label, result, app.token_count, random_counter);
+    CHECK(result == ESP_OK); CHECK(app_token_valid(token));
+}
 static void put_fixture(const char *key, const void *data, size_t size) {
     blob *entry = find_blob(key);
     if (!entry) { CHECK(stored_count < 16); entry = &stored[stored_count++]; }
@@ -191,6 +238,7 @@ static unsigned scene_count(void) {
     unsigned count = 0; for (unsigned i = 0; i < KL_SCENES; ++i) count += app.scenes[i].used; return count;
 }
 static void reboot_storage(void) {
+    clients_test_free(app.clients); app.clients = NULL;
     memset(&app, 0, sizeof(app)); scene_store_ready = false; memset(&pending, 0, sizeof(pending));
 }
 static void scene_tests(void) {
@@ -328,50 +376,183 @@ static void encoding_storage_tests(void) {
           && !memcmp(&app.config, &config, sizeof(config)) && app.token_count == 1);
 }
 static void storage_tests(void) {
-    char tokens[4][65], token[65], id[17];
-    reset(); CHECK(app_storage_init() == ESP_OK && writes == 1 && !app.token_count); CHECK(app.config.ssid[0] && app.config.password[0]);
+    enum { MANY_CLIENTS = 40 };
+    char tokens[MANY_CLIENTS][65], token[65], id[17];
+    reset(); CHECK(app_storage_init() == ESP_OK && writes == 1 && !app.token_count);
     app_config saved = app.config;
-    for (unsigned i = 0; i < 4; ++i) { pair(tokens[i], "Test client"); CHECK(!app.pair_until_ms && app.token_count == i + 1); }
-    app_pair_window(); unsigned prior_writes = writes; CHECK(app_issue_token("Fifth", token) == ESP_ERR_INVALID_STATE && writes == prior_writes);
-    for (unsigned i = 0; i < 4; ++i) CHECK(app_token_valid(tokens[i]));
+    for (unsigned i = 0; i < MANY_CLIENTS; ++i) {
+        pair(tokens[i], "Test client"); CHECK(!app.pair_until_ms && app.token_count == i + 1);
+    }
+    for (unsigned i = 0; i < MANY_CLIENTS; ++i) CHECK(app_token_valid(tokens[i]));
     cJSON *list = app_clients_json(); char *text = cJSON_PrintUnformatted(list); CHECK(text);
-    for (unsigned i = 0; i < 4; ++i) CHECK(!strstr(text, tokens[i]));
+    CHECK(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(list, "clients")) == MANY_CLIENTS);
+    for (unsigned i = 0; i < MANY_CLIENTS; ++i) CHECK(!strstr(text, tokens[i]));
     free(text); cJSON_Delete(list);
-    client_id(app.token_hashes[1], id); CHECK(app_revoke_client(id) == 200 && app.token_count == 3);
-    CHECK(!app_token_valid(tokens[1]) && app_token_valid(tokens[0]) && app_token_valid(tokens[2]) && app_token_valid(tokens[3]));
+    client_id(app.clients[1].hash, id); CHECK(app_revoke_client(id) == 200 && app.token_count == MANY_CLIENTS - 1);
+    CHECK(!app_token_valid(tokens[1]) && app_token_valid(tokens[0]) && app_token_valid(tokens[39]));
     CHECK(app_revoke_client(id) == 404 && app_revoke_client("bad") == 404);
-    pair(token, "Replacement"); CHECK(app.token_count == 4);
-    memset(app.token_hashes, 0, sizeof(app.token_hashes)); app.token_count = 0;
-    CHECK(app_storage_init() == ESP_OK && app.token_count == 4 && app_token_valid(token));
+    pair(token, "Replacement"); CHECK(app.token_count == MANY_CLIENTS);
+    CHECK(app_storage_init() == ESP_OK && app.token_count == MANY_CLIENTS && app_token_valid(token));
     CHECK(app_clear_clients() == ESP_OK && !app.token_count && app.pair_until_ms > now_ms);
     CHECK(!app_token_valid(token) && !memcmp(&saved, &app.config, sizeof(saved)));
-    app.token_count = 99; CHECK(app_storage_init() == ESP_OK && app.token_count == 0);
-    for (int fail = 1; fail <= 4; ++fail) {
-        reset(); pair(tokens[0], "Existing"); app_pair_window(); failure = fail <= 3 ? fail : 0; sha_failure = fail == 4;
-        memset(token, 0x55, sizeof(token)); CHECK(app_issue_token("New", token) != ESP_OK);
-        CHECK(app.token_count == 1 && app.pair_until_ms > now_ms);
-        for (unsigned i = 0; i < sizeof(token); ++i) CHECK(!token[i]);
-        sha_failure = 0; failure = 0; CHECK(app_token_valid(tokens[0]));
-        if (fail <= 3) {
-            failure = fail; client_id(app.token_hashes[0], id);
-            CHECK(app_revoke_client(id) == 503 && app.token_count == 1 && app_token_valid(tokens[0]));
-            CHECK(app_clear_clients() != ESP_OK && app.token_count == 1);
-        }
+    CHECK(app_storage_init() == ESP_OK && app.token_count == 0);
+
+    /* Real legacy layout remains byte-identical; migration is the first
+     * successful collection edit, never a destructive erase or boot rewrite. */
+    reset();
+    for (unsigned i = 0; i < 4; ++i) pair(tokens[i], "Legacy owner");
+    clients_record legacy = {.count = 4};
+    for (unsigned i = 0; i < 4; ++i) {
+        memcpy(legacy.hashes[i], app.clients[i].hash, 32);
+        memcpy(legacy.labels[i], app.clients[i].label, 33);
     }
-    reset(); app_pair_window(); now_ms = app.pair_until_ms; CHECK(app_issue_token("Expired", token) == ESP_ERR_INVALID_STATE && !writes);
+    legacy.labels[0][32] = 'x'; /* Old loader ignored padding after NUL. */
+    reset(); put_fixture("clients_v1", &legacy, sizeof(legacy));
+    CHECK(app_storage_init() == ESP_OK && app.token_count == 4 && !find_blob("clients_v2"));
+    random_counter = 4; /* The deterministic test RNG must not repeat saved credentials. */
+    for (unsigned i = 0; i < 4; ++i) CHECK(app_token_valid(tokens[i]));
+    CHECK(app.clients[0].label[32] == 0);
+    pair(token, "Fifth client"); CHECK(app.token_count == 5 && find_blob("clients_v2"));
+    CHECK(!memcmp(find_blob("clients_v1")->data, &legacy, sizeof(legacy)));
+    CHECK(app_storage_init() == ESP_OK && app.token_count == 5 && app_token_valid(token));
+    client_id(app.clients[0].hash, id); CHECK(app_revoke_client(id) == 200);
+    CHECK(app_storage_init() == ESP_OK && app.token_count == 4 && !app_token_valid(tokens[0]));
+    CHECK(app_clear_clients() == ESP_OK && app_storage_init() == ESP_OK && !app.token_count);
+    CHECK(!memcmp(find_blob("clients_v1")->data, &legacy, sizeof(legacy)));
+
+    /* Failed admission/allocation writes nothing and never consumes a window. */
+    for (unsigned fault = 0; fault < 5; ++fault) {
+        reset(); pair(tokens[0], "Existing"); app_pair_window();
+        unsigned before = writes; uint64_t window = app.pair_until_ms;
+        if (fault < 2) client_fail_allocation = client_allocations + fault + 1;
+        if (fault == 2) flash_failure = true;
+        if (fault == 3) failure = 1;
+        if (fault == 4) sha_failure = 1;
+        memset(token, 0x55, sizeof(token)); CHECK(app_issue_token("New", token) != ESP_OK);
+        CHECK(app.token_count == 1 && app.pair_until_ms == window && writes == before && clients_writable);
+        for (unsigned i = 0; i < sizeof(token); ++i) CHECK(!token[i]);
+        sha_failure = 0; failure = 0; flash_failure = false; client_fail_allocation = 0;
+        CHECK(app_token_valid(tokens[0]) && client_live_allocations == 1);
+    }
+    /* Both set_blob and commit can report an error after durable publication.
+     * Add preserves existing auth; uncertain revoke/clear fail auth closed. */
+    for (unsigned action = 0; action < 3; ++action) for (int stage = 2; stage <= 3; ++stage)
+        for (unsigned durable = 0; durable < 2; ++durable) {
+            reset(); pair(tokens[0], "First"); pair(tokens[1], "Second"); app_pair_window();
+            uint64_t window = app.pair_until_ms;
+            failure = stage; set_persists_on_failure = commit_persists_on_failure = durable;
+            if (action == 0) CHECK(app_issue_token("Uncertain", token) != ESP_OK);
+            else if (action == 1) { client_id(app.clients[0].hash, id); CHECK(app_revoke_client(id) == 503); }
+            else CHECK(app_clear_clients() != ESP_OK);
+            CHECK(app.token_count == 2 && !clients_writable && app.pair_until_ms == window);
+            CHECK(app_token_valid(tokens[0]) == (action == 0));
+            CHECK(app_clients_json() == NULL);
+            unsigned before = writes;
+            CHECK(app_issue_token("No overwrite", token) == ESP_FAIL && writes == before);
+            failure = 0; set_persists_on_failure = commit_persists_on_failure = false;
+            CHECK(app_storage_init() == ESP_OK);
+            size_t expected = !durable ? 2 : action == 0 ? 3 : action == 1 ? 1 : 0;
+            CHECK(app.token_count == expected && clients_writable && !clients_auth_uncertain);
+            CHECK(app_token_valid(tokens[0]) == (!durable || action == 0));
+            CHECK(app_token_valid(tokens[1]) == (!durable || action != 2));
+        }
+
+    /* Storage capacity is derived from the installed partition, not a count.
+     * A different real bound changes admission without any compiled maximum. */
+    reset(); pair(tokens[0], "Existing"); app_pair_window();
+    nvs_partition.size = CLIENT_HEADER_BYTES + CLIENT_ENTRY_BYTES;
+    unsigned before = writes; CHECK(app_issue_token("Full", token) == ESP_ERR_NVS_VALUE_TOO_LONG && writes == before);
+    CHECK(app.token_count == 1 && app.pair_until_ms > now_ms && clients_writable && app_token_valid(tokens[0]));
+    nvs_partition.size += CLIENT_ENTRY_BYTES;
+    CHECK(app_issue_token("Now fits", token) == ESP_OK && app.token_count == 2);
+    reset(); pair(tokens[0], "Existing"); app_pair_window(); failure = 6;
+    CHECK(app_issue_token("NVS full", token) == ESP_ERR_NVS_NOT_ENOUGH_SPACE && app.token_count == 1 && app.pair_until_ms > now_ms);
+    CHECK(app_token_valid(tokens[0]) && !clients_writable); failure = 0;
+    CHECK(app_clear_clients() == ESP_OK && clients_writable && !app.token_count);
+
+    /* Present invalid/unreadable v2 must never revive retained v1. */
+    for (unsigned kind = 0; kind < 14; ++kind) {
+        reset(); pair(token, "Valid"); blob *entry = find_blob("clients_v2"); CHECK(entry);
+        if (kind == 13) {
+            pair(tokens[0], "Second");
+            memcpy(entry->data + CLIENT_HEADER_BYTES + CLIENT_ENTRY_BYTES,
+                entry->data + CLIENT_HEADER_BYTES, 8);
+        }
+        put_fixture("clients_v1", &legacy, sizeof(legacy));
+        if (kind == 0) entry->data[0] ^= 1;
+        if (kind == 1) entry->data[4] = 3;
+        if (kind == 2) entry->data[5] = 1;
+        if (kind == 3) entry->data[12] = 1;
+        if (kind == 4) clients_put32(entry->data + 8, UINT32_MAX);
+        if (kind == 5) --entry->size;
+        if (kind == 6) memset(entry->data + CLIENT_HEADER_BYTES + 32, 'x', 33);
+        if (kind == 7) entry->data[CLIENT_HEADER_BYTES + 32] = '\n';
+        if (kind == 8) entry->data[CLIENT_HEADER_BYTES + 64] = 'x';
+        if (kind == 9) read_failure_key = "clients_v2";
+        if (kind == 10) entry->size = SIZE_MAX;
+        if (kind == 11) entry->size = nvs_partition.size + 1;
+        if (kind == 12) partition_missing = true;
+        unsigned allocated = client_allocations;
+        CHECK(app_storage_init() != ESP_OK && !app.token_count && !clients_writable && !app_token_valid(token));
+        if (kind == 10 || kind == 11 || kind == 12) CHECK(client_allocations == allocated);
+        CHECK(client_live_allocations == 0);
+        read_failure_key = NULL; partition_missing = false;
+        CHECK(app_clear_clients() == ESP_OK && app_storage_init() == ESP_OK && !app.token_count);
+    }
+    for (unsigned nth = 1; nth <= 2; ++nth) {
+        reset(); pair(token, "Read allocation"); client_fail_allocation = client_allocations + nth;
+        CHECK(app_storage_init() == ESP_ERR_NO_MEM && !app.token_count && !clients_writable && !client_live_allocations);
+        client_fail_allocation = 0; CHECK(app_storage_init() == ESP_OK && app_token_valid(token));
+    }
+    for (unsigned kind = 0; kind < 5; ++kind) {
+        reset(); clients_record invalid = legacy; size_t size = sizeof(invalid);
+        if (kind == 0) invalid.count = 5;
+        if (kind == 1) memset(invalid.labels[0], 'x', sizeof(invalid.labels[0]));
+        if (kind == 2) invalid.labels[0][0] = '\n';
+        if (kind == 3) --size;
+        put_fixture("clients_v1", &invalid, size);
+        if (kind == 4) read_failure_key = "clients_v1";
+        CHECK(app_storage_init() != ESP_OK && !app.token_count && !clients_writable && !client_live_allocations);
+        CHECK(!find_blob("clients_v2"));
+    }
+    reset(); pair(tokens[0], "Duplicate source"); --random_counter; app_pair_window(); before = writes;
+    CHECK(app_issue_token("Duplicate ID", token) == ESP_FAIL && writes == before && app.token_count == 1 && app.pair_until_ms > now_ms);
+    reset(); app_pair_window(); now_ms = app.pair_until_ms;
+    CHECK(app_issue_token("Expired", token) == ESP_ERR_INVALID_STATE && !writes);
     CHECK(!app_token_valid(NULL) && !app_token_valid("short"));
     const char *bad[] = {"", "has\nnewline", "123456789012345678901234567890123", NULL};
     for (unsigned i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) { app_pair_window(); CHECK(app_issue_token(bad[i], token) == ESP_ERR_INVALID_ARG && !writes); }
-    for (unsigned kind = 0; kind < 4; ++kind) {
-        reset(); pair(token, "Valid"); blob *entry = find_blob("clients_v1"); CHECK(entry);
-        clients_record corrupt; memcpy(&corrupt, entry->data, sizeof(corrupt));
-        if (!kind) corrupt.count = 5;
-        if (kind == 1) memset(corrupt.labels[0], 'x', 33);
-        if (kind == 2) corrupt.labels[0][0] = '\n';
-        memcpy(entry->data, &corrupt, sizeof(corrupt)); if (kind == 3) --entry->size;
-        memset(&app, 0, sizeof(app)); CHECK(app_storage_init() == ESP_OK && !app.token_count && !app_token_valid(token));
-    }
     reset(); failure = 5; CHECK(app_storage_init() != ESP_OK && !writes);
+}
+static void pairing_http_failure_tests(void) {
+    httpd_req_t request = {.handle = (void *)1, .uri = "/api/v1/pair", .method = HTTP_POST};
+    char token[65];
+    for (unsigned fault = 0; fault < 5; ++fault) {
+        reset(); pair(token, "Existing"); app_pair_window();
+        uint64_t window = app.pair_until_ms; unsigned before = writes;
+        if (fault == 0) now_ms = app.pair_until_ms;
+        if (fault == 1) client_fail_allocation = client_allocations + 1;
+        if (fault == 2) failure = 6;
+        if (fault == 3) failure = 2;
+        if (fault == 4) nvs_partition.size = CLIENT_HEADER_BYTES + CLIENT_ENTRY_BYTES;
+        request_reset("{\"label\":\"New client\"}"); request.content_len = strlen(body);
+        CHECK(route(&request) == ESP_OK);
+        CHECK(response_code == (fault == 0 ? 403u : fault == 3 ? 503u : 507u));
+        CHECK(app.token_count == 1 && app.pair_until_ms == window && app_token_valid(token));
+        CHECK(!strstr(response_body, "token") && !strstr(response_body, "four"));
+        CHECK(writes == before + (fault == 2 || fault == 3));
+    }
+    /* Durable issuance must not depend on another response heap allocation. */
+    reset(); app_pair_window();
+    cJSON_Hooks hooks = {.malloc_fn = json_test_malloc, .free_fn = free}; cJSON_InitHooks(&hooks);
+    json_fail_after_pair_commit = true;
+    request_reset("{\"label\":\"Allocation boundary\"}"); request.content_len = strlen(body);
+    CHECK(route(&request) == ESP_OK && response_code == 201 && json_fail_allocations);
+    CHECK(app.token_count == 1 && !app.pair_until_ms);
+    cJSON_InitHooks(NULL); json_fail_allocations = json_fail_after_pair_commit = false;
+    cJSON *reply = cJSON_Parse(response_body); CHECK(reply);
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(reply, "token");
+    CHECK(cJSON_IsString(value) && app_token_valid(value->valuestring)); cJSON_Delete(reply);
 }
 static void http_tests(void) {
     char token[65], auth[80]; httpd_req_t request = {.handle = (void *)1, .uri = "/api/v1/pair", .method = HTTP_POST};
@@ -474,6 +655,7 @@ static void http_tests(void) {
     CHECK(app_http_start() == ESP_OK && server_handlers == 5);
 }
 static void controller_json_tests(void) {
+    clients_test_free(app.clients); app.clients = NULL;
     memset(&app,0,sizeof(app));
     for (unsigned i=0;i<32;++i) descriptor.app_elf_sha256[i]=(uint8_t)(i*8+7);
     cJSON *document=device_json(), *controller=cJSON_GetObjectItemCaseSensitive(document,"controller");
@@ -509,4 +691,4 @@ static void flash_admission_tests(void) {
     CHECK(app_scene_save(0,&edited)!=ESP_OK && writes==before && !memcmp(&app.scenes[0],&prior,sizeof(prior)));
     CHECK(!flash_depth && !write_handle);
 }
-int main(void) { flash_admission_tests(); storage_tests(); scene_tests(); encoding_storage_tests(); http_tests(); controller_json_tests(); printf("PASS %u assertions against actual storage.c/scene_store.c/http_server.c\n", assertions); return 0; }
+int main(void) { flash_admission_tests(); storage_tests(); scene_tests(); encoding_storage_tests(); pairing_http_failure_tests(); http_tests(); controller_json_tests(); reset(); printf("PASS %u assertions against actual storage.c/scene_store.c/http_server.c\n", assertions); return 0; }

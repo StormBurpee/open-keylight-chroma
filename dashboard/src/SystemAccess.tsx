@@ -305,9 +305,9 @@ export function ClientAccess({
         <h3>Who can control your light</h3>
       </div>
       <p className="panel-copy">
-        Up to four paired clients. Revoking access invalidates that client’s
-        token. A trusted client or the physical button can open a new pairing
-        window. This list never exposes tokens.
+        Pair your browsers, apps and integrations. Revoking access invalidates
+        that client’s token. A trusted client or the physical button can open a
+        new pairing window. This list never exposes tokens.
       </p>
       {token || store.transport.demo ? (
         <>
@@ -315,7 +315,7 @@ export function ClientAccess({
             <span>
               {loading
                 ? "Reading paired clients…"
-                : `${clients.length} of 4 slots used`}
+                : `${clients.length} paired ${clients.length === 1 ? "client" : "clients"}`}
             </span>
             <Button
               variant="ghost"

@@ -33,6 +33,7 @@ static unsigned publish_call;
 static uint32_t current_revision;
 static unsigned calls, claim_calls, release_calls, read_calls, frames, writes;
 static unsigned fail_call, cancel_call, steal_call, lose_call;
+static unsigned pair_stop_call;
 static bool claimed, different_name, corrupt_read, slow_compound;
 static uint8_t framebuffer[3];
 static okl_request history[4096];
@@ -49,6 +50,7 @@ static okl_result boundary(uint64_t deadline, uint64_t maximum) {
     if (calls == cancel_call) ++current_revision;
     if (calls == steal_call) claimed = false;
     if (calls == lose_call) driver.needs_recovery = 1;
+    if (calls == pair_stop_call) output.pairing_stop = true;
     if (calls==publish_call) published_deadline=now+1400000;
     uint64_t hard=driver.admission_deadline_us;
     if (published_deadline && (!hard || published_deadline<hard)) hard=published_deadline;
@@ -113,6 +115,7 @@ static void reset(void) {
     now=latency=admission_wait=published_deadline=0;admission_call=wire_calls=publish_call=0;
     current_revision=7;calls=claim_calls=release_calls=read_calls=frames=writes=0;
     fail_call=cancel_call=steal_call=lose_call=0;claimed=different_name=corrupt_read=slow_compound=false;
+    pair_stop_call=0;
     memset(framebuffer,0,sizeof(framebuffer));memset(history,0,sizeof(history));
     state=(okl_light_state){.effect=1,.color_count=1,.colors={30,80,140},.color_brightness=51,.temperature_kelvin=5300};
     initial=state;CHECK(kl_update_indicator_begin(&evidence,1000,0));
@@ -302,9 +305,71 @@ static void flash_admission_budgets(void) {
     kl_update_output_limit(&output,ceiling+1000);CHECK(output.deadline_us==ceiling);
     kl_update_output_limit(&output,ceiling-1000);CHECK(output.deadline_us==ceiling-1000);
 }
+static kl_update_output_result pair_step(const uint8_t *known, bool stop) {
+    return kl_pairing_output_step(&output,&driver,1,0,7,known,stop,guard,&output);
+}
+static void pairing_feedback(void) {
+    for(unsigned mode=0;mode<5;++mode) {
+        reset();
+        if(mode==1){state.effect=0;state.color_count=0;memset(state.colors,0,6);state.white_brightness=71;}
+        if(mode==2){state.effect=0;state.color_count=0;memset(state.colors,0,6);state.color_brightness=0;}
+        if(mode==3){state.effect=2;state.flags=1;state.speed=2;state.color_count=2;}
+        uint8_t known[3]={18,27,36};
+        if(mode==4){state.effect=8;state.color_count=0;memset(state.colors,0,6);state.color_brightness=255;claimed=true;memcpy(framebuffer,known,3);}
+        initial=state;
+        CHECK(pair_step(mode==4?known:NULL,false)==KL_INDICATOR_ACTIVE);
+        CHECK(!framebuffer[0] && !framebuffer[1] && !framebuffer[2] && state.color_brightness==12);
+        uint8_t previous=0;
+        for(unsigned ms=20;ms<600;ms+=20) {
+            now=ms*1000;
+            CHECK(pair_step(NULL,false)==KL_INDICATOR_ACTIVE && !framebuffer[0] && !framebuffer[2]);
+            if(ms<=300)CHECK(framebuffer[1]>=previous);else CHECK(framebuffer[1]<=previous);
+            if(ms==300)CHECK(framebuffer[1]==255);
+            previous=framebuffer[1];
+        }
+        now=600000;CHECK(pair_step(NULL,false)==KL_INDICATOR_RESTORED);
+        CHECK(same(&state,&initial) && output.resume_custom==(mode==4));
+        if(mode==4)CHECK(claimed && !memcmp(framebuffer,known,3));else CHECK(!claimed);
+        unsigned before=calls;now=30000000;CHECK(pair_step(NULL,false)==KL_INDICATOR_NONE && calls==before);
+    }
+    reset();now=250000;CHECK(pair_step(NULL,false)==KL_INDICATOR_NONE && !calls);
+    reset();CHECK(pair_step(NULL,true)==KL_INDICATOR_NONE && !calls);
+    reset();CHECK(pair_step(NULL,false)==KL_INDICATOR_ACTIVE);now=40000;
+    CHECK(pair_step(NULL,true)==KL_INDICATOR_RESTORED && same(&state,&initial));
+    reset();CHECK(pair_step(NULL,false)==KL_INDICATOR_ACTIVE);now=40000;
+    CHECK(kl_pairing_output_step(&output,&driver,2,40,7,NULL,false,guard,&output)==KL_INDICATOR_RESTORED);
+    unsigned before_new=calls;
+    CHECK(kl_pairing_output_step(&output,&driver,2,40,7,NULL,false,guard,&output)==KL_INDICATOR_NONE && calls==before_new);
+    reset();claimed=true;different_name=true;
+    CHECK(pair_step(NULL,false)==KL_INDICATOR_NONE && !writes && !claim_calls && !release_calls);
+    reset();uint8_t known[3]={1,2,3};
+    CHECK(pair_step(known,false)==KL_INDICATOR_NONE && !writes && !claim_calls); /* Lost custom provenance. */
+    reset();state.effect=8;state.color_count=0;memset(state.colors,0,6);state.color_brightness=255;claimed=true;
+    pair_stop_call=3; /* Update/lock interrupts the saved-state read before any output change. */
+    CHECK(pair_step(known,false)==KL_INDICATOR_NONE && !writes && !release_calls && claimed);
+    reset();state.effect=8;state.color_brightness=255;
+    CHECK(pair_step(NULL,false)==KL_INDICATOR_NONE && !writes && release_calls==1);
+    reset();admission_wait=300000;CHECK(pair_step(NULL,false)==KL_INDICATOR_NONE && !wire_calls && !writes);
+    CHECK(now==250000 && !driver.admission_deadline_us); /* No flash after a blocked admission. */
+    reset();CHECK(pair_step(NULL,false)==KL_INDICATOR_ACTIVE);now=20000;
+    admission_wait=1000000;admission_call=calls+1;unsigned earlier_frames=frames;
+    CHECK(pair_step(NULL,false)==KL_INDICATOR_RESTORED && same(&state,&initial));
+    CHECK(now==600000 && frames==earlier_frames); /* Waiting behind flash cannot enqueue a late green frame. */
+    reset();CHECK(pair_step(NULL,false)==KL_INDICATOR_ACTIVE);current_revision++;
+    unsigned before=writes;CHECK(pair_step(NULL,false)==KL_INDICATOR_CANCELLED && writes==before);
+    for(unsigned failed=4;failed<=8;++failed) {
+        reset();fail_call=failed;
+        CHECK(pair_step(NULL,false)==KL_INDICATOR_ERROR);
+        before=calls;now=1000000;CHECK(pair_step(NULL,false)==KL_INDICATOR_NONE && calls==before);
+    }
+    reset();CHECK(pair_step(NULL,false)==KL_INDICATOR_ACTIVE);different_name=true;now=600000;
+    before=writes;CHECK(pair_step(NULL,false)==KL_INDICATOR_ERROR && output.error==OKL_NOT_OWNER);
+    CHECK(writes==before && !release_calls);
+}
 int main(void) {
     native_restoration();custom_restoration();cancellation_and_failures();deadlines_and_generations();
     flash_admission_budgets();
+    pairing_feedback();
     printf("%u indicator output assertions passed; actual coordinator, bounded mocked driver, no device I/O\n",checks);
     return 0;
 }

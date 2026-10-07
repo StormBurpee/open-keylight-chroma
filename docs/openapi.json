@@ -228,7 +228,7 @@
       "post": {
         "operationId": "pairClient",
         "summary": "Issue one client token inside an open pairing window",
-        "description": "Body is exactly one nonempty label of at most 32 UTF-8 bytes. A physical three-second hold or authenticated POST /pairing opens a 180-second window consumed by one successful pairing. Four clients maximum; an application with no clients opens its initial window. Closed window, full capacity or token persistence failure returns 403. The token is returned only once.",
+        "description": "Body is exactly one nonempty label of at most 32 UTF-8 bytes. A physical three-second hold or authenticated POST /pairing opens a 180-second window consumed by one successful pairing. Client capacity grows with available heap and NVS storage; no fixed client-count limit applies. An application with no clients opens its initial window. A closed window returns 403, insufficient allocation/storage returns 507, and unavailable persistence returns 503. Failures do not consume the window. The token is returned only once.",
         "responses": {
           "201": {
             "description": "Issue one client token inside an open pairing window",
@@ -248,6 +248,26 @@
           },
           "403": {
             "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Client storage is unavailable or quarantined after an uncertain write. Pairing was not completed; the window remains open.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "Insufficient storage or memory for another client. Pairing was not completed; the window remains open.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1795,7 +1815,6 @@
         "properties": {
           "clients": {
             "type": "array",
-            "maxItems": 4,
             "items": {
               "type": "object",
               "additionalProperties": false,

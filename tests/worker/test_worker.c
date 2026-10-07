@@ -69,6 +69,11 @@ static okl_result owner_result;
 static bool brightness_only_on_read;
 static int boot_reason;
 static unsigned brownout_started, brownout_verified, brownout_failed, brownout_bad_read;
+static unsigned pair_at, pairing_restored, lock_at, unlock_at, queued_job_at, pair_block;
+static bool pair_stale, expect_dark_job;
+static bool lock_during_pair_read;
+static kl_effect queued_effect;
+static kl_state before_pair;
 
 int esp_reset_reason(void) { return boot_reason; }
 
@@ -78,6 +83,7 @@ uint64_t app_update_reboot_deadline_us(void) { CHECK(!locks); return published_r
 bool app_controller_update_blocked(void) { return journal_blocked; }
 bool app_controller_update_take(app_controller_job *out) {
     if (!job_queued || (journal_blocked && !recovery_job)) return false;
+    if(expect_dark_job)CHECK(!controller.effect && !controller.white_brightness);
     CHECK(!locks); job_queued = false; app.updating = true; app.controller_ready = false;
     memset(out, 0, sizeof(*out)); out->id = 7; out->image.version.component[1] = 1;
     out->image.role = job_role;
@@ -143,6 +149,7 @@ void app_event_locked(const char *actor, const char *event, const char *detail) 
     if (!strcmp(event, "brownout.off_started")) ++brownout_started;
     if (!strcmp(event, "brownout.off_verified")) ++brownout_verified;
     if (!strcmp(event, "brownout.recovery_failed")) ++brownout_failed;
+    if (!strcmp(event, "pairing.feedback")) ++pairing_restored;
 }
 void app_mqtt_availability(void) {
     CHECK(!locks); ++availability_calls;
@@ -156,6 +163,7 @@ void app_mqtt_publish(void) {
         app.desired = kl_state_default(); app.desired.power = true; app.desired.mode = KL_COLOR;
         app.desired.rgb = (kl_rgb){10, 180, 90}; app.desired.brightness = 80;
         app.desired.transition_ms = queued_duration;
+        app.desired.effect = queued_effect;
         app.output_revision = 1; snprintf(app.operation, sizeof(app.operation), "queued");
     }
     if (off_on_read && publications == 1 && app.controller_ready) {
@@ -197,6 +205,20 @@ void vTaskDelay(unsigned ticks) {
         else { kl_update_indicator_fail(&upload); app.updating=false; }
     }
     if (delays == off_at) { app.desired.power=false; ++app.output_revision; }
+    if (delays == lock_at) app.desired.recording_lock=true;
+    if (delays == unlock_at) {app.desired.recording_lock=false;if(pair_block==2)app.updating=false;}
+    if (delays == queued_job_at) {job_queued=true;app.updating=true;}
+    if (delays == pair_at) {
+        ++app.pairing_feedback_generation;
+        app.pairing_feedback_ms=pair_stale?now-250:now;
+        app.pairing_feedback_revision=app.output_revision;
+        app.pairing_feedback_state_revision=app.revision;
+        if(pair_block==1)app.desired.recording_lock=true;
+        if(pair_block==2)app.updating=true;
+        if(pair_block==3)app.controller_ready=false;
+        if(pair_block==4)app.revision+=2; /* Lock/unlock occurred before the worker consumed the request. */
+        before_pair=app.desired;
+    }
     if (delays >= stop_after) longjmp(finished, 1);
 }
 static void assert_deadline(uint64_t deadline, uint64_t maximum_us) {
@@ -219,6 +241,7 @@ static okl_result worker_release(okl_nxp *driver, uint64_t deadline) {
 }
 static okl_result worker_read(okl_nxp *driver, okl_light_state *state, uint64_t deadline) {
     assert_deadline(deadline, 800000); ++reads;
+    if(lock_during_pair_read && app.pairing_feedback_generation && reads==3)app.desired.recording_lock=true;
     if (poison_read) driver->needs_recovery = 1;
     if (read_result == OKL_OK) {
         *state = controller;
@@ -341,6 +364,9 @@ static void reset(void) {
     queued_duration=600;frame_latency=encoding_at=stolen_at=corrupt_read=owner_reads=0;owner_result=OKL_OK;
     brightness_only_on_read=false;
     boot_reason=ESP_RST_SW;brownout_started=brownout_verified=brownout_failed=brownout_bad_read=0;
+    pair_at=pairing_restored=lock_at=unlock_at=queued_job_at=pair_block=0;
+    pair_stale=expect_dark_job=false;queued_effect=KL_EFFECT_NONE;memset(&before_pair,0,sizeof(before_pair));
+    lock_during_pair_read=false;
     controller = (okl_light_state){.effect = 1, .color_count = 1, .colors = {255, 0, 32},
                                   .color_brightness = 102, .temperature_kelvin = 4500};
 }
@@ -776,6 +802,60 @@ static void test_brownout_recovery(void) {
     reset();original=true;controller=(okl_light_state){.temperature_kelvin=4500};boot_reason=ESP_RST_BROWNOUT;run();
     CHECK(writes==2 && confirmations==1 && brownout_verified==1 && app.controller_ready);
 }
+static void test_pairing_feedback_worker(void) {
+    for(unsigned mode=0;mode<4;++mode) {
+        reset();
+        if(mode==1)controller=(okl_light_state){.temperature_kelvin=4500,.white_brightness=80};
+        if(mode==2)controller=(okl_light_state){.temperature_kelvin=4500};
+        if(mode==3){controller.effect=2;controller.speed=2;controller.flags=1;controller.color_count=2;}
+        okl_light_state saved=controller;pair_at=1;stop_after=42;delay_step=20;run();
+        CHECK(same(&saved,&controller) && !faults && !claimed && app.reported_valid && pairing_restored==1);
+        CHECK(!memcmp(&before_pair,&app.desired,sizeof(before_pair)) && !app.revision && !app.output_revision);
+        unsigned greens=0;
+        for(unsigned n=0;n<writes;++n)if(sent[n].command==OKL_SET_FRAME){
+            CHECK(!sent[n].arguments[5] && !sent[n].arguments[7]);greens+=sent[n].arguments[6]>0;
+        }
+        CHECK(greens>10 && !upload.generation); /* Pairing acknowledgement is not an OTA notification. */
+    }
+    for(unsigned blocked=1;blocked<=4;++blocked) {
+        reset();pair_at=1;pair_block=blocked;unlock_at=4;stop_after=15;delay_step=20;run();
+        CHECK(!writes && !pairing_restored);
+    }
+    reset();pair_at=1;pair_stale=true;delay_step=300;stop_after=5;run();CHECK(!writes && !pairing_restored);
+    reset();pair_at=off_at=1;stop_after=20;delay_step=20;run();
+    CHECK(writes==2 && !controller.effect && app.completed_revision==1 && !pairing_restored);
+    reset();pair_at=upload_at=upload_terminal_at=1;stop_after=110;delay_step=20;run();
+    CHECK(!pairing_restored && !faults); /* A brief failed upload still takes cosmetic priority. */
+    for(unsigned n=0;n<writes;++n)if(sent[n].command==OKL_SET_FRAME)CHECK(!sent[n].arguments[6]);
+    reset();pair_at=1;off_at=4;stop_after=45;delay_step=20;run();
+    CHECK(!controller.effect && !controller.white_brightness && app.completed_revision==1 && !faults && !pairing_restored);
+    unsigned last_off=0;for(unsigned n=0;n<writes;++n)if(sent[n].command==OKL_SET_EFFECT && !sent[n].arguments[2])last_off=n;
+    CHECK(last_off==writes-1);
+    reset();okl_light_state saved=controller;pair_at=1;lock_at=4;unlock_at=10;stop_after=42;delay_step=20;run();
+    CHECK(same(&saved,&controller) && pairing_restored==1 && !faults);
+    for(unsigned mode=0;mode<2;++mode) {
+        reset();saved=controller;pair_at=1;upload_at=4;upload_terminal_at=8;upload_success=mode!=0;
+        stop_after=110;delay_step=20;run();
+        CHECK(same(&saved,&controller) && pairing_restored==1 && !faults && !claimed);
+    }
+    reset();controller=(okl_light_state){.temperature_kelvin=4500};pair_at=1;queued_job_at=4;
+    expect_dark_job=true;stop_after=12;delay_step=20;run();
+    CHECK(job_runs==1 && pairing_restored==1 && !faults);
+    reset();queued_on_read=true;queued_effect=KL_EFFECT_AURORA;queued_duration=0;
+    pair_at=3;stop_after=55;delay_step=20;run();
+    CHECK(pairing_restored==1 && !faults && controller.effect==8 && controller.color_brightness==255);
+    CHECK(app.desired.effect==KL_EFFECT_AURORA && !memcmp(&before_pair,&app.desired,sizeof(before_pair)));
+    CHECK(sent[writes-1].command==OKL_SET_FRAME && (sent[writes-1].arguments[5] || sent[writes-1].arguments[7]));
+    kl_frame resumed=kl_color_frame(&before_pair,app.output_encoding,now-delay_step-KL_PAIRING_FEEDBACK_MS);
+    CHECK(sent[writes-1].arguments[5]==kl_byte(resumed.r) && sent[writes-1].arguments[6]==kl_byte(resumed.g) &&
+          sent[writes-1].arguments[7]==kl_byte(resumed.b)); /* Effect time pauses; it never replays missed frames. */
+    reset();queued_on_read=true;queued_effect=KL_EFFECT_AURORA;queued_duration=0;
+    pair_at=3;lock_during_pair_read=true;stop_after=20;delay_step=20;run();
+    CHECK(!pairing_restored && !faults && app.desired.recording_lock && claimed && controller.effect==8 && controller.color_brightness==255);
+    /* An ambiguous first frame never enables the pulse or replays it later. */
+    reset();pair_at=1;fail_write=4;poison_write=true;stop_after=15;run();
+    CHECK(writes==4 && !controller.color_brightness && nxp.needs_recovery && faults==1 && !pairing_restored);
+}
 int main(void) {
     reset();
     fault(OKL_TIMEOUT, false);
@@ -796,6 +876,7 @@ int main(void) {
     test_health_and_reset_no_replay();
     test_update_worker_gates();
     test_update_indicator_worker();
+    test_pairing_feedback_worker();
     printf("%u worker assertions passed; actual source, no device I/O.\n", checks);
     return 0;
 }

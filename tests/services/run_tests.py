@@ -15,7 +15,7 @@ compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
 if not compiler:
     raise SystemExit("Set CC to a host C compiler; libcJSON development headers/library are required")
 stubs = OUT / "stubs"
-for header in ["esp_err.h", "esp_random.h", "esp_app_desc.h", "esp_system.h", "esp_http_server.h", "freertos/FreeRTOS.h", "freertos/semphr.h", "mbedtls/sha256.h", "nvs.h", "nvs_flash.h", "web_assets.h"]:
+for header in ["esp_err.h", "esp_random.h", "esp_app_desc.h", "esp_system.h", "esp_partition.h", "esp_http_server.h", "freertos/FreeRTOS.h", "freertos/semphr.h", "mbedtls/sha256.h", "nvs.h", "nvs_flash.h", "web_assets.h"]:
     path = stubs / header
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('#include "service_mocks.h"\n')

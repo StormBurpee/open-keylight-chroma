@@ -3,6 +3,7 @@
 #include "esp_system.h"
 #include "keylight_policy.h"
 #include "web_assets.h"
+#include "nvs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,21 +15,27 @@ static const char *status_line(int status) {
     case 404: return "404 Not Found"; case 405: return "405 Method Not Allowed"; case 409: return "409 Conflict";
     case 408: return "408 Request Timeout";
     case 413: return "413 Content Too Large"; case 423: return "423 Locked"; case 503: return "503 Service Unavailable";
+    case 507: return "507 Insufficient Storage";
     default: return "500 Internal Server Error";
     }
 }
 
-esp_err_t http_json(httpd_req_t *request, int status, cJSON *json) {
-    char *text = json ? cJSON_PrintUnformatted(json) : NULL;
-    cJSON_Delete(json);
-    httpd_resp_set_status(request, status_line(text ? status : 503));
+static esp_err_t send_json_text(httpd_req_t *request, int status, const char *text) {
+    httpd_resp_set_status(request, status_line(status));
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     /* No unread upload body may become another request on this connection. */
     httpd_resp_set_hdr(request, "Connection", "close");
-    esp_err_t result = httpd_resp_send(request, text ? text : "{\"error\":\"Response allocation failed\"}", HTTPD_RESP_USE_STRLEN);
-    free(text);
+    esp_err_t result = httpd_resp_send(request, text, HTTPD_RESP_USE_STRLEN);
     httpd_sess_trigger_close(request->handle, httpd_req_to_sockfd(request));
+    return result;
+}
+esp_err_t http_json(httpd_req_t *request, int status, cJSON *json) {
+    char *text = json ? cJSON_PrintUnformatted(json) : NULL;
+    cJSON_Delete(json);
+    esp_err_t result = send_json_text(request, text ? status : 503,
+        text ? text : "{\"error\":\"Response allocation failed\"}");
+    free(text);
     return result;
 }
 esp_err_t http_error(httpd_req_t *request, int status, const char *message) {
@@ -170,9 +177,15 @@ static esp_err_t route(httpd_req_t *request) {
         char token[65];
         esp_err_t issued = app_issue_token(label->valuestring, token);
         cJSON_Delete(json);
-        if (issued != ESP_OK) return http_error(request, 403, "Hold the physical button for three seconds to open pairing; four clients maximum");
-        cJSON *response = cJSON_CreateObject(); cJSON_AddStringToObject(response, "token", token);
-        memset(token, 0, sizeof(token)); return http_json(request, 201, response);
+        if (issued == ESP_ERR_INVALID_STATE) return http_error(request, 403, "Hold the physical button for three seconds to open pairing");
+        if (issued == ESP_ERR_NO_MEM || issued == ESP_ERR_NVS_NOT_ENOUGH_SPACE || issued == ESP_ERR_NVS_VALUE_TOO_LONG)
+            return http_error(request, 507, "Client storage is full or memory is unavailable; pairing was not completed");
+        if (issued != ESP_OK) return http_error(request, 503, "Client storage is unavailable; pairing was not completed");
+        /* Token publication needs no JSON allocation after durable issuance. */
+        char response[80]; snprintf(response, sizeof(response), "{\"token\":\"%s\"}", token);
+        memset(token, 0, sizeof(token));
+        esp_err_t sent = send_json_text(request, 201, response);
+        memset(response, 0, sizeof(response)); return sent;
     }
     if (!strcmp(request->uri, "/api/v1/clients") && request->method == HTTP_GET)
         return http_json(request, 200, app_clients_json());

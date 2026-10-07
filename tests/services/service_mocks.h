@@ -12,10 +12,16 @@ typedef int esp_err_t;
 #define ESP_ERR_NO_MEM 3
 #define ESP_ERR_TIMEOUT 4
 #define ESP_ERR_NVS_NOT_FOUND 5
+#define ESP_ERR_NVS_NOT_ENOUGH_SPACE 6
+#define ESP_ERR_NVS_VALUE_TOO_LONG 7
 #define ESP_ERROR_CHECK(expression) do { if ((expression) != ESP_OK) abort(); } while (0)
 typedef void *SemaphoreHandle_t;
 typedef void *TaskHandle_t;
 typedef int nvs_handle_t;
+typedef struct { size_t size; } esp_partition_t;
+#define ESP_PARTITION_TYPE_DATA 1
+#define ESP_PARTITION_SUBTYPE_DATA_NVS 2
+const esp_partition_t *esp_partition_find_first(int, int, const char *);
 #define NVS_READONLY 0
 #define NVS_READWRITE 1
 typedef void *httpd_handle_t;

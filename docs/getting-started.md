@@ -40,6 +40,8 @@ Open the light's local IP address. The dashboard comes directly from the ESP32 o
 
 The window lasts up to 180 seconds and closes after one successful pairing. An existing trusted client can instead use **System → Open pairing for another client**. You can also enter the installer client's saved token in the dashboard or Stream Deck; keep that credential file private.
 
+An accepted three-second hold gives one soft green pulse, then restores the previous lighting, including Off. This acknowledges the button hold and open pairing window; it does not mean a client has connected. Recording Lock, an update, an unavailable controller or a newer lighting command suppresses the pulse without preventing pairing. Feedback is never queued to flash later. Your running effect resumes after the pulse; saved scenes and desired settings stay unchanged.
+
 Browser access is stored in the current tab session. Closing that session may require pairing again. System lets you view and revoke clients independently.
 
 If every token is lost, a continuous button hold starting at power-on and lasting ten seconds revokes existing clients and reopens pairing. It preserves Wi-Fi and scenes.

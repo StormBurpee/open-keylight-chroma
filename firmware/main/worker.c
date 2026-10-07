@@ -394,6 +394,21 @@ static bool indicator_guard(void *user, uint32_t revision) {
     return unchanged;
 }
 
+static bool pairing_guard(void *user, uint32_t revision) {
+    kl_update_output *pulse = user;
+    kl_update_output_limit(pulse, app_update_reboot_deadline_us());
+    app_lock();
+    bool unchanged = app.controller_ready && app.controller_connected && app.output_revision == revision;
+    /* Lock/update priority stops further green frames, but returning the
+     * unchanged saved output remains permitted. A newer intent never restores
+     * the old snapshot over the user's command. */
+    pulse->pairing_stop |= app.desired.recording_lock || app.updating ||
+        app.revision != app.pairing_feedback_state_revision;
+    app_unlock();
+    kl_update_output_limit(pulse, app_update_reboot_deadline_us());
+    return unchanged;
+}
+
 static void worker_task(void *unused) {
     (void)unused;
     bool mismatch = false;
@@ -411,7 +426,52 @@ static void worker_task(void *unused) {
     bool pending_off = false;
     uint32_t pending_off_revision = 0;
     kl_update_output indicator = {0};
+    kl_update_output pairing = {0};
+    uint64_t pairing_paused_ms = 0;
     for (;;) {
+        kl_update_indicator upload;
+        app_update_indicator_snapshot(&upload);
+        app_lock();
+        uint32_t pairing_generation = app.pairing_feedback_generation;
+        uint32_t pairing_revision = app.pairing_feedback_revision;
+        uint64_t pairing_requested_ms = app.pairing_feedback_ms;
+        bool pairing_stop = app.updating || app.desired.recording_lock || !app.controller_ready ||
+            !app.controller_connected || app.output_revision != pairing_revision ||
+            app.revision != app.pairing_feedback_state_revision || pairing_revision != seen_revision ||
+            indicator.active || (upload.generation && upload.generation != indicator.generation);
+        app_unlock();
+        pairing_stop |= app_controller_update_blocked() || brownout_recovery.failed;
+        if (pairing.active || pairing.generation != pairing_generation) {
+            bool was_active = pairing.active;
+            uint64_t paused_at = app_now_ms();
+            uint8_t saved_rgb[3] = {kl_byte(current.r), kl_byte(current.g), kl_byte(current.b)};
+            kl_update_output_result acknowledged = kl_pairing_output_step(&pairing, &nxp,
+                pairing_generation, pairing_requested_ms, pairing_revision, rendering ? saved_rgb : NULL,
+                pairing_stop, pairing_guard, &pairing);
+            if (acknowledged == KL_INDICATOR_ACTIVE) {
+                if (!was_active) pairing_paused_ms = paused_at;
+                rendering = false;
+                app_lock(); app.reported_valid = false; app.rgb_confirmed = false; app.reported_fields = 0; app_unlock();
+                vTaskDelay(pdMS_TO_TICKS(5)); continue;
+            }
+            if (acknowledged == KL_INDICATOR_RESTORED) {
+                native_effect = pairing.restored.effect;
+                current = observed_frame(&pairing.restored);
+                rendering = pairing.resume_custom;
+                if (rendering) {
+                    current.r = pairing.saved_rgb[0]; current.g = pairing.saved_rgb[1]; current.b = pairing.saved_rgb[2];
+                    transition.started_ms += app_now_ms() - pairing_paused_ms;
+                }
+                publish_native(&pairing.restored, false, pairing.revision);
+                app_lock(); app_event_locked("button", "pairing.feedback", "Pairing window acknowledged; prior lighting restored"); app_unlock();
+                app_mqtt_publish();
+            } else if (acknowledged == KL_INDICATOR_ERROR) {
+                rendering = false; fault(pairing.error, false);
+                next_health = app_now_ms() + HEALTH_INTERVAL_MS;
+            } else if (acknowledged == KL_INDICATOR_CANCELLED) rendering = false;
+        }
+        /* A pulse is fully restored before a new updater can capture output
+         * or take its exclusive controller lease. Pairing itself never waits. */
         app_controller_job job;
         if (app_controller_update_take(&job)) {
             app_lock();
@@ -472,7 +532,7 @@ static void worker_task(void *unused) {
             rendering = false; vTaskDelay(pdMS_TO_TICKS(10)); continue;
         }
         app_lock(); bool ready = app.controller_ready; app_unlock();
-        kl_update_indicator upload;
+        /* Refresh after any pairing restoration or controller-job work. */
         app_update_indicator_snapshot(&upload);
         app_lock();
         uint32_t upload_revision = app.output_revision;

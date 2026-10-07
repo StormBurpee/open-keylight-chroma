@@ -7,10 +7,17 @@ deterministic IDF boundaries. Core validation, policy checks and JSON parsing
 use the real project code and cJSON. Results and source hashes are written to
 `build/service-tests/result.json`.
 
-The storage/HTTP suite covers all four client slots, one-use pairing windows,
-expiry, token persistence/reload, individual revocation, physical clear with
-Wi-Fi preserved, every mocked NVS failure, hash failure, malformed client
-records, token non-disclosure, authentication and Host/Origin rejection,
+The storage/HTTP suite pairs and authenticates 40 clients, exercises capacity
+bounds derived from the actual NVS partition, and checks one-use pairing windows,
+expiry, reload, individual revocation and physical clear with Wi-Fi preserved.
+It covers v1 migration (including formerly accepted label padding), authoritative
+empty v2 records, hostile lengths/counts/duplicate IDs, allocation/hash failures,
+and set/commit errors both before and after a complete record becomes durable.
+Uncertain additions preserve existing authentication; uncertain revocation/clear
+blocks authentication until reload. Further mutations cannot overwrite ambiguous
+persistence. HTTP tests distinguish closed-window 403, resource 507 and storage
+503 errors, and prove token responses need no JSON allocation after issuance.
+They also cover token non-disclosure, authentication and Host/Origin rejection,
 fragmented JSON, duplicate fields, NUL escapes, trailing input, body limits
 and a final fragment that crosses the deadline.
 

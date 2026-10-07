@@ -14,6 +14,7 @@
 #define KL_TOKEN_BYTES 32
 
 typedef struct { bool used; char name[33]; kl_state state; } app_scene;
+typedef struct { uint8_t hash[32]; char label[33]; } app_client;
 typedef struct {
     uint32_t sequence;
     uint64_t uptime_ms;
@@ -45,9 +46,12 @@ typedef struct {
     app_event history[KL_HISTORY];
     uint32_t history_sequence;
     uint64_t pair_until_ms;
-    uint8_t token_hashes[4][32];
-    char client_labels[4][33];
-    uint8_t token_count;
+    /* Physical-hold acknowledgement only; volatile and never replayed. */
+    uint64_t pairing_feedback_ms;
+    uint32_t pairing_feedback_generation, pairing_feedback_revision;
+    uint32_t pairing_feedback_state_revision;
+    app_client *clients; /* Owned by storage; accessed under app.mutex. */
+    size_t token_count;
     bool mqtt_connected;
 } app_context;
 

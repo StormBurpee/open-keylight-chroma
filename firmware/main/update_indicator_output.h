@@ -20,6 +20,8 @@ typedef struct {
     uint32_t generation, revision;
     bool active, finished, resume_custom;
     bool failure_seen, release_attempted, fixed_deadline;
+    bool pairing, pairing_stop, restoring;
+    uint64_t pairing_started_ms;
     uint64_t failure_ms, next_frame_ms, next_guard_ms, deadline_us;
     okl_light_state saved, restored;
     uint8_t saved_rgb[3];
@@ -42,5 +44,15 @@ void kl_update_output_limit(kl_update_output *out, uint64_t deadline_us);
 kl_update_output_result kl_update_output_step(kl_update_output *out, okl_nxp *driver,
     const kl_update_indicator *evidence, uint32_t revision, const uint8_t known_rgb[3],
     kl_update_output_guard guard, void *user);
+
+enum { KL_PAIRING_FEEDBACK_MS = 600, KL_PAIRING_FEEDBACK_FRESH_MS = 250 };
+/* One physical-hold acknowledgement, separate from upload/token completion.
+ * Reuses exact save/restore and transport guards. A request must be consumed
+ * within 250ms; no backlog, recovery or retry. stop restores immediately.
+ * The guard may set pairing_stop when lock/update priority changes; it must
+ * still reject a newer output revision, lost readiness or ownership. */
+kl_update_output_result kl_pairing_output_step(kl_update_output *out, okl_nxp *driver,
+    uint32_t generation, uint64_t requested_ms, uint32_t revision, const uint8_t known_rgb[3],
+    bool stop, kl_update_output_guard guard, void *user);
 
 #endif

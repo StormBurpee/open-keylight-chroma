@@ -4,6 +4,16 @@
 output coordinator with AddressSanitizer. Coordinator tests use the real command
 builders and deterministic driver boundaries; no sockets or devices are used.
 
+The same coordinator also handles physical pairing feedback through a separate
+entry point. Tests check the 600ms green envelope at native master 12, exact
+Off/white/static/native-effect restoration, saved custom-frame restoration,
+foreign owners and unknown framebuffers, stale request suppression, a flash
+admission crossing the pulse deadline, one-shot failures and cancelled output
+revisions. Actual button and worker tests additionally prove the accepted hold
+threshold, Recording Lock/update priority, pending Off, renderer resumption and
+restoration before a controller job takes its lease. These are offline protocol
+and scheduling tests; the pulse's optical appearance still needs observation.
+
 The math suite checks upload generations, monotonic accepted-byte progress, failure
 and terminal states, integer overflow boundaries, the reserved verification
 endpoint, periodicity, symmetry, channel limits and the breath's turning points.

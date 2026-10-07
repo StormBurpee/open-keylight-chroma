@@ -19,7 +19,19 @@ static void button_task(void *unused) {
         }
         unsigned events = 0;
         if (!okl_button_sample(&button, pressed, app_now_ms(), &events)) {
-            if (events & OKL_BUTTON_SETUP) app_pair_window();
+            if (events & OKL_BUTTON_SETUP) {
+                /* Opening pairing never waits for SPI or cosmetic feedback. */
+                app_pair_window();
+                app_lock();
+                if (app.controller_ready && app.controller_connected && !app.updating &&
+                    !app.desired.recording_lock) {
+                    if (!++app.pairing_feedback_generation) ++app.pairing_feedback_generation;
+                    app.pairing_feedback_ms = app_now_ms();
+                    app.pairing_feedback_revision = app.output_revision;
+                    app.pairing_feedback_state_revision = app.revision;
+                }
+                app_unlock();
+            }
             if (events & OKL_BUTTON_SINGLE) {
                 app_lock(); bool power = app.desired.power; app_unlock();
                 kl_patch patch = {.fields = KL_POWER, .value.power = !power};

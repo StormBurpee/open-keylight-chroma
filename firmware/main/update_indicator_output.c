@@ -39,6 +39,7 @@ static okl_result after_call(kl_update_output *o, okl_nxp *d, okl_result result,
 }
 static okl_result send(kl_update_output *o, okl_nxp *d, const okl_request *request) {
     okl_result r = allowed(o, d); okl_reply reply;
+    if (r == OKL_OK && o->pairing && o->active && !o->restoring && o->pairing_stop) return OKL_BUSY;
     if (r == OKL_OK) {
         uint64_t ceiling = before_call(o, d);
         r = after_call(o, d,
@@ -107,7 +108,20 @@ static bool same(const okl_light_state *a, const okl_light_state *b) {
 static uint8_t byte(float n) { return (uint8_t)(n < 0 ? 0 : n > 255 ? 255 : n + 0.5f); }
 static okl_result sample(kl_update_output *o, okl_nxp *d, const kl_update_indicator *e) {
     kl_update_indicator_color c;
-    if (e->phase == KL_UPDATE_FAILED) {
+    if (o->pairing) {
+        /* One cubic-eased green breath, dark at both ends. No gamma decode:
+         * these are raw channels behind the independently bounded master12. */
+        uint64_t elapsed = clock_ms(d) - o->pairing_started_ms;
+        enum { HALF = KL_PAIRING_FEEDBACK_MS / 2 };
+        uint32_t x = elapsed < HALF ? (uint32_t)elapsed :
+            elapsed < KL_PAIRING_FEEDBACK_MS ? KL_PAIRING_FEEDBACK_MS - (uint32_t)elapsed : 0;
+        c = (kl_update_indicator_color){.g = (float)((uint64_t)255 * x * x * (3u * HALF - 2u * x)) /
+                                           ((uint64_t)HALF * HALF * HALF),
+                                       .master = KL_UPDATE_INDICATOR_MASTER};
+        okl_result r = allowed(o, d);
+        if (r != OKL_OK) return r;
+        if (o->pairing_stop && o->active) return OKL_BUSY;
+    } else if (e->phase == KL_UPDATE_FAILED) {
         kl_update_indicator_failure_sample(clock_ms(d) - o->failure_ms, &c);
     } else if (!kl_update_indicator_sample(e, clock_ms(d), &c)) return OKL_INVALID;
     uint8_t values[3] = {byte(c.r), byte(c.g), byte(c.b)};
@@ -122,17 +136,39 @@ static kl_update_output_result terminate(kl_update_output *o, okl_nxp *d, okl_re
     return error == OKL_BUSY ? KL_INDICATOR_CANCELLED : KL_INDICATOR_ERROR;
 }
 static kl_update_output_result start(kl_update_output *o, okl_nxp *d,
-    const kl_update_indicator *e, uint32_t revision, const uint8_t known_rgb[3],
+    const kl_update_indicator *e, uint32_t generation, uint64_t requested_ms,
+    uint32_t revision, const uint8_t known_rgb[3],
     kl_update_output_guard guard, void *user) {
-    *o = (kl_update_output){.generation = e->generation, .revision = revision,
-        .guard = guard, .user = user, .deadline_us = plus(clock_us(d), HANDOFF_MS * 1000u)};
+    *o = (kl_update_output){.generation = generation, .revision = revision,
+        .guard = guard, .user = user, .pairing = e == NULL,
+        .deadline_us = plus(clock_us(d), HANDOFF_MS * 1000u)};
+    if (o->pairing) {
+        o->fixed_deadline = true;
+        uint64_t end_ms = plus(requested_ms, KL_PAIRING_FEEDBACK_FRESH_MS);
+        o->deadline_us = end_ms > UINT64_MAX / 1000 ? UINT64_MAX : end_ms * 1000;
+        o->pairing_started_ms = clock_ms(d);
+    }
     /* An upload which completed before this worker observed it cannot safely
      * spend its reboot grace on setup followed by restoration. Leave it alone. */
-    if (e->phase != KL_UPDATE_RECEIVING && e->phase != KL_UPDATE_FAILED) {
+    if (e && e->phase != KL_UPDATE_RECEIVING && e->phase != KL_UPDATE_FAILED) {
         o->finished = true; return KL_INDICATOR_NONE;
     }
     okl_result r = allowed(o, d);
     if (r != OKL_OK) { o->finished = true; return KL_INDICATOR_NONE; }
+    if (o->pairing) {
+        /* A physical hold does not take over somebody else's lighting. A
+         * known custom frame remains meaningful only under our exact lease. */
+        okl_owner owner;
+        uint64_t ceiling = before_call(o, d);
+        r = after_call(o, d, okl_nxp_get_owner(d, &owner,
+            bounded(o, d, OKL_DEFAULT_TIMEOUT_US)), ceiling);
+        bool ours = r == OKL_OK && owner.claimed && !memcmp(owner.identity, d->identity, 6) &&
+            owner.name_size == 13 && !memcmp(owner.name, "Open Keylight", 13);
+        if (r != OKL_OK || (owner.claimed && !ours) || (known_rgb && !ours) || o->pairing_stop) {
+            o->finished = true; o->error = r;
+            return r == OKL_OK || !d->needs_recovery ? KL_INDICATOR_NONE : KL_INDICATOR_ERROR;
+        }
+    }
     uint64_t ceiling = before_call(o, d);
     r = after_call(o, d,
         okl_nxp_claim(d, (const uint8_t *)"Open Keylight", 13, bounded(o, d, 600000)), ceiling);
@@ -157,23 +193,40 @@ static kl_update_output_result start(kl_update_output *o, okl_nxp *d,
         }
         memcpy(o->saved_rgb, known_rgb, 3); o->resume_custom = true;
     }
+    if (o->pairing) {
+        r = allowed(o, d);
+        if (r != OKL_OK || o->pairing_stop) {
+            o->finished = true;
+            /* We have changed no output. Preserve the renderer's existing
+             * verified lease when priority changes during its snapshot. */
+            if (o->resume_custom && !d->needs_recovery && (r == OKL_OK || r == OKL_BUSY || r == OKL_TIMEOUT))
+                return KL_INDICATOR_NONE;
+            okl_result released = release(o, d);
+            if (released != OKL_OK) return terminate(o, d, released);
+            return r == OKL_OK || r == OKL_BUSY ? KL_INDICATOR_NONE : terminate(o, d, r);
+        }
+    }
     /* Muting precedes custom mode and every full-range frame. Master12 is
      * enabled only after the first frame has a positive transport ACK. */
     if ((r = level(o, d, 0)) == OKL_OK) r = white(o, d, 0, o->saved.effect);
     okl_request_custom(&q);
     if (r == OKL_OK) r = send(o, d, &q);
-    if (e->phase == KL_UPDATE_FAILED) {
+    if (e && e->phase == KL_UPDATE_FAILED) {
         o->failure_seen = true; o->failure_ms = clock_ms(d);
     }
-    kl_update_indicator first = *e; first.received_bytes = 0;
-    if (r == OKL_OK) r = sample(o, d, &first);
+    kl_update_indicator first = {0};
+    if (e) { first = *e; first.received_bytes = 0; }
+    if (o->pairing) o->pairing_started_ms = clock_ms(d);
+    if (r == OKL_OK) r = sample(o, d, e ? &first : NULL);
     if (r == OKL_OK) r = level(o, d, KL_UPDATE_INDICATOR_MASTER);
     if (r != OKL_OK) return terminate(o, d, r);
     o->active = true; o->next_frame_ms = clock_ms(d) + FRAME_MS;
+    if (o->pairing) o->pairing_started_ms = clock_ms(d);
     o->next_guard_ms = clock_ms(d) + GUARD_MS;
     return KL_INDICATOR_ACTIVE;
 }
 static kl_update_output_result restore(kl_update_output *o, okl_nxp *d, bool verified) {
+    o->restoring = true;
     okl_result r = coherent(o, d);
     if (r != OKL_OK) return terminate(o, d, r);
     okl_light_state target = o->saved;
@@ -203,7 +256,7 @@ kl_update_output_result kl_update_output_step(kl_update_output *o, okl_nxp *d,
     if (!o || !d || !d->transport.now_us || !e || !guard || !e->generation || e->phase == KL_UPDATE_IDLE)
         return KL_INDICATOR_NONE;
     if (o->generation != e->generation) {
-        if (!o->active) return start(o, d, e, revision, known_rgb, guard, user);
+        if (!o->active) return start(o, d, e, e->generation, 0, revision, known_rgb, guard, user);
         /* A new authorized upload during the red failure pulse keeps the
          * original saved output, rather than treating red as the prior scene. */
         o->generation = e->generation; o->failure_seen = false; o->next_frame_ms = 0;
@@ -235,4 +288,59 @@ kl_update_output_result kl_update_output_step(kl_update_output *o, okl_nxp *d,
         o->next_frame_ms = clock_ms(d) + FRAME_MS; /* Never replay a backlog. */
     }
     return KL_INDICATOR_ACTIVE;
+}
+
+kl_update_output_result kl_pairing_output_step(kl_update_output *o, okl_nxp *d,
+    uint32_t generation, uint64_t requested_ms, uint32_t revision, const uint8_t known_rgb[3],
+    bool stop, kl_update_output_guard guard, void *user) {
+    if (!o || !d || !d->transport.now_us || !guard || !generation) return KL_INDICATOR_NONE;
+    if (o->generation != generation) {
+        if (o->active) {
+            o->generation = generation;
+            stop = true; /* Consume the new event while finishing the original snapshot; never stack pulses. */
+        }
+        else {
+            uint64_t now = clock_ms(d);
+            if (stop || now < requested_ms || now - requested_ms >= KL_PAIRING_FEEDBACK_FRESH_MS) {
+                o->generation = generation; o->finished = true; return KL_INDICATOR_NONE;
+            }
+            return start(o, d, NULL, generation, requested_ms, revision, known_rgb, guard, user);
+        }
+    }
+    if (!o->active) return KL_INDICATOR_NONE;
+    uint64_t now = clock_ms(d);
+    o->fixed_deadline = true;
+    o->deadline_us = plus(clock_us(d), HANDOFF_MS * 1000u);
+    o->pairing_stop |= stop;
+    okl_result r = allowed(o, d);
+    if (r != OKL_OK) return terminate(o, d, r);
+    if (o->pairing_stop || now - o->pairing_started_ms >= KL_PAIRING_FEEDBACK_MS)
+        return restore(o, d, false);
+    /* Flash admission cannot deliver a queued green frame after this pulse.
+     * Returning the saved output has its own bounded handoff, never a replay
+     * of the missed frame. An uncertain transport is never restored blindly. */
+    uint64_t pulse_end = plus(o->pairing_started_ms, KL_PAIRING_FEEDBACK_MS);
+    uint64_t pulse_deadline = pulse_end > UINT64_MAX / 1000 ? UINT64_MAX : pulse_end * 1000;
+    if (pulse_deadline < o->deadline_us) o->deadline_us = pulse_deadline;
+    if (now >= o->next_guard_ms) {
+        r = coherent(o, d);
+        if (r != OKL_OK) goto interrupted;
+        o->next_guard_ms = clock_ms(d) + GUARD_MS;
+    }
+    if (clock_ms(d) >= o->next_frame_ms) {
+        r = sample(o, d, NULL);
+        if (r == OKL_BUSY && o->pairing_stop) {
+            o->deadline_us = plus(clock_us(d), HANDOFF_MS * 1000u);
+            return restore(o, d, false);
+        }
+        if (r != OKL_OK) goto interrupted;
+        o->next_frame_ms = clock_ms(d) + FRAME_MS;
+    }
+    return KL_INDICATOR_ACTIVE;
+interrupted:
+    if (r == OKL_TIMEOUT && !d->needs_recovery && clock_ms(d) >= pulse_end) {
+        o->deadline_us = plus(clock_us(d), HANDOFF_MS * 1000u);
+        return restore(o, d, false);
+    }
+    return terminate(o, d, r);
 }

@@ -157,6 +157,36 @@ it("keeps access intact after an uncertain revocation and does not retry", async
   expect(self).not.toHaveBeenCalled();
   expect(spy.mock.calls.filter((c) => c[0] === "DELETE")).toHaveLength(1);
 });
+it("lists and manages clients beyond the former four-client limit", async () => {
+  const api = new DemoTransport(),
+    user = userEvent.setup();
+  api.clients = Array.from({ length: 40 }, (_, i) => ({
+    id: i.toString(16).padStart(16, "0"),
+    label: `Studio client ${i + 1}`,
+  }));
+  const spy = vi.spyOn(api, "request");
+  render(
+    <ClientAccess
+      store={new StudioStore(api)}
+      token={api.token}
+      disabled={false}
+      onSelfRevoked={() => {}}
+      onPair={() => {}}
+    />,
+  );
+  expect(await screen.findByText("40 paired clients")).toBeVisible();
+  expect(
+    screen.getAllByRole("button", { name: /^Revoke Studio client/ }),
+  ).toHaveLength(40);
+  await user.click(
+    screen.getByRole("button", { name: "Revoke Studio client 40" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Revoke access" }));
+  expect(await screen.findByText("39 paired clients")).toBeVisible();
+  expect(spy.mock.calls.filter((c) => c[0] === "DELETE")).toEqual([
+    ["DELETE", "/clients/0000000000000027", undefined, undefined],
+  ]);
+});
 it("allows only a bounded client ID path for authenticated revocation", async () => {
   const fetcher = vi.fn().mockResolvedValue(new Response('{"revoked":true}')),
     api = new HttpTransport(fetcher);
