@@ -433,6 +433,7 @@ class StockSession:
     def quiet(self, seconds: float) -> None:
         require(0 <= seconds <= 40, "Quiet interval outside reviewed bounds")
         self.quiet_until = max(self.quiet_until, self.clock() + seconds)
+        _event_progress(self, "quiet", 0, seconds, "seconds")
         cancelled = False
         # Cleanup cannot close/reconnect through an interrupt during IAP.
         while self.clock() < self.quiet_until:
@@ -441,6 +442,7 @@ class StockSession:
             except KeyboardInterrupt:
                 cancelled = True
         self.audit.record("quiet_completed", deadline=self.quiet_until, seconds=seconds)
+        _event_progress(self, "quiet", seconds, seconds, "seconds")
         if cancelled:
             raise KeyboardInterrupt("Cancelled after preserving controller quiet interval")
 
@@ -478,6 +480,19 @@ def decode_controller_status(data: bytes) -> dict:
             "capabilities": caps, "part_id": part, "uptime_ms": uptime, "reset_cause": reset}
 
 
+def _event_progress(session, scope, completed, total, unit):
+    events = getattr(session, "events", None)
+    if events is not None:
+        try:
+            events.defer_progress(stage_id=session.stage_id, scope=scope,
+                                  completed=completed, total=total, unit=unit)
+        except OSError:
+            # Losing the TUI must not cut short IAP or its protected quiet
+            # interval. The failed event stream stops execution at the next
+            # complete stage boundary instead.
+            pass
+
+
 def transfer_controller(session: StockSession, bank: bytes, *, deadline: float) -> dict:
     """Full bank transaction on an already proven fresh resident session.
 
@@ -487,6 +502,7 @@ def transfer_controller(session: StockSession, bank: bytes, *, deadline: float) 
     require(type(bank) is bytes and len(bank) == NXP_BANK_BYTES, "Invalid controller bank")
     audit = {"program_blocks": 0, "verified_blocks": 0, "commit_attempted": False}
     session.audit.record("controller_transfer", bank_sha256=digest(bank))
+    _event_progress(session, "controller_program", 0, 448, "blocks")
     try:
         bounds = struct.pack(">II", 0x2000, 0x8FFF)
         require(session.exchange(16, 1, bounds, mutation=True, deadline=deadline) == bounds, "Erase ACK mismatch")
@@ -494,6 +510,9 @@ def transfer_controller(session: StockSession, bank: bytes, *, deadline: float) 
             data = b"\x40" + struct.pack(">I", 0x2000 + offset) + bank[offset:offset + 64]
             require(session.exchange(16, 2, data, mutation=True, deadline=deadline) == data, "Program ACK mismatch")
             audit["program_blocks"] += 1
+            if audit["program_blocks"] % 16 == 0:
+                _event_progress(session, "controller_program", audit["program_blocks"], 448, "blocks")
+        _event_progress(session, "controller_verify", 0, 448, "blocks")
         for offset in range(0, NXP_BANK_BYTES, 64):
             prefix = b"\x40" + struct.pack(">I", 0x2000 + offset)
             # This read flushes the last pending program sector. It is not a
@@ -501,6 +520,8 @@ def transfer_controller(session: StockSession, bank: bytes, *, deadline: float) 
             actual = session.exchange(16, 0x83, prefix + bytes(64), deadline=deadline)
             require(actual == prefix + bank[offset:offset + 64], "Staging readback mismatch")
             audit["verified_blocks"] += 1
+            if audit["verified_blocks"] % 16 == 0:
+                _event_progress(session, "controller_verify", audit["verified_blocks"], 448, "blocks")
         session._remaining(deadline)
         audit["commit_attempted"] = True
         session.audit.record("commit_intent", **audit, bank_sha256=digest(bank), delivery="maybe_sent")
@@ -529,6 +550,7 @@ class EspNotifications:
         self.frames.count = 0
         self.end_attempted = False
         self.success = False
+        self.percent = None
 
     def feed(self, data: bytes):
         # An ESP image can produce more than 64 notifications. Bound each
@@ -542,6 +564,7 @@ class EspNotifications:
                     "Malformed or failed ESP update notification")
             require(frame[5] != 100 or self.end_attempted, "Premature ESP success before End")
             self.success |= frame[5] == 100
+            self.percent = frame[5]
 
 
 def transfer_esp(session: StockSession, image: bytes, *, selector=select.select) -> dict:
@@ -567,6 +590,8 @@ def transfer_esp(session: StockSession, image: bytes, *, selector=select.select)
                     break
                 session.audit.record("esp_notification_bytes", bytes=len(data), sha256=digest(data))
                 model.feed(data)
+                if model.percent is not None:
+                    _event_progress(session, "esp_processing", model.percent, 100, "percent")
             require(not model.frames.pending, "Incomplete trailing ESP notification")
         except BaseException as error:
             state["error"] = f"{type(error).__name__}: {error}"
@@ -575,6 +600,7 @@ def transfer_esp(session: StockSession, image: bytes, *, selector=select.select)
     session.audit.record("esp_transfer_intent", sha256=digest(image), bytes=len(image))
     worker.start()
     sent = 0
+    _event_progress(session, "esp_upload", 0, len(image), "bytes")
     try:
         deadline = session.clock() + 180
         packets = iter(esp_transfer_frames(image))
@@ -587,6 +613,8 @@ def transfer_esp(session: StockSession, image: bytes, *, selector=select.select)
             session.send(packet, "esp_end_once" if is_end else "esp_data", deadline, mutation=True)
             if not is_end:
                 sent += len(packet) - 6
+                if sent == len(image) or sent // 32768 != (sent - len(packet) + 6) // 32768:
+                    _event_progress(session, "esp_upload", sent, len(image), "bytes")
                 session.sleep(0.003)
         finish = session.clock() + 45
         while not state["closed"] and state["error"] is None:
@@ -1046,8 +1074,8 @@ def console_output(message):
 
 
 def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.monotonic,
-                              sleep=time.sleep, output_fn=console_output):
-    """Read-only acceptance observer. A person pairs/checks/confirms in the UI."""
+                              sleep=time.sleep, output_fn=console_output, events=None):
+    """Read-only acceptance observer; a separate client checks and confirms."""
     target, expected = plan["target"], plan["esp_metadata"]
     started_at = clock()
     deadline, first, previous_uptime = started_at + 175, None, None
@@ -1064,6 +1092,15 @@ def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.mono
 
     def remaining():
         return max(0, round(deadline - clock()))
+
+    def check_cancelled():
+        if events is not None: events.check_cancelled()
+
+    def event_progress(scope, completed, remaining_ms=None):
+        if events is not None:
+            fields = {} if remaining_ms is None else {"remaining_ms": remaining_ms}
+            events.emit("progress", stage_id="native", scope=scope,
+                        completed=min(175, max(0, completed)), total=175, unit="seconds", **fields)
 
     def checked_device():
         nonlocal boot_window, reset_reason
@@ -1100,14 +1137,17 @@ def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.mono
             and 0 <= value["uptime_ms"] - health <= 5000
 
     while clock() < deadline:
-        progress(f"Waiting for the original ESP dashboard ({round(clock() - started_at)}s elapsed; "
-                 "first boot can take over 90s). No update will be retried.")
+        check_cancelled()
+        event_progress("startup_wait", clock() - started_at)
+        progress(f"Waiting for the original ESP dashboard ({round(clock() - started_at)}s elapsed). "
+                 "No update will be retried.")
         try:
             value = checked_device()
         except (OSError, http.client.HTTPException):
             sleep(1)
             continue
         require(clock() < deadline, "Native observation exceeded its startup deadline")
+        check_cancelled()
         require(value["trial_pending"], "New image was not observed in trial; do not infer acceptance")
         # Before first contact the host can only bound its own wait. Once
         # uptime is available, use the earliest consistent boot time with a
@@ -1123,6 +1163,7 @@ def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.mono
              "check controls and explicitly confirm the trial.", force=True)
     output_fn(f"Verifying {len(plan['assets'])} embedded dashboard assets…")
     for asset in plan["assets"]:
+        check_cancelled()
         content = get_http(target.ip, asset["path"], 1048576)
         require(len(content) == asset["size"] and digest(content) == asset["sha256"], "Served dashboard asset differs")
         require(clock() < deadline, "Asset verification exceeded the ESP trial window")
@@ -1131,97 +1172,185 @@ def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.mono
     pairing = ("Pair this browser while the pairing window is open. " if first.get("pairing_open") is True
                else "Hold the light's button for three seconds to open pairing, then pair this browser. ")
     require(clock() < deadline, "Trial evidence persistence exceeded the ESP trial window")
-    output_fn(f"Open http://{target.ip}/ now. About {remaining()}s remain. {pairing}"
-              "Check the controls at low brightness, return to Off, then explicitly confirm the trial in the dashboard. "
-              "This installer does not obtain a token or confirm for you.")
+    check_cancelled()
+    if events is None:
+        output_fn(f"Open http://{target.ip}/ now. About {remaining()}s remain. {pairing}"
+                  "Check the controls at low brightness, return to Off, then explicitly confirm the trial in the dashboard. "
+                  "This installer does not obtain a token or confirm for you.")
+    else:
+        output_fn(f"Native acceptance pending: about {remaining()}s remain. This backend only observes confirmation; "
+                  "the acceptance client must verify controls and preserve its credential privately.")
     previous_uptime = first["uptime_ms"]
+    action_sent, pairing_requested = False, False
     while clock() < deadline:
-        progress(f"Trial confirmation pending: about {remaining()}s remain. "
-                 "Confirm in the dashboard after checking controls; the installer will not confirm automatically.")
+        check_cancelled()
+        milliseconds = max(0, int((deadline - clock()) * 1000))
+        event_progress("trial", 175 - milliseconds / 1000, milliseconds)
+        progress(f"Trial confirmation pending: about {remaining()}s remain. " +
+                 ("The acceptance client must verify controls before confirmation." if events is not None else
+                  "Confirm in the dashboard after checking controls; the installer will not confirm automatically."))
         value = checked_device()
+        check_cancelled()
         deadline = min(deadline, boot_window[0] + 175)
         require(clock() < deadline, "Native confirmation observation exceeded the trial deadline")
         require(value["uptime_ms"] >= previous_uptime, "ESP restarted during acceptance; stop and inspect")
         previous_uptime = value["uptime_ms"]
         require(ready(value), "Controller lost readiness during acceptance")
         if not value["trial_pending"]:
-            audit.record("human_dashboard_confirmation_observed", authenticated_controls_checked_by_installer=False)
+            audit.record("independent_client_confirmation_observed" if events is not None else
+                         "human_dashboard_confirmation_observed", authenticated_controls_checked_by_installer=False)
             return value
+        if events is not None and not action_sent:
+            if value.get("pairing_open") is True:
+                events.emit("action", kind="native_acceptance", url=f"http://{target.ip}/", device_id=value["id"],
+                            firmware=value["firmware"], elf_sha256=value["firmware_elf_sha256"],
+                            manifest_sha256=plan["manifest_sha256"], controller_version=expected_controller,
+                            pairing_open=True, remaining_ms=max(0, int((deadline - clock()) * 1000)))
+                action_sent = True
+            elif not pairing_requested:
+                events.emit("status", code="pairing_required", message=
+                            "Hold the light's button for three seconds to open pairing. "
+                            "The trial countdown continues; no pairing request has been sent.")
+                pairing_requested = True
         sleep(1)
     raise TimeoutError("No explicit dashboard confirmation observed before the trial deadline; no automatic confirmation or retry")
 
 
 def run_cli(argv=None, *, input_fn=input, output_fn=console_output, session_factory=StockSession,
-            audit_factory=Audit, get_http=http_get, clock=time.monotonic, sleep=time.sleep) -> int:
+            audit_factory=Audit, get_http=http_get, clock=time.monotonic, sleep=time.sleep,
+            event_input=None, event_output=None) -> int:
     parser = argparse.ArgumentParser(description="Guided, experimental migration for the reviewed Key Light Chroma stock profile")
     parser.add_argument("command", choices=("prepare", "install", "restore"))
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--audit", type=Path)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--events-jsonl", action="store_true", help="Versioned JSONL events and structured optical responses")
+    parser.add_argument("--expected-manifest-sha256", help="Bind execution to the exact previously prepared manifest")
     parser.add_argument("--exclusive-control", action="store_true",
                         help="All other light controllers, polling pages and updaters are closed")
     parser.add_argument("--power-cycled", action="store_true",
                         help="Restore only: the whole light was unplugged/replugged and allowed at least 35 seconds to recover")
     args = parser.parse_args(argv)
-    audit, session = None, None
+    audit, session, migration, events = None, None, None, None
+    if args.events_jsonl:
+        from migration_events import JsonEvents
+        events = JsonEvents(event_output if event_output is not None else sys.stdout,
+                            event_input if event_input is not None else sys.stdin)
+        output_fn = lambda message: events.emit("status", code="message", message=message)
+
+    def stage(id, index, message, *, phase="started", total=7):
+        if session is not None: session.stage_id = id
+        if events is not None:
+            if phase == "started": events.check_cancelled()
+            events.emit("stage", id=id, index=index, total=total, phase=phase, message=message)
+            if phase == "completed": events.check_cancelled()
+        elif phase == "started":
+            output_fn(f"Stage {index}/{total}: {message}")
+
+    def prompt(kind, message):
+        if events is not None:
+            return events.prompt(kind, message)
+        return input_fn(message).strip().lower()
+
     try:
         plan = load_plan(args.manifest)
         summary = {"profile": plan["profile"], "target_ip": plan["target"].ip, "target_name": plan["target"].name,
                    "device_id": plan["device_id"], "esp": plan["esp_metadata"], "packages": plan["pins"],
+                   "controller_version": ".".join(str(v) for v in plan["packages"]["lighting"][24:28]),
                    "restore_sha256": plan["restore_sha256"], "restore_provenance": plan["restore_provenance"],
                    "manifest_sha256": plan["manifest_sha256"], "device_operations": 0}
-        output_fn(json.dumps(summary, indent=2))
+        if events is not None:
+            events.emit("status", code="plan_validated", message="Offline artifact and target plan checks passed", summary=summary)
+        else:
+            output_fn(json.dumps(summary, indent=2))
+        if args.expected_manifest_sha256 is not None:
+            require(args.expected_manifest_sha256 == plan["manifest_sha256"], "Prepared manifest digest changed")
         if args.command == "prepare":
             require(not args.execute and not args.power_cycled, "Prepare is strictly offline")
+            if events is not None: events.emit("completed", outcome="prepared")
             return 0
         require(args.execute and args.exclusive_control and args.audit is not None,
                 "Install/restore require --execute, --exclusive-control and a new --audit path")
         require(args.command == "restore" or not args.power_cycled, "Power-cycle flag is only for explicit restore")
         require(args.command != "restore" or args.power_cycled, "Restore requires the acknowledged whole-light power cycle")
+        require(events is None or args.expected_manifest_sha256 is not None,
+                "Event-mode execution requires the previously prepared manifest digest")
         audit = audit_factory(args.audit, plan["target"].ip, clock=clock)
         audit.record("plan", source_commit=plan["source_commit"], manifest_sha256=plan["manifest_sha256"],
                      restore_provenance=plan["restore_provenance"], exclusive_control_acknowledged=True)
+        if events is not None:
+            events.start_input()
+            events.check_cancelled()
         session = session_factory(plan["target"], audit, clock=clock, sleep=sleep)
+        session.events = events
         migration = Migration(session, plan["packages"], plan["pins"], restore_bank=plan["restore_bank"],
                               restore_sha256=plan["restore_sha256"])
         if args.command == "restore":
+            stage("restore", 1, "Verifying a fresh resident controller and restoring the reviewed bank once.", total=1)
             migration.open_cold_recovery(whole_light_power_cycled=True)
             migration.restore_owner_bank(plan["restore_version"])
+            stage("restore", 1, "Restored application version observed.", phase="completed", total=1)
             output_fn("Restore application version observed. Independently check normal operation; no lighting was replayed.")
+            if events is not None: events.emit("completed", outcome="restored")
             return 0
-        output_fn("Stage 1/7: checking the selected stock light, verifying Off, and entering its controller loader.")
+        stage("stock", 1, "Checking the selected stock light, verifying Off, and entering its controller loader.")
         migration.open_stock(); migration.enter_stock_loader()
-        output_fn("Stage 2/7: installing the no-PWM identity trial, then waiting 33s for resident recovery.")
+        stage("stock", 1, "Fresh resident controller verified.", phase="completed")
+        stage("identity", 2, "Installing the no-PWM identity trial, then waiting 33s for resident recovery.")
         migration.install("identity"); migration.await_recovery()
-        output_fn("Stage 3/7: installing OFF1 and checking its all-low register record, then waiting for recovery.")
+        stage("identity", 2, "ROM part identity and resident recovery verified.", phase="completed")
+        stage("off1", 3, "Installing OFF1 and checking its all-low register record, then waiting for recovery.")
         migration.install("OFF1"); migration.run_diagnostic(); migration.await_recovery()
-        require(input_fn("Did the light remain completely dark during OFF1? Type yes to proceed to five low pulses: ").strip().lower() == "yes",
+        require(prompt("off1_observation", "Did the light remain completely dark during OFF1? Type yes to proceed to five low pulses: ") == "yes",
                 "OFF1 physical observation was not accepted; no next image or automatic restore")
-        output_fn("Stage 4/7: LOW1. Watch the light: one short low pulse each of red, green, blue, warm white and cool white, with dark gaps.")
+        stage("off1", 3, "All-low register evidence and physical observation accepted.", phase="completed")
+        stage("low1", 4, "Watch the light: one short low pulse each of red, green, blue, warm white and cool white, with dark gaps.")
         migration.install("LOW1"); migration.run_diagnostic(); migration.await_recovery()
-        require(input_fn("Were those five low pulses correct, with dark gaps and no unexpected output? Type yes: ").strip().lower() == "yes",
+        require(prompt("low1_observation", "Were those five low pulses correct, with dark gaps and no unexpected output? Type yes: ") == "yes",
                 "LOW1 physical observation was not accepted; no production image or automatic restore")
         migration.accept_physical_checks(off_was_dark=True, low_channels_expected=True)
-        output_fn("Stage 5/7: installing and verifying the original lighting controller, then confirming it once.")
+        stage("low1", 4, "Five-channel record and physical observation accepted.", phase="completed")
+        stage("lighting", 5, "Installing and verifying the original lighting controller, then confirming it once.")
         migration.install("lighting"); migration.confirm_controller()
-        output_fn("Stage 6/7: uploading the ESP application once. Keep power connected; acceptance and first boot are separate checks.")
+        stage("lighting", 5, "Original lighting controller confirmation read back.", phase="completed")
+        stage("esp", 6, "Uploading the ESP application once. Keep power connected; acceptance and first boot are separate checks.")
         migration.install_esp(plan["esp_image"], plan["esp_metadata"]["sha256"], stock_profile=plan["profile"])
         session.close(); session = None
-        output_fn("Stage 7/7: waiting for native HTTP, exact image/assets, and your explicit dashboard confirmation.")
-        await_native_confirmation(plan, audit, get_http=get_http, clock=clock, sleep=sleep, output_fn=output_fn)
-        output_fn("Original controller and ESP are confirmed. The browser holds its own pairing token; no token was exported.")
+        stage("esp", 6, "Stock ESP accepted the image; independent first-boot acceptance remains.", phase="completed")
+        stage("native", 7, "Waiting for native HTTP, exact image/assets, and the acceptance client's verified setup."
+              if events is not None else
+              "Waiting for native HTTP, exact image/assets, and your explicit dashboard confirmation.")
+        await_native_confirmation(plan, audit, get_http=get_http, clock=clock, sleep=sleep, output_fn=output_fn, events=events)
+        stage("native", 7, "Exact native image and explicit confirmation observed.", phase="completed")
+        output_fn("Original controller and ESP confirmations observed; no credential was emitted by this backend."
+                  if events is not None else
+                  "Original controller and ESP are confirmed. The browser holds its own pairing token; no token was exported.")
+        if events is not None: events.emit("completed", outcome="installed")
         return 0
     except (ValueError, OSError, MigrationError, EOFError, KeyboardInterrupt, http.client.HTTPException) as error:
         if audit is not None and not audit.failed:
             audit.record("installer_stopped", error_type=type(error).__name__, error=str(error)[:240],
                          automatic_retry=False, automatic_restore=False)
-        output_fn(f"Stopped: {error}. Preserve the audit. No mutation will be retried automatically.")
+        if events is not None:
+            pending = migration is not None and migration.phase == "esp_trial_pending"
+            try:
+                events.emit("stopped", message=str(error), error_type=type(error).__name__,
+                            automatic_retry=False, automatic_restore=False, native_trial_may_be_pending=pending,
+                            recovery_hint=("The ESP trial may still be pending; an unconfirmed running application uses its timed fallback."
+                                           if pending else "Preserve the audit; no automatic retry or restore."))
+            except OSError:
+                pass
+        else:
+            output_fn(f"Stopped: {error}. Preserve the audit. No mutation will be retried automatically.")
         return 1
     finally:
         try:
             if session is not None: session.close()
         finally:
-            if audit is not None: audit.close()
+            try:
+                if audit is not None: audit.close()
+            finally:
+                if events is not None: events.close()
 
 
 def inspect_main() -> None:
