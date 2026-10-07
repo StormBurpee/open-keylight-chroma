@@ -8,7 +8,9 @@ python firmware-nxp/build.py --reference-lighting
 python firmware-nxp/tests/emulate_production.py
 ```
 
-The build requires ARM-capable Clang and LLVM objcopy. `CLANG` and `LLVM_OBJCOPY` can select installed tools; `CC` selects the host test compiler. The emulator additionally needs Unicorn, optionally through `NXP_UNICORN_PATH`. These commands perform no device operations.
+The build requires ARM-capable Clang and LLVM objcopy. `CLANG` and `LLVM_OBJCOPY` can select installed tools; `CC` selects the host test compiler. Install the pinned emulator with `python -m pip install -r firmware-nxp/tests/requirements-emulator.txt` in a Python virtual environment. `NXP_UNICORN_PATH` can instead select an existing installation. These commands perform no device operations.
+
+The `Verify compiled NXP application` CI workflow builds this profile and runs all compiled lifecycle cases with Unicorn 2.1.4. It publishes the source/image manifest and emulator report as test evidence. A passing CI run does not qualify physical PWM output or authorize installation on another board.
 
 Output is under `firmware-nxp/build/lighting/`. `lighting-bank.bin` contains the complete 28,672-byte application bank, including its explicit `ff` tail. The manifest pins the source and image. No bootloader, calibration, credential or proprietary firmware bytes are included in this repository. The manifest's `deployable:false` prevents a successful build from being mistaken for hardware qualification or an installation instruction.
 

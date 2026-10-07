@@ -1,0 +1,2 @@
+# The compiled Cortex-M0 regression suite is qualified against this emulator.
+unicorn==2.1.4

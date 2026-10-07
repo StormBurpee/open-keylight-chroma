@@ -1,0 +1,32 @@
+name: Verify compiled NXP application
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nxp-emulation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compiled-controller:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Cortex-M0 build tools
+        run: sudo apt-get update && sudo apt-get install -y clang lld llvm python3-venv
+      - name: Install pinned emulator in an isolated environment
+        run: |
+          python3 -m venv build/nxp-emulator-venv
+          build/nxp-emulator-venv/bin/python -m pip install --disable-pip-version-check -r firmware-nxp/tests/requirements-emulator.txt
+      - name: Build the reference-board lighting profile
+        run: python3 firmware-nxp/build.py --reference-lighting
+      - name: Execute compiled startup, PWM and recovery regressions
+        run: build/nxp-emulator-venv/bin/python firmware-nxp/tests/emulate_production.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nxp-emulation-evidence
+          path: |
+            firmware-nxp/build/lighting/manifest.json
+            firmware-nxp/build/lighting/compiled-production-tests.json
+          if-no-files-found: error
