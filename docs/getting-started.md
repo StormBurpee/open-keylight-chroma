@@ -13,6 +13,8 @@ Open Keylight Chroma is a development preview for a qualified reference board. B
 
 The ESP image, NXP application bank and controller update package are different formats. Never upload a bootloader, partition table, merged flash image, raw NXP bank or diagnostic image through the ESP firmware control. `idf.py flash` is not the existing-light migration procedure. The NXP default build is deliberately inert and must not be installed; [reference lighting](../firmware-nxp/PRODUCTION.md) and diagnostic profiles have separate acceptance requirements.
 
+For the factory-firmware path, the migration guide consolidates [target identification](stock-migration.md#identify-the-target), [all four controller builds and packages](stock-migration.md#build-and-package-once-then-prepare-the-plan), and plan creation in PowerShell or a POSIX shell. Prepare the matching ESP image/assets and the independently reviewed owner-local restore bank before starting. Stay with the light for the two physical diagnostic prompts and the browser acceptance window. If installation stops, use its [outcome and recovery matrix](stock-migration.md#if-a-stage-stops); restarting the installer is not a general resume operation.
+
 ## Connect to an existing installation
 
 Open the light's current local IP address in a browser. The dashboard is served by the light on port 80; no companion desktop server is needed. Find the address in your router if local hostname discovery is unavailable.
@@ -42,7 +44,7 @@ The separately packaged Stream Deck plugin is described in [its installation gui
 1. Keep the previous known-good application and its digest. Check System's current firmware/controller health, paired access and stable network. Resolve any pending ESP trial first. Stop other controllers and set the light Off.
 2. In System, select the standalone `open_keylight.bin` and enter its independently checked SHA-256. Choose **Verify & update** once. The device writes the inactive application slot; it preserves the installed bootloader, partition table, settings, tokens and scenes.
 3. Reconnect after restart. Check the expected firmware version **and** `firmware_elf_sha256` in `GET /api/v1/device`, since version labels can repeat. Check the dashboard, settings/scenes, controller health, low-level controls and fresh reported fields, then return to Off. A successful upload response is not a successful reboot or optical verification.
-4. Within the 180-second application trial, explicitly choose **Confirm this firmware** only after those checks. Confirming the ESP does not independently qualify or install the NXP application.
+4. Within the 180-second application trial, measured from application startup, explicitly choose **Confirm this firmware** only after those checks. Reconnecting or opening the dashboard does not restart the timer. Confirming the ESP does not independently qualify or install the NXP application.
 
 If a request times out, inspect the current device and preserve the audit before another action. Do not blindly repeat an upload or confirmation: a response can be lost after a successful operation. A later upload can replace the previous recovery image.
 

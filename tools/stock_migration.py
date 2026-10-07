@@ -1032,13 +1032,30 @@ def http_get(ip: str, path: str, maximum: int) -> bytes:
         connection.close()
 
 
+def console_output(message):
+    """Keep stage/countdown messages visible when the CLI stdout is piped."""
+    print(message, flush=True)
+
+
 def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.monotonic,
-                              sleep=time.sleep, output_fn=print):
+                              sleep=time.sleep, output_fn=console_output):
     """Read-only acceptance observer. A person pairs/checks/confirms in the UI."""
     target, expected = plan["target"], plan["esp_metadata"]
-    deadline, first, previous_uptime, observed_at = clock() + 90, None, None, None
+    started_at = clock()
+    deadline, first, previous_uptime = started_at + 175, None, None
     boot_window, reset_reason = None, None
+    last_progress = -float("inf")
     expected_controller = ".".join(str(v) for v in plan["packages"]["lighting"][24:28])
+
+    def progress(message, *, force=False):
+        nonlocal last_progress
+        now = clock()
+        if force or now - last_progress >= 10:
+            output_fn(message)
+            last_progress = now
+
+    def remaining():
+        return max(0, round(deadline - clock()))
 
     def checked_device():
         nonlocal boot_window, reset_reason
@@ -1075,6 +1092,8 @@ def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.mono
             and 0 <= value["uptime_ms"] - health <= 5000
 
     while clock() < deadline:
+        progress(f"Waiting for the original ESP dashboard ({round(clock() - started_at)}s elapsed; "
+                 "first boot can take over 90s). No update will be retried.")
         try:
             value = checked_device()
         except (OSError, http.client.HTTPException):
@@ -1082,27 +1101,37 @@ def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.mono
             continue
         require(clock() < deadline, "Native observation exceeded its startup deadline")
         require(value["trial_pending"], "New image was not observed in trial; do not infer acceptance")
+        # Before first contact the host can only bound its own wait. Once
+        # uptime is available, use the earliest consistent boot time with a
+        # five-second margin before application rollback. Never extend it.
+        deadline = min(deadline, boot_window[0] + 175)
+        require(clock() < deadline, "Native first boot reached the end of its trial window")
         if ready(value):
             first = value
-            observed_at = clock()
             break
         sleep(1)
     require(first is not None, "New original ESP/controller did not become ready; preserve audit and inspect recovery")
+    progress(f"Exact original image and controller are ready. About {remaining()}s remain to verify assets, "
+             "check controls and explicitly confirm the trial.", force=True)
+    output_fn(f"Verifying {len(plan['assets'])} embedded dashboard assets…")
     for asset in plan["assets"]:
         content = get_http(target.ip, asset["path"], 1048576)
         require(len(content) == asset["size"] and digest(content) == asset["sha256"], "Served dashboard asset differs")
-        require(clock() < observed_at + max(0, 175 - first["uptime_ms"] / 1000), "Asset verification exceeded the ESP trial window")
+        require(clock() < deadline, "Asset verification exceeded the ESP trial window")
     audit.record("native_trial_verified", id=first["id"], firmware=first["firmware"],
                  elf_sha256=first["firmware_elf_sha256"], authenticated_controls_checked=False)
     pairing = ("Pair this browser while the pairing window is open. " if first.get("pairing_open") is True
                else "Hold the light's button for three seconds to open pairing, then pair this browser. ")
-    output_fn(f"Open http://{target.ip}/ now. {pairing}"
-              "check the controls at low brightness, return to Off, then explicitly confirm the trial in the dashboard. "
+    require(clock() < deadline, "Trial evidence persistence exceeded the ESP trial window")
+    output_fn(f"Open http://{target.ip}/ now. About {remaining()}s remain. {pairing}"
+              "Check the controls at low brightness, return to Off, then explicitly confirm the trial in the dashboard. "
               "This installer does not obtain a token or confirm for you.")
     previous_uptime = first["uptime_ms"]
-    deadline = observed_at + max(0, 175 - first["uptime_ms"] / 1000)
     while clock() < deadline:
+        progress(f"Trial confirmation pending: about {remaining()}s remain. "
+                 "Confirm in the dashboard after checking controls; the installer will not confirm automatically.")
         value = checked_device()
+        deadline = min(deadline, boot_window[0] + 175)
         require(clock() < deadline, "Native confirmation observation exceeded the trial deadline")
         require(value["uptime_ms"] >= previous_uptime, "ESP restarted during acceptance; stop and inspect")
         previous_uptime = value["uptime_ms"]
@@ -1114,7 +1143,7 @@ def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.mono
     raise TimeoutError("No explicit dashboard confirmation observed before the trial deadline; no automatic confirmation or retry")
 
 
-def run_cli(argv=None, *, input_fn=input, output_fn=print, session_factory=StockSession,
+def run_cli(argv=None, *, input_fn=input, output_fn=console_output, session_factory=StockSession,
             audit_factory=Audit, get_http=http_get, clock=time.monotonic, sleep=time.sleep) -> int:
     parser = argparse.ArgumentParser(description="Guided, experimental migration for the reviewed Key Light Chroma stock profile")
     parser.add_argument("command", choices=("prepare", "install", "restore"))
@@ -1152,19 +1181,25 @@ def run_cli(argv=None, *, input_fn=input, output_fn=print, session_factory=Stock
             migration.restore_owner_bank(plan["restore_version"])
             output_fn("Restore application version observed. Independently check normal operation; no lighting was replayed.")
             return 0
+        output_fn("Stage 1/7: checking the selected stock light, verifying Off, and entering its controller loader.")
         migration.open_stock(); migration.enter_stock_loader()
+        output_fn("Stage 2/7: installing the no-PWM identity trial, then waiting 33s for resident recovery.")
         migration.install("identity"); migration.await_recovery()
+        output_fn("Stage 3/7: installing OFF1 and checking its all-low register record, then waiting for recovery.")
         migration.install("OFF1"); migration.run_diagnostic(); migration.await_recovery()
         require(input_fn("Did the light remain completely dark during OFF1? Type yes to proceed to five low pulses: ").strip().lower() == "yes",
                 "OFF1 physical observation was not accepted; no next image or automatic restore")
-        output_fn("Watch the light: one short low pulse each of red, green, blue, warm white and cool white, with dark gaps.")
+        output_fn("Stage 4/7: LOW1. Watch the light: one short low pulse each of red, green, blue, warm white and cool white, with dark gaps.")
         migration.install("LOW1"); migration.run_diagnostic(); migration.await_recovery()
         require(input_fn("Were those five low pulses correct, with dark gaps and no unexpected output? Type yes: ").strip().lower() == "yes",
                 "LOW1 physical observation was not accepted; no production image or automatic restore")
         migration.accept_physical_checks(off_was_dark=True, low_channels_expected=True)
+        output_fn("Stage 5/7: installing and verifying the original lighting controller, then confirming it once.")
         migration.install("lighting"); migration.confirm_controller()
+        output_fn("Stage 6/7: uploading the ESP application once. Keep power connected; acceptance and first boot are separate checks.")
         migration.install_esp(plan["esp_image"], plan["esp_metadata"]["sha256"], stock_profile=plan["profile"])
         session.close(); session = None
+        output_fn("Stage 7/7: waiting for native HTTP, exact image/assets, and your explicit dashboard confirmation.")
         await_native_confirmation(plan, audit, get_http=get_http, clock=clock, sleep=sleep, output_fn=output_fn)
         output_fn("Original controller and ESP are confirmed. The browser holds its own pairing token; no token was exported.")
         return 0

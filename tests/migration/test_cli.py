@@ -227,6 +227,8 @@ class Tests(unittest.TestCase):
         env = Environment(self)
         self.assertEqual(env.run(), 0)
         self.assertEqual(len(env.prompts), 2)
+        progress = [line for line in env.output if line.startswith('Stage ')]
+        self.assertEqual([line.split(':')[0] for line in progress], [f'Stage {n}/7' for n in range(1, 8)])
         stages = [row[1] for row in env.session.commands if row[0] == "install"]
         self.assertEqual(stages, ["identity", "OFF1", "LOW1", "lighting"])
         self.assertEqual(env.session.commands.count(("ESP",)), 1)
@@ -338,6 +340,59 @@ class Tests(unittest.TestCase):
                         m.await_native_confirmation(plan, audit, get_http=flaky,
                             clock=env.time.now, sleep=env.time.sleep, output_fn=env.output.append)
             finally: audit.close()
+
+    def test_slow_first_boot_leaves_only_actual_remaining_trial_time(self):
+        plan = m.load_plan(self.path)
+        for confirm in (True, False):
+            env = Environment(self); env.closed = True
+            def slow_start(ip, path, maximum):
+                if path == '/api/v1/device' and env.time.now() < 100:
+                    raise TimeoutError('Wi-Fi not ready yet')
+                raw = env.http(ip, path, maximum)
+                if path != '/api/v1/device': return raw
+                value = json.loads(raw)
+                value['trial_pending'] = not confirm or env.time.now() < 160
+                return json.dumps(value).encode()
+            audit_path = self.folder / f'slow-start-{confirm}.jsonl'
+            audit = m.Audit(audit_path, plan['target'].ip, clock=env.time.now)
+            try:
+                if confirm:
+                    value = m.await_native_confirmation(plan, audit, get_http=slow_start,
+                        clock=env.time.now, sleep=env.time.sleep, output_fn=env.output.append)
+                    self.assertFalse(value['trial_pending'])
+                    self.assertEqual(env.time.now(), 160)
+                else:
+                    with self.assertRaisesRegex(TimeoutError, 'No explicit dashboard confirmation'):
+                        m.await_native_confirmation(plan, audit, get_http=slow_start,
+                            clock=env.time.now, sleep=env.time.sleep, output_fn=env.output.append)
+                    self.assertLessEqual(env.time.now(), 175)
+            finally: audit.close()
+            ready = next(line for line in env.output if 'image and controller are ready' in line)
+            self.assertIn('About 75s remain', ready)
+            self.assertTrue(any('about 65s remain' in line for line in env.output))
+            self.assertTrue(any('about 15s remain' in line for line in env.output))
+            records = [json.loads(line) for line in audit_path.read_text().splitlines()]
+            self.assertEqual(any(row['event'] == 'human_dashboard_confirmation_observed' for row in records), confirm)
+            self.assertTrue(all(path == '/api/v1/device' or path in self.assets
+                                for _ip, path, _maximum in env.http_calls))
+
+    def test_first_boot_wait_is_bounded_without_any_http_response(self):
+        env = Environment(self); env.closed = True
+        plan = m.load_plan(self.path)
+        calls = []
+        def unavailable(_ip, path, _maximum):
+            calls.append((env.time.now(), path))
+            raise TimeoutError('Still booting')
+        start = env.time.now()
+        audit = m.Audit(self.folder / 'never-ready.jsonl', plan['target'].ip, clock=env.time.now)
+        try:
+            with self.assertRaisesRegex(ValueError, 'did not become ready'):
+                m.await_native_confirmation(plan, audit, get_http=unavailable,
+                    clock=env.time.now, sleep=env.time.sleep, output_fn=env.output.append)
+        finally: audit.close()
+        self.assertEqual(env.time.now() - start, 175)
+        self.assertTrue(all(path == '/api/v1/device' for _time, path in calls))
+        self.assertTrue(all(time < start + 175 for time, _path in calls))
 
     def test_caught_up_uptime_and_changed_reset_reason_reject_acceptance(self):
         plan = m.load_plan(self.path)
