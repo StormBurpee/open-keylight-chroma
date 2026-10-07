@@ -38,6 +38,8 @@ Tests cover API headers and binary uploads, timeout/conflict handling, queued wr
 
 The current graphite, ivory and copper design follows the refined concept in `assets/design/studio-concept-v2.png`. That file is generated design direction, not a browser screenshot. Scene photography and prompts are retained alongside it; the interface is implemented as native controls rather than a flattened image. Browser review covered desktop Light, Scenes and System pages and layouts at 300 and 868 CSS pixels without horizontal overflow. The captures in `dashboard/review` show the preceding design and are retained as historical evidence.
 
+Current screenshots in [`assets/dashboard`](../assets/dashboard) are captured from the reference light serving ESP 0.1.7, with original NXP 0.1.1 ready. They show the installed interface rather than the demo; the Light capture includes getter-confirmed colour and brightness.
+
 The colour picker provides pointer gestures and keyboard-accessible hue, saturation and value controls. Cancelling a gesture, changing sections or recalling a scene discards an unapplied colour draft and resumes fresh device state. Tests exercise these boundaries, scene failures and remembered fade duration. UI tests and local previews do not establish physical lamp behavior.
 
 Component provenance is recorded in `dashboard/components.json`. The shadcn CLI generated Radix Nova components; small local adjustments provide slider thumb labelling. Dependency versions are locked by `package-lock.json`. Distributed asset licensing is recorded in `dashboard/THIRD_PARTY_NOTICES.md`.

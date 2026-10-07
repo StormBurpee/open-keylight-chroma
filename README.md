@@ -31,9 +31,13 @@ Both original applications have been installed on the reference light. Native OT
 - **A physical escape route.** Single press toggles power, double press advances a saved scene, and a deliberate hold opens pairing. Button servicing does not depend on the browser.
 - **Updates with a clear boundary.** Application-only OTA, image and digest validation, preserved partition layout, and a trial confirmation window. The existing ESP bootloader has no automatic crash rollback; the application-level fallback cannot rescue a failure before application startup.
 
+![Colour controls served directly by a light running Open Keylight](assets/dashboard/light-live.jpg)
+
+Browser captures from the reference light running both original applications. The colour wheel, fade controls and controller report all use its local API.
+
 ![The Scenes dashboard served directly by a light running Open Keylight](assets/dashboard/scenes-live.jpg)
 
-The installed dashboard, photographed here as a browser capture from the reference light. These four defaults and any scenes you save live on the device.
+These four defaults and any scenes you save live on the device.
 
 ## What is in the tree
 
