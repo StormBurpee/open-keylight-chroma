@@ -80,8 +80,13 @@ for offset in range(64 + 192, len(package), 211):
     hash_cases += 1
 changed = bytearray(package); changed[28] ^= 1
 check(changed, 7); hash_cases += 1
-changed = bytearray(package); changed[22] = 1
-check(changed, 1); hash_cases += 1  # Diagnostic role is never a deployable package.
+diagnostic, diagnostic_metadata = packager.build_package(bank, (0, 1, 0, 0), "diagnostic")
+check(diagnostic, 0); hash_cases += 1
+assert diagnostic[22] == 1 and diagnostic_metadata['declared_role'] == 'diagnostic'
+assert diagnostic_metadata['bank_sha256'] == metadata['bank_sha256']
+for role in (0, 3, 255):
+    changed = bytearray(package); changed[22] = role
+    check(changed, 1); hash_cases += 1
 print(f"{hash_cases} real SHA256 callback package cases passed; no device I/O.")
 packager_tests = subprocess.run([sys.executable,
                                 str(Path(__file__).with_name("test_packager.py"))], capture_output=True, text=True)

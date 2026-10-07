@@ -35,7 +35,8 @@ okl_loader_result okl_loader_prepare(okl_loader_image *out, const uint8_t *packa
     if (memcmp(package, package_magic, sizeof(package_magic)) ||
         package[8] || package[9] != 1 || package[10] || package[11] != OKL_LOADER_HEADER_BYTES ||
         be32(package + 12) != OKL_LOADER_BANK_BYTES || be32(package + 16) != OKL_LOADER_PART_ID ||
-        package[20] != 1 || package[21] || package[22] != OKL_ROLE_LIGHTING || package[23] ||
+        package[20] != 1 || package[21] ||
+        (package[22] != OKL_ROLE_LIGHTING && package[22] != OKL_ROLE_SPI_DIAGNOSTIC) || package[23] ||
         be32(package + 60) || !be32(package + 24)) return OKL_LOADER_INVALID;
     bank = package + OKL_LOADER_HEADER_BYTES;
     /* The public application layout reserves 192 vector bytes and uses the
@@ -49,7 +50,7 @@ okl_loader_result okl_loader_prepare(okl_loader_image *out, const uint8_t *packa
     memset(&image, 0, sizeof(image));
     if (ops->sha256(ops->user, bank, OKL_LOADER_BANK_BYTES, image.bank_sha256)) return OKL_LOADER_IO;
     if (memcmp(image.bank_sha256, package + 28, 32)) return OKL_LOADER_VERIFY;
-    image.package = package; image.size = size;
+    image.package = package; image.size = size; image.role = package[22];
     memcpy(image.version.component, package + 24, 4);
     *out = image;
     return OKL_LOADER_OK;
@@ -115,8 +116,9 @@ static int matching_application(const okl_loader_image *image, const okl_loader_
     return s->kind == OKL_LOADER_OBSERVATION_APPLICATION && s->dark_state_verified == 1 &&
         !memcmp(image->version.component, s->version.component, 4) &&
         s->controller.abi_major == 1 && !s->controller.abi_minor &&
-        s->controller.role == OKL_ROLE_LIGHTING &&
-        s->controller.capabilities == (OKL_CAP_RECOVERY_READY | OKL_CAP_LIGHTING_READY) &&
+        s->controller.role == image->role &&
+        s->controller.capabilities == (image->role == OKL_ROLE_LIGHTING ?
+            (OKL_CAP_RECOVERY_READY | OKL_CAP_LIGHTING_READY) : OKL_CAP_RECOVERY_READY) &&
         s->controller.part_id == OKL_LOADER_PART_ID && !s->controller.boot_requested &&
         !s->controller.trial_confirmed;
 }
@@ -138,7 +140,7 @@ okl_loader_result okl_loader_run(const okl_loader_image *image, okl_loader_sourc
     result = okl_loader_prepare(&validated, image->package, image->size, o);
     if (result != OKL_LOADER_OK) { a->result = result; return result; }
     if (memcmp(image->bank_sha256, validated.bank_sha256, 32) ||
-        memcmp(image->version.component, validated.version.component, 4)) return a->result;
+        memcmp(image->version.component, validated.version.component, 4) || image->role != validated.role) return a->result;
     memcpy(a->bank_sha256, validated.bank_sha256, 32);
     bank = validated.package + OKL_LOADER_HEADER_BYTES;
     result = budget(o, deadline);

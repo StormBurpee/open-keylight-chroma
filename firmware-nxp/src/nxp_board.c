@@ -8,6 +8,8 @@
 #define COLOR UINT32_C(0x40018000)
 #define SELECT_BIT (UINT32_C(1) << 17)
 #define READY_BIT (UINT32_C(1) << 9)
+#define OUTPUT_PINS ((1u << 13) | (1u << 14) | (1u << 16) | (1u << 18) | (1u << 19))
+#define TIMER_CLOCKS ((1u << 9) | (1u << 10))
 
 static uint32_t read_reg(nxp_board *b, uint32_t address) { return b->io.read(b->io.user, address); }
 static void write_reg(nxp_board *b, uint32_t address, uint32_t value) { b->io.write(b->io.user, address, value); }
@@ -71,11 +73,20 @@ int nxp_board_start_spi(nxp_board *b) {
     b->spi_started = 1; prepare(b); return 1;
 }
 static void configure_timer(nxp_board *b, uint32_t base, uint32_t prescale, uint32_t period, uint32_t channels) {
-    write_reg(b, base + 4, 2); /* Stop/reset counter before changing matches. */
-    write_reg(b, base + 0xc, prescale); write_reg(b, base + 0x14, 0x80);
+    /* GPIO owns the pads throughout configuration. Clear inherited capture,
+     * counter and external-match modes before enabling PWM in held reset. */
+    write_reg(b, base + 4, 2);
+    write_reg(b, base + 0x14, 0); write_reg(b, base + 0x28, 0);
+    write_reg(b, base + 0x70, 0); write_reg(b, base + 0x74, 0);
+    write_reg(b, base + 0x3c, 0);
+    write_reg(b, base, base == WHITE ? 0x5fu : 0x3fu);
+    write_reg(b, base + 0xc, prescale);
     write_reg(b, base + 0x18, period + 1); write_reg(b, base + 0x1c, period + 1);
     write_reg(b, base + 0x20, period); write_reg(b, base + 0x24, period + 1);
+    write_reg(b, base + 0x14, 0x80); /* MR2 reset only; no stop/interrupt bits. */
     write_reg(b, base + 0x74, channels);
+    write_reg(b, base + 4, 2); /* Reset clears the PWM outputs, not just TC. */
+    write_reg(b, base + 4, 1);
 }
 static void mux_output(nxp_board *b, unsigned pin, unsigned function) {
     uint32_t address = IOCON + pin * 4u;
@@ -83,41 +94,108 @@ static void mux_output(nxp_board *b, unsigned pin, unsigned function) {
     if (pin == 13 || pin == 14 || pin == 16) value |= 0x80u; /* Digital mode for ADC-capable pins. */
     write_reg(b, address, value);
 }
-static void gpio_dark(nxp_board *b) {
-    const uint32_t pins = (1u << 13) | (1u << 14) | (1u << 16) | (1u << 18) | (1u << 19);
+static int gpio_valid(nxp_board *b) {
+    return (read_reg(b, GPIO + 0x2000) & OUTPUT_PINS) == OUTPUT_PINS &&
+        !(read_reg(b, GPIO + 0x2100) & OUTPUT_PINS) &&
+        (read_reg(b, IOCON + 13u * 4u) & 0x87u) == 0x81u &&
+        (read_reg(b, IOCON + 14u * 4u) & 0x87u) == 0x81u &&
+        (read_reg(b, IOCON + 16u * 4u) & 0x87u) == 0x80u &&
+        !(read_reg(b, IOCON + 18u * 4u) & 7u) && !(read_reg(b, IOCON + 19u * 4u) & 7u);
+}
+static int pwm_mux_valid(nxp_board *b) {
+    return (read_reg(b, IOCON + 13u * 4u) & 0x87u) == 0x83u &&
+        (read_reg(b, IOCON + 14u * 4u) & 0x87u) == 0x83u &&
+        (read_reg(b, IOCON + 16u * 4u) & 0x87u) == 0x82u &&
+        (read_reg(b, IOCON + 18u * 4u) & 7u) == 2u && (read_reg(b, IOCON + 19u * 4u) & 7u) == 2u;
+}
+static int timer_valid(nxp_board *b, uint32_t base, uint32_t prescale, uint32_t period, uint32_t channels) {
+    return read_reg(b, base + 4) == 1 && read_reg(b, base + 0xc) == prescale &&
+        read_reg(b, base + 0x14) == 0x80 && read_reg(b, base + 0x20) == period &&
+        !read_reg(b, base + 0x28) && !read_reg(b, base + 0x70) &&
+        !(read_reg(b, base + 0x3c) & 0xff0u) && read_reg(b, base + 0x74) == channels;
+}
+static int off_matches_valid(nxp_board *b, uint32_t base, uint32_t value) {
+    return read_reg(b, base + 0x18) == value && read_reg(b, base + 0x1c) == value &&
+        read_reg(b, base + 0x24) == value;
+}
+static int gpio_dark(nxp_board *b) {
     write_reg(b, SYSCON + 0x80, read_reg(b, SYSCON + 0x80) | (1u << 6) | (1u << 16));
-    write_reg(b, GPIO + 0x2280, pins);
-    write_reg(b, GPIO + 0x2000, read_reg(b, GPIO + 0x2000) | pins);
+    write_reg(b, GPIO + 0x2280, OUTPUT_PINS);
+    write_reg(b, GPIO + 0x2000, read_reg(b, GPIO + 0x2000) | OUTPUT_PINS);
     mux_output(b, 13, 1); mux_output(b, 14, 1); mux_output(b, 16, 0);
     mux_output(b, 18, 0); mux_output(b, 19, 0);
-    b->pwm_started = 0;
+    if (!gpio_valid(b)) { b->pwm_fault = 1; return 0; }
+    b->pwm_started = 0; return 1;
+}
+static int stop_pwm(nxp_board *b) {
+    if (!gpio_dark(b)) return 0;
+    if ((read_reg(b, SYSCON + 0x80) & TIMER_CLOCKS) == TIMER_CLOCKS) {
+        write_reg(b, WHITE + 4, 2); write_reg(b, COLOR + 4, 2);
+        if (read_reg(b, WHITE + 4) != 2 || read_reg(b, COLOR + 4) != 2) {
+            b->pwm_fault = 1; return 0;
+        }
+    }
+    return 1;
 }
 int nxp_board_force_off(nxp_board *b) {
-    if (!qualified(b, NXP_QUAL_PWM_REQUIRED)) return 0;
-    gpio_dark(b); return 1;
+    return qualified(b, NXP_QUAL_PWM_REQUIRED) ? stop_pwm(b) : 0;
 }
 int nxp_board_trial_dark(nxp_board *b) {
     const uint32_t trial = NXP_QUAL_PART | NXP_QUAL_CLOCK | NXP_QUAL_RECOVERY | NXP_ALLOW_SPI_TRIAL;
     if (!qualified(b, trial)) return 0;
-    gpio_dark(b); return 1;
+    return gpio_dark(b);
 }
-int nxp_board_start_pwm(nxp_board *b) {
-    if (!qualified(b, NXP_QUAL_PWM_REQUIRED)) return 0;
-    (void)nxp_board_force_off(b);
-    write_reg(b, SYSCON + 0x80, read_reg(b, SYSCON + 0x80) | (1u << 9) | (1u << 10) | (1u << 16));
+static int prepare_pwm(nxp_board *b) {
+    if (b->pwm_fault || b->pwm_started || !stop_pwm(b)) return 0;
+    write_reg(b, SYSCON + 0x80, read_reg(b, SYSCON + 0x80) | TIMER_CLOCKS | (1u << 16));
     configure_timer(b, WHITE, 47, 254, 3); configure_timer(b, COLOR, 0, 25499, 11);
-    /* Matches are already dark before mux connects timers to the board. */
+    if ((read_reg(b, SYSCON + 0x80) & TIMER_CLOCKS) != TIMER_CLOCKS ||
+        !timer_valid(b, WHITE, 47, 254, 3) || !timer_valid(b, COLOR, 0, 25499, 11) ||
+        !off_matches_valid(b, WHITE, 255) || !off_matches_valid(b, COLOR, 25500)) {
+        b->pwm_fault = 1; (void)stop_pwm(b); return 0;
+    }
+    return 1;
+}
+static int connect_pwm(nxp_board *b) {
+    if (b->pwm_fault || b->pwm_started || !gpio_valid(b) ||
+        !timer_valid(b, WHITE, 47, 254, 3) || !timer_valid(b, COLOR, 0, 25499, 11) ||
+        !off_matches_valid(b, WHITE, 255) || !off_matches_valid(b, COLOR, 25500)) goto failed;
+    /* Both timers are already running with verified dark matches. Mark a
+     * possible connection before mux writes, so panic also covers setup. */
+    b->pwm_started = 1;
     mux_output(b, 18, 2); mux_output(b, 19, 2);
     mux_output(b, 13, 3); mux_output(b, 14, 3); mux_output(b, 16, 2);
-    write_reg(b, WHITE + 4, 1); write_reg(b, COLOR + 4, 1); b->pwm_started = 1; return 1;
+    if (!pwm_mux_valid(b)) goto failed;
+    return 1;
+failed:
+    b->pwm_fault = 1; (void)stop_pwm(b); return 0;
 }
+int nxp_board_start_pwm(nxp_board *b) {
+    return qualified(b, NXP_QUAL_PWM_REQUIRED) && prepare_pwm(b) && connect_pwm(b);
+}
+static int off_trial_permitted(nxp_board *b) {
+    return qualified(b, NXP_QUAL_PART | NXP_QUAL_CLOCK | NXP_QUAL_RECOVERY |
+        NXP_ALLOW_SPI_TRIAL | NXP_ALLOW_PWM_OFF_TRIAL) && b->config.observed_part == 0xbc40u &&
+        !(b->config.qualifications & (NXP_QUAL_PWM_POLARITY | NXP_QUAL_POWER_LIMITS));
+}
+int nxp_board_prepare_pwm_off_trial(nxp_board *b) { return off_trial_permitted(b) && prepare_pwm(b); }
+int nxp_board_connect_pwm_off_trial(nxp_board *b) { return off_trial_permitted(b) && connect_pwm(b); }
+int nxp_board_stop_pwm_off_trial(nxp_board *b) { return off_trial_permitted(b) && stop_pwm(b); }
 int nxp_board_apply_pwm(nxp_board *b, const nxp_pwm_frame *f) {
-    if (!b || !b->pwm_started || !qualified(b, NXP_QUAL_PWM_REQUIRED) || !f ||
+    if (!b || !b->pwm_started || b->pwm_fault || !qualified(b, NXP_QUAL_PWM_REQUIRED) || !f ||
         f->red_match > 25500 || f->green_match > 25500 || f->blue_match > 25500 ||
         f->cool_match > 255 || f->warm_match > 255) return 0;
+    if ((read_reg(b, SYSCON + 0x80) & TIMER_CLOCKS) != TIMER_CLOCKS || !pwm_mux_valid(b) ||
+        !timer_valid(b, WHITE, 47, 254, 3) || !timer_valid(b, COLOR, 0, 25499, 11)) goto failed;
     write_reg(b, COLOR + 0x24, f->red_match); write_reg(b, COLOR + 0x1c, f->green_match);
     write_reg(b, COLOR + 0x18, f->blue_match); write_reg(b, WHITE + 0x18, f->cool_match);
-    write_reg(b, WHITE + 0x1c, f->warm_match); return 1;
+    write_reg(b, WHITE + 0x1c, f->warm_match);
+    if (read_reg(b, COLOR + 0x24) != f->red_match || read_reg(b, COLOR + 0x1c) != f->green_match ||
+        read_reg(b, COLOR + 0x18) != f->blue_match || read_reg(b, WHITE + 0x18) != f->cool_match ||
+        read_reg(b, WHITE + 0x1c) != f->warm_match) goto failed;
+    return 1;
+failed:
+    b->pwm_fault = 1; (void)nxp_board_force_off(b); return 0;
 }
 int nxp_board_service_watchdog(nxp_board *b) {
     uint32_t window, remaining;

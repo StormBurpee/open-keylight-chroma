@@ -8,7 +8,7 @@ enum {
     NXP_QUAL_SPI_MODE = 8u, NXP_QUAL_RECOVERY = 16u,
     NXP_QUAL_PWM_POLARITY = 32u, NXP_QUAL_POWER_LIMITS = 64u,
     NXP_QUAL_SPI_REQUIRED = 31u, NXP_QUAL_PWM_REQUIRED = 127u,
-    NXP_ALLOW_SPI_TRIAL = 128u
+    NXP_ALLOW_SPI_TRIAL = 128u, NXP_ALLOW_PWM_OFF_TRIAL = 256u
 };
 typedef struct {
     void *user;
@@ -26,7 +26,7 @@ typedef struct {
     /* A reply is one prequeued stream across length/body CS pulses. */
     uint8_t rx[NXP_SPI_SIZE + 2], tx[NXP_SPI_SIZE + 2];
     uint16_t received, queued, expected;
-    uint8_t active, fault, spi_started, pwm_started;
+    uint8_t active, fault, spi_started, pwm_started, pwm_fault;
     uint32_t errors;
 } nxp_board;
 
@@ -37,10 +37,18 @@ void nxp_board_init(nxp_board *board, const nxp_register_io *io,
 int nxp_board_start_spi(nxp_board *board);
 int nxp_board_start_pwm(nxp_board *board);
 int nxp_board_apply_pwm(nxp_board *board, const nxp_pwm_frame *frame);
-/* Qualified GPIO-low handoff. It does not stop a timer while its pin is high. */
+/* Qualified GPIO-low handoff, verified before holding timers in reset. A failed
+ * mux/DIR/pad readback leaves the timers running and latches pwm_fault. A fault
+ * cannot be cleared by another start/apply call; the platform must recover. */
 int nxp_board_force_off(nxp_board *board);
 /* Trial permits GPIO-low only; it does not qualify or enable PWM. */
 int nxp_board_trial_dark(nxp_board *board);
+/* Explicit experiment permission, with production polarity/power bits absent.
+ * Prepare starts fixed all-low timers while GPIO owns every pad; connect only
+ * exposes those verified low timers. No nonzero compare API is provided. */
+int nxp_board_prepare_pwm_off_trial(nxp_board *board);
+int nxp_board_connect_pwm_off_trial(nxp_board *board);
+int nxp_board_stop_pwm_off_trial(nxp_board *board);
 /* Caller preserves/masks interrupt state around this short operation. Feed
  * only an already-enabled WWDT inside its window; never alter TC/MOD/clocks. */
 int nxp_board_service_watchdog(nxp_board *board);

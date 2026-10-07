@@ -168,13 +168,14 @@ static int observe(void *user, okl_loader_observation *observation, uint64_t dea
     if (s->cancel_in_observe) s->cancel = 1;
     observation->kind = OKL_LOADER_OBSERVATION_APPLICATION;
     observation->dark_state_verified = 1; observation->version.component[1] = 1;
-    observation->controller.abi_major = 1; observation->controller.role = OKL_ROLE_LIGHTING;
-    observation->controller.capabilities = 3; observation->controller.part_id = OKL_LOADER_PART_ID;
+    observation->controller.abi_major = 1; observation->controller.role = s->package[22];
+    observation->controller.capabilities = s->package[22] == OKL_ROLE_LIGHTING ? 3 : 1;
+    observation->controller.part_id = OKL_LOADER_PART_ID;
     switch (s->invalid_observation) {
     case 1: observation->kind = OKL_LOADER_OBSERVATION_RESIDENT; break;
     case 2: observation->kind = OKL_LOADER_OBSERVATION_UNKNOWN; break;
-    case 3: observation->controller.role = OKL_ROLE_SPI_DIAGNOSTIC; break;
-    case 4: observation->controller.capabilities = 1; break;
+    case 3: observation->controller.role = s->package[22] == OKL_ROLE_LIGHTING ? OKL_ROLE_SPI_DIAGNOSTIC : OKL_ROLE_LIGHTING; break;
+    case 4: observation->controller.capabilities = s->package[22] == OKL_ROLE_LIGHTING ? 1 : 3; break;
     case 5: observation->controller.part_id ^= 1; break;
     case 6: observation->controller.abi_major = 2; break;
     case 7: observation->controller.abi_minor = 1; break;
@@ -234,6 +235,33 @@ static void test_success(void) {
         CHECK(a.quiet_finished_us - a.quiet_started_us == OKL_LOADER_QUIET_US && m.quiet_calls == 30);
         CHECK(m.ends == 1 && !m.leased && m.commits == 1 && !m.aborts && m.observations == 1);
     }
+}
+static void test_explicit_diagnostic_role(void) {
+    okl_loader_ops o; okl_loader_image image; okl_loader_audit audit; unsigned i;
+    init(); o = ops();
+    for (i = 0; i <= 255; ++i) {
+        m.package[22] = (uint8_t)i;
+        CHECK(okl_loader_prepare(&image, m.package, sizeof(m.package), &o) ==
+            (i == 1 || i == 2 ? OKL_LOADER_OK : OKL_LOADER_INVALID));
+        if (i == 1 || i == 2) CHECK(image.role == i);
+    }
+    init(); m.package[22] = 1;
+    CHECK(run(&audit, OKL_LOADER_FROM_ORIGINAL, 1000000) == OKL_LOADER_OK);
+    CHECK(audit.observation.controller.role == OKL_ROLE_SPI_DIAGNOSTIC &&
+        audit.observation.controller.capabilities == OKL_CAP_RECOVERY_READY &&
+        !audit.observation.controller.trial_confirmed);
+    CHECK(m.commits == 1 && !m.aborts && audit.program_blocks_acked == 448 &&
+        audit.readback_blocks_verified == 448 && audit.quiet_completed);
+    for (i = 1; i <= 11; ++i) {
+        init(); m.package[22] = 1; m.invalid_observation = (int)i;
+        CHECK(run(&audit, OKL_LOADER_FROM_ORIGINAL, 1000000) == OKL_LOADER_UNRESOLVED);
+        CHECK(m.commits == 1 && !m.aborts && audit.quiet_completed);
+    }
+    init(); m.package[22] = 1; o = ops();
+    CHECK(okl_loader_prepare(&image, m.package, sizeof(m.package), &o) == OKL_LOADER_OK);
+    image.role = 2;
+    CHECK(okl_loader_run(&image, OKL_LOADER_FROM_ORIGINAL, &o, 1000000, &audit) == OKL_LOADER_INVALID);
+    CHECK(!m.begins && !m.enters && !m.exchanges);
 }
 static void test_every_exchange_failure(void) {
     unsigned i; okl_loader_audit a;
@@ -313,7 +341,7 @@ static void test_information_helper(void) {
     CHECK(!okl_loader_information_valid(NULL));
 }
 int main(void) {
-    test_admission(); test_success(); test_every_exchange_failure(); test_strict_reports();
+    test_admission(); test_success(); test_explicit_diagnostic_role(); test_every_exchange_failure(); test_strict_reports();
     test_persistence_cancellation_and_deadlines(); test_postcommit_never_retries(); test_information_helper();
     printf("%u checks passed; original-bank loader admission, 898 exchange failure positions, buffered staging and commit lifecycle; no device I/O.\n", checks);
     return 0;

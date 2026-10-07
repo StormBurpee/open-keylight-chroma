@@ -22,7 +22,9 @@ def parse_version(text: str) -> tuple[int, int, int, int]:
     return values
 
 
-def build_package(bank: bytes, version: tuple[int, int, int, int]) -> tuple[bytes, dict]:
+def build_package(bank: bytes, version: tuple[int, int, int, int], role: str = "lighting") -> tuple[bytes, dict]:
+    if role not in ("lighting", "diagnostic"):
+        raise ValueError("Role must explicitly be lighting or diagnostic")
     if not isinstance(bank, bytes) or len(bank) != BANK_BYTES:
         raise ValueError("Supply one exact 28,672-byte application bank; padding is never guessed")
     if len(version) != 4 or any(type(value) is not int or not 0 <= value <= 255 for value in version) or not any(version):
@@ -34,11 +36,11 @@ def build_package(bank: bytes, version: tuple[int, int, int, int]) -> tuple[byte
         raise ValueError("All 47 handlers must be Thumb addresses inside the application after its 192-byte vectors")
     digest = hashlib.sha256(bank).digest()
     header = struct.pack(">8sHHII4B4B32s4s", b"OKLCNXP\0", 1, HEADER_BYTES, BANK_BYTES, PART_ID,
-                         1, 0, 2, 0, *version, digest, bytes(4))
+                         1, 0, 2 if role == "lighting" else 1, 0, *version, digest, bytes(4))
     package = header + bank
     metadata = {"format": 1, "package_bytes": len(package), "bank_bytes": len(bank),
                 "package_sha256": hashlib.sha256(package).hexdigest(), "bank_sha256": digest.hex(),
-                "part_id": f"0x{PART_ID:08x}", "controller_abi": "1.0", "declared_role": "lighting",
+                "part_id": f"0x{PART_ID:08x}", "controller_abi": "1.0", "declared_role": role,
                 "version": ".".join(map(str, version)), "reset_vector": f"0x{vectors[1]:08x}",
                 "device_operations": 0,
                 "qualification": "Metadata and digest do not prove original source, publisher authenticity or hardware qualification."}
@@ -50,6 +52,8 @@ def main() -> None:
     parser.add_argument("bank", type=Path, help="Exact original 28KiB application bank, without the resident loader")
     parser.add_argument("output", type=Path, help="New package file; existing files are protected by default")
     parser.add_argument("--version", required=True, help="Four version bytes, for example 0.1.0.0")
+    parser.add_argument("--role", choices=("lighting", "diagnostic"), default="lighting",
+                        help="Declared application role; diagnostics must never be trial-confirmed or enable normal output")
     parser.add_argument("--overwrite", action="store_true", help="Explicitly permit replacing an existing output package")
     args = parser.parse_args()
     try:
@@ -57,7 +61,7 @@ def main() -> None:
             raise ValueError("Output must differ from the source bank")
         if args.bank.stat().st_size != BANK_BYTES:
             raise ValueError("Input must be exactly 28,672 bytes")
-        package, metadata = build_package(args.bank.read_bytes(), parse_version(args.version))
+        package, metadata = build_package(args.bank.read_bytes(), parse_version(args.version), args.role)
         with args.output.open("wb" if args.overwrite else "xb") as output:
             output.write(package)
     except (OSError, ValueError) as exc:

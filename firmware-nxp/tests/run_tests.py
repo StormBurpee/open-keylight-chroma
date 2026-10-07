@@ -10,16 +10,20 @@ root = Path(__file__).resolve().parents[1]
 build = root / "build"
 build.mkdir(exist_ok=True)
 driver = root.parent / "firmware/components/keylight_nxp"
-compiler = os.environ.get("CC") or shutil.which("clang")
+compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
 if not compiler:
-    raise SystemExit("clang is required for this AddressSanitizer suite; add it to PATH or set CC.")
+    raise SystemExit("Set CC to an AddressSanitizer-capable C compiler.")
 exe = build / ("nxp_tests.exe" if os.name == "nt" else "nxp_tests")
 sources = [root / "src/nxp_app.c", root / "tests/test_nxp.c", driver / "okl_nxp.c"]
 if not sources[-1].is_file():
     sources[-1] = driver / "src/okl_nxp.c"
+core = root.parent / "firmware/components/keylight_core"
+sources += [root.parent / "firmware/main/output_policy.c", core / "keylight_core.c"]
 command = [compiler, "-std=c99", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-pedantic",
            "-fsanitize=address", "-fno-omit-frame-pointer", "-I", str(root / "include"),
-           "-I", str(driver / "include"), *map(str, sources), "-o", str(exe)]
+           "-I", str(driver / "include"), "-I", str(core / "include"),
+           "-I", str(root.parent / "firmware/main"), *map(str, sources),
+           *([] if os.name == "nt" else ["-lm"]), "-o", str(exe)]
 compiled = subprocess.run(command, capture_output=True, text=True)
 (build / "host-build.log").write_text(compiled.stdout + compiled.stderr)
 if compiled.returncode:
@@ -39,11 +43,28 @@ if board_compiled.returncode:
 board_tested = subprocess.run([str(board_exe)], capture_output=True, text=True)
 print(board_tested.stdout + board_tested.stderr, end="")
 (build / "board-tests.log").write_text(board_tested.stdout + board_tested.stderr)
-result = {"status": "pass" if tested.returncode == board_tested.returncode == 0 else "fail", "device_operations": 0,
+extra_results = []
+for name, extra_sources in (
+    ("pwm", [root / "tests/test_pwm.c"]),
+    ("pwm_off", [root / "tests/test_pwm_off.c", root / "src/nxp_pwm_off_trial.c"]),
+):
+    test_sources = board_sources[:2] + extra_sources
+    test_exe = build / (f"{name}_tests.exe" if os.name == "nt" else f"{name}_tests")
+    test_command = board_command[:board_command.index(str(board_sources[0]))]
+    test_command += [*map(str, test_sources), "-o", str(test_exe)]
+    subprocess.run(test_command, check=True)
+    completed = subprocess.run([str(test_exe)], capture_output=True, text=True)
+    print(completed.stdout + completed.stderr, end="")
+    (build / f"{name}-tests.log").write_text(completed.stdout + completed.stderr)
+    extra_results.append(completed)
+    sources += extra_sources
+exit_code = tested.returncode or board_tested.returncode or next((r.returncode for r in extra_results if r.returncode), 0)
+result = {"status": "pass" if exit_code == 0 else "fail", "device_operations": 0,
           "sanitizer": "AddressSanitizer", "summary": tested.stdout.strip(),
           "board_summary": board_tested.stdout.strip(),
+          "pwm_summaries": [r.stdout.strip() for r in extra_results],
           "source_sha256": {str(p.relative_to(root.parent)): hashlib.sha256(p.read_bytes()).hexdigest()
                             for p in sources + board_sources + list((root / "include").glob("*.h"))},
           "limitations": "Mocks and pure arithmetic only; electrical timing, power and boot unqualified."}
 (build / "host-results.json").write_text(json.dumps(result, indent=2) + "\n")
-raise SystemExit(tested.returncode or board_tested.returncode)
+raise SystemExit(exit_code)

@@ -1,5 +1,6 @@
 #include "nxp_app.h"
 #include "okl_nxp.h"
+#include "output_policy.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,10 +59,10 @@ static void test_parameters(void) {
     memset(a, 0, sizeof(a)); a[1] = 32; a[3] = 1;
     for (i = 0; i < 256; ++i) { a[2] = (uint8_t)i; CHECK(command(&s, 3, 3, a, 4) == (i <= 38 ? 2 : 3)); }
     memset(a, 0, sizeof(a)); a[5] = 1; a[6] = 2; a[7] = 3;
-    CHECK(command(&s, 15, 3, a, 9) == 3); /* A frame cannot silently select custom mode. */
+    CHECK(command(&s, 15, 3, a, 9) == 2 && s.effect == 1 && s.rgb[0] == 10 && s.custom_rgb[0] == 1);
     memset(a, 0, sizeof(a)); a[2] = 8; CHECK(command(&s, 15, 2, a, 12) == 2);
     memset(a, 0, sizeof(a)); a[5] = 1; a[6] = 2; a[7] = 3;
-    CHECK(command(&s, 15, 3, a, 9) == 2 && s.rgb[0] == 1 && s.rgb[2] == 3 && !s.white_brightness);
+    CHECK(command(&s, 15, 3, a, 9) == 2 && s.custom_rgb[0] == 1 && s.custom_rgb[2] == 3 && !s.white_brightness);
     a[8] = 1; CHECK(command(&s, 15, 3, a, 9) == 3);
     s.effect = 0; s.white_brightness = 255; memset(a, 0, sizeof(a)); a[2] = 8;
     CHECK(command(&s, 15, 2, a, 12) == 3); /* Must lower white before enabling RGB. */
@@ -113,7 +114,7 @@ static void test_driver_integration(void) {
     CHECK(okl_request_frame(&request, rgb) == OKL_OK && okl_nxp_execute(&driver, &request, &reply, 150000) == OKL_OK);
     CHECK(okl_request_color_brightness(&request, 128) == OKL_OK && okl_nxp_execute(&driver, &request, &reply, 150000) == OKL_OK);
     CHECK(okl_nxp_read_state(&driver, &state, 150000) == OKL_OK && state.effect == 8 && state.color_brightness == 128 && state.color_count == 0);
-    CHECK(!memcmp(f.state.rgb, rgb, 3)); /* Internal simulation, not a wire framebuffer getter. */
+    CHECK(!memcmp(f.state.custom_rgb, rgb, 3)); /* Internal simulation, not a wire framebuffer getter. */
     packet(q, 0, 0x49, args, 72); q[0] = 4;
     CHECK(nxp_process(&f.state, q, 97, r, 97) == NXP_OK && r[7] == 8 && f.state.claimed);
     packet(q, 15, 0x84, args, 2); q[0] = 4; CHECK(nxp_process(&f.state, q, 97, r, 97) == NXP_OK && r[7] == 8);
@@ -201,6 +202,8 @@ static void test_handshake(void) {
     dummy[0] = 1; packet(q, 0, 4, dummy, 1);
     CHECK(nxp_process(&state, q, 97, r, 97) == NXP_OK && r[7] == 8 && !state.boot_requested);
     state.claimed = 1; memcpy(state.owner, tag, 6); memset(dummy, 0, 97);
+    CHECK(nxp_process(&state, q, 97, r, 97) == NXP_OK && r[7] == 5 && !state.boot_requested);
+    state.part_id = 0xbc40; CHECK(nxp_state_platform(&state, 1, 1, 0, 0));
     CHECK(nxp_link_transaction(&link, q, 97, r, 97, 110) == NXP_OK && state.boot_requested && !link.recovery_ready);
     CHECK(nxp_link_transaction(&link, dummy, 2, r, 97, 111) == NXP_OK && !link.recovery_ready);
     CHECK(nxp_link_expire(&link, 210) == NXP_EXPIRED && !state.boot_requested && !link.recovery_ready);
@@ -220,6 +223,13 @@ static void test_trial(void) {
     q[0] = 2; q[15] = 'N'; q[95] = xor_report(q + 7);
     CHECK(nxp_process_at(&s, q, 97, r, 97, 1) == NXP_OK && r[7] == 3 && !s.trial_confirmed);
     packet(q, 0, 0xfd, confirm, 4);
+    CHECK(nxp_process_at(&s, q, 97, r, 97, 1) == NXP_OK && r[7] == 5 && !s.trial_confirmed);
+    s.part_id = 0xbc40; CHECK(nxp_state_platform(&s, 1, 1, 0, 0));
+    CHECK(nxp_process_at(&s, q, 97, r, 97, 1) == NXP_OK && r[7] == 5 && !s.trial_confirmed);
+    CHECK(nxp_state_platform(&s, 0, 1, 1, 0));
+    s.boot_requested = 1;
+    CHECK(nxp_process_at(&s, q, 97, r, 97, 1) == NXP_OK && r[7] == 3 && !s.trial_confirmed);
+    s.boot_requested = 0;
     CHECK(nxp_process_at(&s, q, 97, r, 97, 30000) == NXP_OK && r[7] == 3 && !s.trial_confirmed);
     CHECK(nxp_process_at(&s, q, 97, r, 97, 29999) == NXP_OK && r[7] == 2 && s.trial_confirmed && r[15] == 1);
     CHECK(!nxp_trial_expired(&s, UINT32_MAX));
@@ -229,6 +239,7 @@ static void test_trial(void) {
     CHECK(nxp_link_transaction(&link, q, 97, r, 97, 30001) == NXP_OK && !s.trial_confirmed);
     CHECK(nxp_link_transaction(&link, dummy, 2, r, 97, 30002) == NXP_OK);
     CHECK(nxp_link_transaction(&link, dummy, 97, r, 97, 30003) == NXP_OK && r[7] == 3);
+    nxp_state_init(&s);
     packet(q, 0, 0xfe, NULL, 0); CHECK(nxp_process(&s, q, 97, r, 97) == NXP_OK && r[7] == 4);
     s.part_id = 0x0001bc40; CHECK(nxp_process(&s, q, 97, r, 97) == NXP_OK && r[7] == 2);
     CHECK(r[12] == 4 && !r[15] && r[16] == 1 && r[17] == 0xbc && r[18] == 0x40);
@@ -318,8 +329,189 @@ static void test_connections(void) {
         CHECK(s.claimed == (i == 1) && s.connection_count == i);
     }
 }
+
+typedef struct { fixture *f; okl_nxp *driver; unsigned seeded_static, exchanges; } policy_fixture;
+static okl_result policy_exchange(void *user, const okl_request *request) {
+    policy_fixture *p = user; okl_reply reply; nxp_pwm_frame before, after;
+    int seeding = request->command == OKL_SET_FRAME && p->f->state.effect == 1;
+    nxp_render(&p->f->state, 1, &before);
+    okl_result result = okl_nxp_execute(p->driver, request, &reply, p->f->now + 150000);
+    nxp_render(&p->f->state, 1, &after); ++p->exchanges;
+    if (result == OKL_OK && seeding) {
+        CHECK(!memcmp(&before, &after, sizeof(before))); /* No visible preseed change. */
+        ++p->seeded_static;
+    }
+    return result;
+}
+static void make_fixture(fixture *f, okl_nxp *driver) {
+    okl_transport t;
+    memset(f, 0, sizeof(*f)); nxp_state_init(&f->state); nxp_link_init(&f->link, &f->state);
+    memset(&t, 0, sizeof(t)); t.user = f; t.now_us = now_us; t.lock = lock; t.unlock = unlock;
+    t.arm_ready = arm; t.wait_ready = wait_ready; t.transfer = transfer;
+    CHECK(okl_nxp_init(driver, &t, tag) == OKL_OK);
+}
+static void test_output_policy_integration(void) {
+    fixture f; okl_nxp driver; okl_request request; okl_light_state native;
+    policy_fixture p; nxp_pwm_frame before, after; kl_state target = kl_state_default();
+    uint8_t start[3] = {40, 90, 130}, initial[3], effect = 0, raw[3]; unsigned encoding, i;
+    make_fixture(&f, &driver); p.f = &f; p.driver = &driver; p.seeded_static = p.exchanges = 0;
+    CHECK(okl_nxp_claim(&driver, (const uint8_t *)"Open Keylight", 13, 150000) == OKL_OK);
+    CHECK(okl_request_static(&request, start) == OKL_OK && policy_exchange(&p, &request) == OKL_OK);
+    CHECK(okl_request_color_brightness(&request, 255) == OKL_OK && policy_exchange(&p, &request) == OKL_OK);
+    for (encoding = KL_OUTPUT_SRGB; encoding <= KL_OUTPUT_LINEAR; ++encoding) {
+        CHECK(okl_nxp_read_state(&driver, &native, f.now + 150000) == OKL_OK);
+        nxp_render(&f.state, 1, &before);
+        CHECK(kl_color_enter(&native, NULL, initial, &effect, policy_exchange, &p) == OKL_OK);
+        CHECK(effect == 8 && p.seeded_static == encoding + 1 && !memcmp(initial, native.colors, 3));
+        nxp_render(&f.state, 1, &after); CHECK(!memcmp(&before, &after, sizeof(before)));
+        target.power = true; target.mode = KL_COLOR; target.brightness = 23;
+        target.rgb = (kl_rgb){255, 0, 32}; target.effect = KL_EFFECT_NONE; target.transition_ms = 300;
+        kl_transition transition;
+        kl_frame origin = {initial[0], initial[1], initial[2], 0, 5200};
+        kl_transition_begin(&transition, &origin, &target, 1000);
+        for (i = 0; i <= 300; i += 10) {
+            kl_frame frame = kl_color_sample(&transition, (kl_output_encoding)encoding, 1000 + i);
+            raw[0] = kl_byte(frame.r); raw[1] = kl_byte(frame.g); raw[2] = kl_byte(frame.b);
+            CHECK(okl_request_frame(&request, raw) == OKL_OK && policy_exchange(&p, &request) == OKL_OK);
+            nxp_render(&f.state, 1, &after);
+            CHECK(after.red_match == 25500u - raw[0] * 100u && after.green_match == 25500u - raw[1] * 100u &&
+                  after.blue_match == 25500u - raw[2] * 100u && after.cool_match == 255 && after.warm_match == 255);
+        }
+        before = after;
+        CHECK(kl_color_park(raw, &effect, policy_exchange, &p) == OKL_OK && effect == 1);
+        nxp_render(&f.state, 1, &after); CHECK(!memcmp(&before, &after, sizeof(before)));
+        CHECK(okl_nxp_read_state(&driver, &native, f.now + 150000) == OKL_OK);
+        CHECK(kl_color_matches(&target, (kl_output_encoding)encoding, &native));
+        /* Reusing the acknowledged custom frame does not reset it or mute master. */
+        CHECK(kl_color_enter(&native, NULL, initial, &effect, policy_exchange, &p) == OKL_OK);
+        --p.seeded_static;
+        CHECK(okl_nxp_read_state(&driver, &native, f.now + 150000) == OKL_OK);
+        i = p.exchanges;
+        CHECK(kl_color_enter(&native, raw, initial, &effect, policy_exchange, &p) == OKL_OK && p.exchanges == i);
+        target.effect = KL_EFFECT_AURORA;
+        for (i = 0; i < 2000; i += 37) {
+            kl_frame frame = kl_color_frame(&target, (kl_output_encoding)encoding, i);
+            raw[0] = kl_byte(frame.r); raw[1] = kl_byte(frame.g); raw[2] = kl_byte(frame.b);
+            CHECK(okl_request_frame(&request, raw) == OKL_OK && policy_exchange(&p, &request) == OKL_OK);
+            CHECK(!memcmp(f.state.custom_rgb, raw, 3));
+        }
+        CHECK(kl_color_park(raw, &effect, policy_exchange, &p) == OKL_OK);
+    }
+    /* Foreign requests cannot disturb either visible or prepared colour. */
+    nxp_state saved = f.state; uint8_t q[97], r[97], args[9] = {0, 0, 0, 0, 0, 255, 255, 255, 0};
+    packet(q, 15, 3, args, 9); q[0] = 4;
+    CHECK(nxp_process(&f.state, q, 97, r, 97) == NXP_OK && r[7] == 8 && !memcmp(&saved, &f.state, sizeof(saved)));
+}
+
+static void test_off_profile(void) {
+    fixture f; okl_nxp driver; okl_request request, saved_request; okl_reply reply, good;
+    okl_diagnostic_profile profile, saved_profile; nxp_state saved;
+    uint8_t record[NXP_OFF_RECORD_BYTES], data[64], saved_data[64], q[97], r[97], dummy[97] = {0};
+    unsigned i, page, size; const uint8_t off[4] = {'O','F','F','1'};
+    for (i = 0; i < sizeof(record); ++i) record[i] = (uint8_t)(i ^ (i >> 8));
+    make_fixture(&f, &driver); saved = f.state;
+    CHECK(!nxp_state_off_trial(&f.state, record) && !memcmp(&saved, &f.state, sizeof(saved)));
+    f.state.part_id = 0xbc40; CHECK(nxp_state_platform(&f.state, 1, 1, 0, 0));
+    f.state.rgb_brightness = 1; CHECK(!nxp_state_off_trial(&f.state, record)); f.state.rgb_brightness = 0;
+    f.state.white_brightness = 1; CHECK(!nxp_state_off_trial(&f.state, record)); f.state.white_brightness = 0;
+    f.state.effect = 1; CHECK(!nxp_state_off_trial(&f.state, record)); f.state.effect = 0;
+    CHECK(!nxp_state_off_trial(&f.state, NULL));
+    CHECK(nxp_state_off_trial(&f.state, record)); saved = f.state;
+    CHECK(!nxp_state_off_trial(&f.state, record) && !memcmp(&saved, &f.state, sizeof(saved)));
+    CHECK(!nxp_state_platform(&f.state, 0, 1, 1, 0) && !memcmp(&saved, &f.state, sizeof(saved)));
+    CHECK(okl_nxp_claim(&driver, (const uint8_t *)"Open Keylight", 13, 150000) == OKL_OK);
+    CHECK(okl_request_get(&request, OKL_GET_DIAGNOSTIC_PROFILE) == OKL_OK);
+    CHECK(okl_nxp_execute(&driver, &request, &reply, 150000) == OKL_OK);
+    CHECK(okl_reply_decode_diagnostic_profile(&profile, &reply) == OKL_OK && !profile.requested && profile.duration_ms == 400);
+    good = reply; saved_profile = profile;
+    for (i = 0; i < 5; ++i) {
+        reply = good;
+        if (i == 0) reply.received = 0;
+        else if (i == 1) reply.acknowledged = 0;
+        else if (i == 2) reply.report.status = 8;
+        else if (i == 3) reply.report.command_class = 1;
+        else reply.report.opcode = 0xf1;
+        CHECK(okl_reply_decode_diagnostic_profile(&profile, &reply) == OKL_PROTOCOL && !memcmp(&profile, &saved_profile, sizeof(profile)));
+    }
+    for (size = 0; size <= 80; ++size) if (size != 8) {
+        reply = good; reply.report.size = (uint8_t)size;
+        CHECK(okl_reply_decode_diagnostic_profile(&profile, &reply) == OKL_PROTOCOL && !memcmp(&profile, &saved_profile, sizeof(profile)));
+    }
+    for (i = 0; i < 8; ++i) {
+        reply = good; reply.report.arguments[i] = i == 4 ? 4 : (uint8_t)(reply.report.arguments[i] ^ 1);
+        CHECK(okl_reply_decode_diagnostic_profile(&profile, &reply) == OKL_PROTOCOL);
+    }
+    for (page = 0; page < 256; ++page) {
+        saved_request = request;
+        CHECK(okl_request_diagnostic_page(&request, (uint8_t)page) == (page < 14 ? OKL_OK : OKL_INVALID));
+        if (page >= 14) { CHECK(!memcmp(&request, &saved_request, sizeof(request))); continue; }
+        CHECK(okl_nxp_execute(&driver, &request, &reply, 150000) == OKL_OK);
+        CHECK(okl_reply_decode_diagnostic_page(data, (uint8_t)page, &reply) == OKL_OK && !memcmp(data, record + page * 64, 64));
+        good = reply; memcpy(saved_data, data, 64);
+        for (i = 0; i < 8; ++i) {
+            reply = good; reply.report.arguments[i] ^= 1;
+            CHECK(okl_reply_decode_diagnostic_page(data, (uint8_t)page, &reply) == OKL_PROTOCOL && !memcmp(data, saved_data, 64));
+        }
+        for (size = 0; size <= 80; ++size) if (size != 72) {
+            reply = good; reply.report.size = (uint8_t)size;
+            CHECK(okl_reply_decode_diagnostic_page(data, (uint8_t)page, &reply) == OKL_PROTOCOL && !memcmp(data, saved_data, 64));
+        }
+    }
+    CHECK(okl_request_confirm_controller(&request) == OKL_OK);
+    CHECK(okl_nxp_execute(&driver, &request, &reply, 150000) == OKL_REMOTE && reply.report.status == 5 && !f.state.trial_confirmed);
+    CHECK(okl_request_static(&request, (const uint8_t *)"abc") == OKL_OK);
+    CHECK(okl_nxp_execute(&driver, &request, &reply, 150000) == OKL_REMOTE && reply.report.status == 5);
+    CHECK(okl_request_frame(&request, (const uint8_t *)"xyz") == OKL_OK);
+    CHECK(okl_nxp_execute(&driver, &request, &reply, 150000) == OKL_REMOTE && reply.report.status == 5);
+    CHECK(okl_request_white_brightness(&request, 1, 0) == OKL_OK);
+    CHECK(okl_nxp_execute(&driver, &request, &reply, 150000) == OKL_REMOTE && reply.report.status == 5);
+    CHECK(!f.state.rgb_brightness && !f.state.white_brightness && !f.state.effect);
+    packet(q, 0, 0x70, off, 4); q[0] = 4; saved = f.state;
+    CHECK(nxp_process_at(&f.state, q, 97, r, 97, 1) == NXP_OK && r[7] == 8 && !memcmp(&saved, &f.state, sizeof(saved)));
+    q[0] = tag[0];
+    CHECK(nxp_process_at(&f.state, q, 97, r, 97, 28000) == NXP_OK && r[7] == 3 && !f.state.off_requested);
+    CHECK(okl_request_diagnostic_off(&request) == OKL_OK);
+    saved_request = request;
+    for (i = 0; i < 4; ++i) {
+        uint8_t bad_off[4] = {'O','F','F','1'}; bad_off[i] ^= 1;
+        CHECK(okl_request_build(&request, OKL_RUN_DIAGNOSTIC_OFF, bad_off, 4) == OKL_INVALID &&
+              !memcmp(&request, &saved_request, sizeof(request)));
+    }
+    CHECK(okl_nxp_execute(&driver, &request, &reply, 150000) == OKL_OK && f.state.off_requested == 2);
+    CHECK(okl_reply_check_diagnostic_off(&reply) == OKL_OK && !memcmp(f.state.off_owner, tag, 6));
+    good = reply;
+    for (i = 0; i < 4; ++i) { reply = good; reply.report.arguments[i] ^= 1; CHECK(okl_reply_check_diagnostic_off(&reply) == OKL_PROTOCOL); }
+    for (i = 1; i <= 3; ++i) {
+        f.state.off_requested = (uint8_t)i;
+        CHECK(okl_nxp_execute(&driver, &request, &reply, 150000) == OKL_REMOTE && reply.report.status == 3);
+    }
+    /* Acknowledgement must be fully consumed. Every incomplete length/body cancels permanently. */
+    for (size = 0; size < 97; ++size) {
+        nxp_link_cancel(&f.link); f.state.off_requested = 0;
+        CHECK(nxp_link_transaction(&f.link, q, 97, r, 97, 0) == NXP_OK && f.state.off_requested == 1);
+        CHECK(nxp_link_transaction(&f.link, dummy, 2, r, 97, 1) == NXP_OK && f.state.off_requested == 1);
+        CHECK(nxp_link_transaction(&f.link, dummy, size, r, 97, 2) == NXP_BAD_PACKET && f.state.off_requested == 3);
+    }
+    f.state.off_requested = 0;
+    CHECK(nxp_link_transaction(&f.link, q, 97, r, 97, 0) == NXP_OK && f.state.off_requested == 1);
+    CHECK(nxp_link_expire(&f.link, 100) == NXP_EXPIRED && f.state.off_requested == 3);
+    /* A different completed reply cannot acknowledge an abandoned direct-parser request. */
+    f.state.off_requested = 1;
+    packet(q, 0, 0xf0, NULL, 0);
+    CHECK(nxp_link_transaction(&f.link, q, 97, r, 97, 0) == NXP_OK);
+    CHECK(nxp_link_transaction(&f.link, dummy, 2, r, 97, 1) == NXP_OK);
+    CHECK(nxp_link_transaction(&f.link, dummy, 97, r, 97, 2) == NXP_OK && f.state.off_requested == 1);
+    nxp_link_cancel(&f.link); CHECK(f.state.off_requested == 3);
+    /* A caller cannot turn the fixed off profile into a generic renderer. */
+    f.state.effect = 1; f.state.rgb_brightness = 255; memset(f.state.rgb, 255, 3);
+    nxp_pwm_frame dark; nxp_render(&f.state, 1, &dark);
+    CHECK(dark.red_match == 25500 && dark.green_match == 25500 && dark.blue_match == 25500 &&
+          dark.cool_match == 255 && dark.warm_match == 255);
+    CHECK(nxp_trial_expired(&f.state, 30000) && !f.state.trial_confirmed);
+}
 int main(void) {
     test_packets(); test_parameters(); test_render(); test_driver_integration(); test_lifecycle_integration(); test_handshake(); test_trial(); test_platform_status(); test_connections();
+    test_output_policy_integration(); test_off_profile();
     printf("%u checks passed; original NXP protocol, arithmetic and ESP-driver integration; no device I/O.\n", checks);
     return 0;
 }

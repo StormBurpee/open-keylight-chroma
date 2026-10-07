@@ -7,6 +7,12 @@
 #ifndef NXP_SPI_ONLY_TRIAL
 #define NXP_SPI_ONLY_TRIAL 0
 #endif
+#ifndef NXP_PWM_OFF_TRIAL
+#define NXP_PWM_OFF_TRIAL 0
+#endif
+#if NXP_PWM_OFF_TRIAL && !NXP_SPI_ONLY_TRIAL
+#error "The off-only experiment must remain an unconfirmable SPI diagnostic"
+#endif
 #ifndef NXP_APPROVED_PART_ID
 #define NXP_APPROVED_PART_ID 0u
 #endif

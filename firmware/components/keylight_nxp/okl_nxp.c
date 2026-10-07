@@ -6,7 +6,7 @@ static const descriptor commands[OKL_COMMAND_COUNT] = {
     {0,0x87,0}, {0,0x84,0}, {0,0xc9,0},
     {15,0x82,2}, {15,0x84,2}, {3,0x83,3}, {3,0x81,2},
     {0,0x49,72}, {15,2,12}, {15,4,3}, {3,3,4}, {3,1,4}, {15,3,9},
-    {0,0xfe,0}, {0,0xfc,0}, {0,0xfd,4}
+    {0,0xfe,0}, {0,0xfc,0}, {0,0xfd,4}, {0,0xf0,0}, {0,0xf1,1}, {0,0x70,4}
 };
 
 static int all_zero(const uint8_t *bytes, size_t size) {
@@ -52,6 +52,10 @@ static okl_result valid_request(const okl_request *r) {
         return all_zero(a,5) && a[8]==0?OKL_OK:OKL_INVALID;
     case OKL_CONFIRM_CONTROLLER:
         return !memcmp(a,"OKLC",4)?OKL_OK:OKL_INVALID;
+    case OKL_GET_DIAGNOSTIC_PAGE:
+        return a[0]<OKL_DIAGNOSTIC_PAGES?OKL_OK:OKL_INVALID;
+    case OKL_RUN_DIAGNOSTIC_OFF:
+        return !memcmp(a,"OFF1",4)?OKL_OK:OKL_INVALID;
     default: return OKL_OK;
     }
 }
@@ -71,7 +75,8 @@ okl_result okl_request_build(okl_request *out, okl_command command,
 
 okl_result okl_request_get(okl_request *out, okl_command command) {
     uint8_t args[3]={0,0,0};
-    if((unsigned)command>OKL_GET_TEMPERATURE && command!=OKL_GET_PART_ID && command!=OKL_GET_CONTROLLER_STATUS)
+    if((unsigned)command>OKL_GET_TEMPERATURE && command!=OKL_GET_PART_ID &&
+       command!=OKL_GET_CONTROLLER_STATUS && command!=OKL_GET_DIAGNOSTIC_PROFILE)
         return OKL_INVALID;
     if(command==OKL_GET_WHITE_BRIGHTNESS || command==OKL_GET_TEMPERATURE) args[1]=32;
     return okl_request_build(out,command,args,commands[command].size);
@@ -111,6 +116,13 @@ okl_result okl_request_temperature(okl_request *out, uint16_t kelvin) {
 
 okl_result okl_request_confirm_controller(okl_request *out) {
     return okl_request_build(out,OKL_CONFIRM_CONTROLLER,(const uint8_t *)"OKLC",4);
+}
+
+okl_result okl_request_diagnostic_page(okl_request *out, uint8_t page) {
+    return okl_request_build(out,OKL_GET_DIAGNOSTIC_PAGE,&page,1);
+}
+okl_result okl_request_diagnostic_off(okl_request *out) {
+    return okl_request_build(out,OKL_RUN_DIAGNOSTIC_OFF,(const uint8_t *)"OFF1",4);
 }
 
 static uint8_t checksum(const uint8_t *report) {
@@ -199,6 +211,28 @@ okl_result okl_reply_decode_controller_status(okl_controller_status *out, const 
 okl_result okl_reply_check_controller_confirmation(const okl_reply *reply) {
     if(!reply) return OKL_INVALID;
     return is_getter_reply(reply,0xfd,1) && reply->report.arguments[0]==1?OKL_OK:OKL_PROTOCOL;
+}
+
+okl_result okl_reply_decode_diagnostic_profile(okl_diagnostic_profile *out, const okl_reply *reply) {
+    const uint8_t *a;
+    if(!out || !reply) return OKL_INVALID;
+    if(!is_getter_reply(reply,0xf0,8)) return OKL_PROTOCOL;
+    a=reply->report.arguments;
+    if(memcmp(a,"OFF1",4) || a[4]>3 || a[5] || a[6]!=1 || a[7]!=144) return OKL_PROTOCOL;
+    out->requested=a[4]; out->duration_ms=400; return OKL_OK;
+}
+okl_result okl_reply_decode_diagnostic_page(uint8_t out[OKL_DIAGNOSTIC_PAGE_BYTES], uint8_t page, const okl_reply *reply) {
+    const uint8_t *a;
+    if(!out || !reply || page>=OKL_DIAGNOSTIC_PAGES) return OKL_INVALID;
+    if(!is_getter_reply(reply,0xf1,72)) return OKL_PROTOCOL;
+    a=reply->report.arguments;
+    if(memcmp(a,"OFF1",4) || a[4]!=page || a[5]!=OKL_DIAGNOSTIC_PAGES ||
+       a[6]!=OKL_DIAGNOSTIC_PAGE_BYTES || a[7]) return OKL_PROTOCOL;
+    memcpy(out,a+8,OKL_DIAGNOSTIC_PAGE_BYTES); return OKL_OK;
+}
+okl_result okl_reply_check_diagnostic_off(const okl_reply *reply) {
+    if(!reply) return OKL_INVALID;
+    return is_getter_reply(reply,0x70,4) && !memcmp(reply->report.arguments,"OFF1",4)?OKL_OK:OKL_PROTOCOL;
 }
 
 uint64_t okl_nxp_default_deadline(const okl_nxp *d) {

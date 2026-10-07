@@ -51,6 +51,7 @@ typedef struct {
     size_t size;
     uint8_t bank_sha256[32];
     okl_firmware_version version;
+    uint8_t role; /* Explicit diagnostic(1) or lighting(2), never inferred. */
 } okl_loader_image;
 
 typedef struct {
@@ -110,7 +111,7 @@ typedef struct {
 
 /* Format1: 64-byte header followed by one exact bank. Header fields are BE:
  * 0..7="OKLCNXP\0",8:u16 format1,10:u16 header64,12:u32 bank28672,
- * 16:u32 partbc40,20:ABImajor1,21:minor0,22:role2,23:flags0,
+ * 16:u32 partbc40,20:ABImajor1,21:minor0,22:role1 or2,23:flags0,
  * 24..27:firmware version,28..59:bank SHA256,60..63:zero.
  * The package declares an original image; a digest is integrity,
  * not a signature or proof that the binary is electrically qualified. */
@@ -121,8 +122,9 @@ int okl_loader_information_valid(const uint8_t report[OKL_REPORT_BYTES]);
 /* Revalidates the immutable package before I/O; deadline covers entry/program/
  * verify. Quiet is always additional and classification gets at most 10s.
  * OK means a matching original application was freshly observed dark; it does
- * NOT mean its trial was confirmed. Worker must perform its typed lifecycle
- * verification before FD and before enabling output. Any other result keeps
+ * NOT mean its trial was confirmed. Diagnostic role1 must never receive FD or
+ * open output readiness; its durable journal remains until explicit recovery.
+ * Lighting role2 needs typed lifecycle verification before FD/output. Any other result keeps
  * output disabled; no automatic replay/restore/resume is supported. */
 okl_loader_result okl_loader_run(const okl_loader_image *image, okl_loader_source source,
                                 const okl_loader_ops *ops, uint64_t deadline_us,

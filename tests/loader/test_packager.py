@@ -37,6 +37,16 @@ class PackageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 packager.build_package(bytes(size), (0, 1, 0, 0))
 
+    def test_diagnostic_role_is_explicit(self):
+        lighting, _ = packager.build_package(self.bank, (0, 1, 0, 0))
+        diagnostic, metadata = packager.build_package(self.bank, (0, 1, 0, 0), "diagnostic")
+        self.assertEqual(metadata['declared_role'], 'diagnostic')
+        self.assertEqual(diagnostic[22], 1)
+        self.assertEqual([i for i, pair in enumerate(zip(lighting, diagnostic)) if pair[0] != pair[1]], [22])
+        for invalid in ('', 'unqualified', 1, 2, None):
+            with self.assertRaises(ValueError):
+                packager.build_package(self.bank, (0, 1, 0, 0), invalid)
+
     def test_every_vector(self):
         for index in range(48):
             for address in (0, 0x2001, 0x20C0, 0x9001, 0xFFFFFFFF):

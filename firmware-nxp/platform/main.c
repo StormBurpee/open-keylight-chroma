@@ -1,6 +1,10 @@
 #include "nxp_app.h"
 #include "nxp_board.h"
 #include "qualification.h"
+#if NXP_PWM_OFF_TRIAL
+#include "nxp_pwm_off_trial.h"
+static nxp_pwm_off_trial off_trial;
+#endif
 #include <stdint.h>
 
 extern uint32_t _data_load, _data_start, _data_end, _bss_start, _bss_end;
@@ -9,6 +13,7 @@ static nxp_link link;
 static nxp_board board;
 static volatile uint32_t milliseconds;
 static volatile uint32_t recovery_allowed;
+static void enter_recovery(void);
 
 /* Inspectable qualification record. No device ID is invented. Probe and
  * peripheral service remain gated until the exact hardware is qualified. */
@@ -25,10 +30,22 @@ static uint32_t configured_clock(void) {
         (read_register(0, 0x4004800c) & 1) && read_register(0, 0x40048070) == 3 &&
         read_register(0, 0x40048078) == 1 ? 48000000u : 0;
 }
-void SysTick_Handler(void) { ++milliseconds; }
+void SysTick_Handler(void) {
+    uint32_t now = ++milliseconds;
+#if NXP_PWM_OFF_TRIAL
+    nxp_pwm_off_tick(&off_trial, &board, now);
+#endif
+    /* Expiry must not depend on a healthy main/SPI polling loop. State
+     * mutation runs with interrupts masked, so confirmation is indivisible
+     * with respect to this check. This cannot cover a stuck masked CPU. */
+    if (recovery_allowed == UINT32_C(0x5245434f) && nxp_trial_expired(&state, now)) enter_recovery();
+}
 void SSP1_Handler(void) { nxp_board_spi_irq(&board); }
 static void enter_recovery(void) {
     __asm volatile ("cpsid i");
+#if NXP_PWM_OFF_TRIAL
+    nxp_pwm_off_recovery(&off_trial, &board, milliseconds);
+#endif
 #if !NXP_SPI_ONLY_TRIAL
     if (board.pwm_started) (void)nxp_board_force_off(&board);
 #endif
@@ -91,7 +108,7 @@ void nxp_reset_c(void) {
     config.spi_mode = NXP_QUALIFIED_SPI_MODE;
     nxp_board_init(&board, &io, &config, &link);
 #if NXP_SPI_ONLY_TRIAL
-    (void)nxp_board_trial_dark(&board);
+    if (!nxp_board_trial_dark(&board) && recovery_allowed) enter_recovery();
 #endif
     nxp_diagnostic.qualification_flags = config.qualifications;
     nxp_diagnostic.reset_status = read_register(0, 0x40048030);
@@ -111,22 +128,33 @@ void nxp_reset_c(void) {
         write_register(0, 0xe000e100, 1u << 14);
 #if !NXP_SPI_ONLY_TRIAL
         nxp_diagnostic.outputs_enabled = (uint32_t)nxp_board_start_pwm(&board);
+        if (!nxp_diagnostic.outputs_enabled && recovery_allowed) enter_recovery();
 #endif
         if (!nxp_state_platform(&state, NXP_SPI_ONLY_TRIAL,
             recovery_allowed == UINT32_C(0x5245434f) && config.clock_hz == 48000000u,
             board.pwm_started != 0, nxp_diagnostic.reset_status)) nxp_panic();
+#if NXP_PWM_OFF_TRIAL
+        if (!nxp_pwm_off_init(&off_trial, &board)) enter_recovery();
+#endif
         __asm volatile ("cpsie i");
         for (;;) {
             uint32_t now = milliseconds;
             if (nxp_trial_expired(&state, now)) enter_recovery();
             service_watchdog();
-            __asm volatile ("cpsid i"); nxp_board_poll(&board, now); __asm volatile ("cpsie i");
+            __asm volatile ("cpsid i"); nxp_board_poll(&board, now);
+#if NXP_PWM_OFF_TRIAL
+            nxp_pwm_off_service(&off_trial, &board, now);
+#endif
+            __asm volatile ("cpsie i");
             if (link.recovery_ready || nxp_trial_expired(&state, milliseconds)) enter_recovery();
 #if !NXP_SPI_ONLY_TRIAL
             if ((uint32_t)(now - last_render) >= 10) {
                 nxp_pwm_frame frame; last_render = now;
                 nxp_render(&state, board.pwm_started && state.trial_confirmed, &frame);
-                (void)nxp_board_apply_pwm(&board, &frame);
+                if (!nxp_board_apply_pwm(&board, &frame)) {
+                    nxp_diagnostic.outputs_enabled = 0;
+                    nxp_panic();
+                }
             }
 #endif
         }

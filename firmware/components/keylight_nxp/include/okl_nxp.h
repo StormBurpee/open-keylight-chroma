@@ -20,7 +20,9 @@ typedef enum {
     OKL_GET_TEMPERATURE, OKL_SET_OWNER, OKL_SET_EFFECT,
     OKL_SET_COLOR_BRIGHTNESS, OKL_SET_WHITE_BRIGHTNESS,
     OKL_SET_TEMPERATURE, OKL_SET_FRAME, OKL_GET_PART_ID,
-    OKL_GET_CONTROLLER_STATUS, OKL_CONFIRM_CONTROLLER, OKL_COMMAND_COUNT
+    OKL_GET_CONTROLLER_STATUS, OKL_CONFIRM_CONTROLLER,
+    OKL_GET_DIAGNOSTIC_PROFILE, OKL_GET_DIAGNOSTIC_PAGE,
+    OKL_RUN_DIAGNOSTIC_OFF, OKL_COMMAND_COUNT
 } okl_command;
 
 typedef struct {
@@ -92,6 +94,9 @@ typedef struct {
     uint32_t capabilities, part_id, uptime_ms, reset_cause;
 } okl_controller_status;
 
+enum { OKL_DIAGNOSTIC_PAGES = 14, OKL_DIAGNOSTIC_PAGE_BYTES = 64 };
+typedef struct { uint8_t requested; uint16_t duration_ms; } okl_diagnostic_profile;
+
 okl_result okl_request_build(okl_request *out, okl_command command,
                               const uint8_t *arguments, size_t size);
 okl_result okl_request_get(okl_request *out, okl_command command);
@@ -103,6 +108,9 @@ okl_result okl_request_white_brightness(okl_request *out, uint8_t brightness, ui
 okl_result okl_request_temperature(okl_request *out, uint16_t kelvin);
 /* Explicit lifecycle action; never issue based on firmware version alone. */
 okl_result okl_request_confirm_controller(okl_request *out);
+/* Fixed OFF1 bench profile only; no arbitrary opcode or address access. */
+okl_result okl_request_diagnostic_page(okl_request *out, uint8_t page);
+okl_result okl_request_diagnostic_off(okl_request *out);
 okl_result okl_report_encode(uint8_t out[OKL_REPORT_BYTES], uint8_t transaction,
                              uint8_t command_class, uint8_t opcode,
                              const uint8_t *arguments, size_t size);
@@ -118,6 +126,9 @@ okl_result okl_reply_decode_part_id(uint32_t *out, const okl_reply *reply);
 okl_result okl_reply_decode_controller_status(okl_controller_status *out, const okl_reply *reply);
 /* An ACK alone does not verify confirmation; follow with a fresh FC getter. */
 okl_result okl_reply_check_controller_confirmation(const okl_reply *reply);
+okl_result okl_reply_decode_diagnostic_profile(okl_diagnostic_profile *out, const okl_reply *reply);
+okl_result okl_reply_decode_diagnostic_page(uint8_t out[OKL_DIAGNOSTIC_PAGE_BYTES], uint8_t page, const okl_reply *reply);
+okl_result okl_reply_check_diagnostic_off(const okl_reply *reply);
 okl_result okl_nxp_init(okl_nxp *driver, const okl_transport *transport,
                         const uint8_t identity[6]);
 /* Saturating now+150ms. Application may instead supply a longer bounded
