@@ -14,7 +14,7 @@ npm run build
 npm run dev
 ```
 
-Open `http://127.0.0.1:5178/?demo=1` for the explicitly labelled, isolated preview. The demo transport has no network access, never reads or changes saved device credentials, and begins with no saved scenes. It is included only in development; production builds cannot activate it. Visiting the development page without `?demo=1` uses the real same-origin API, without a device proxy.
+Open `http://127.0.0.1:5178/?demo=1` for the explicitly labelled, isolated preview. The demo transport has no network access and never reads or changes saved device credentials. Its four sample scenes exist only in page memory. It is included only in development; production builds cannot activate it. Visiting the development page without `?demo=1` uses the real same-origin API, without a device proxy.
 
 Production files are in `dashboard/dist`. `asset-manifest.json` lists each URL, MIME type, uncompressed SHA-256, original size and gzip size. The packaging step fails if total compressed assets exceed 230 KiB. Serve `/` using `index.html.gz`, and each listed asset path using its matching `.gz` file, the listed Content-Type and `Content-Encoding: gzip`. HTML should not be cached across firmware versions; hashed assets can use immutable caching. There are no external font, script or asset requests.
 
@@ -36,6 +36,8 @@ Production files are in `dashboard/dist`. `asset-manifest.json` lists each URL, 
 
 Tests cover API headers and binary uploads, timeout/conflict handling, queued writes, delayed-poll races, invalid state, exact RGB conversion, portable hash vectors, lock semantics, capability gating, trial confirmation, isolated preview credentials, empty scenes and OTA digest review. Run `npm test` for the current count and `npm run build` for the current compressed budget.
 
-`dashboard/review/desktop.jpg` and `dashboard/review/mobile.jpg` are browser captures of the labelled isolated preview, reviewed at desktop and approximately 390 CSS-pixel mobile width. They are design evidence, not evidence that production hardware endpoints have been exercised. Hardware integration is a separate validation step.
+The current graphite, ivory and copper design follows the refined concept in `assets/design/studio-concept-v2.png`. That file is generated design direction, not a browser screenshot. Scene photography and prompts are retained alongside it; the interface is implemented as native controls rather than a flattened image. Browser review covered desktop Light, Scenes and System pages and layouts at 300 and 868 CSS pixels without horizontal overflow. The captures in `dashboard/review` show the preceding design and are retained as historical evidence.
+
+The colour picker provides pointer gestures and keyboard-accessible hue, saturation and value controls. Cancelling a gesture, changing sections or recalling a scene discards an unapplied colour draft and resumes fresh device state. Tests exercise these boundaries, scene failures and remembered fade duration. UI tests and local previews do not establish physical lamp behavior.
 
 Component provenance is recorded in `dashboard/components.json`. The shadcn CLI generated Radix Nova components; small local adjustments provide slider thumb labelling. Dependency versions are locked by `package-lock.json`. Distributed asset licensing is recorded in `dashboard/THIRD_PARTY_NOTICES.md`.

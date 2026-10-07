@@ -61,7 +61,7 @@ cd ../firmware
 idf.py build
 ```
 
-The dashboard build produces a manifest of three compressed assets. The ESP build embeds those assets and enforces the existing 1,572,864-byte application slot. **Do not use `idf.py flash` on an installed light:** its newly built bootloader and partition table are not part of the application-only migration.
+The dashboard build produces a manifest of four compressed assets, including the scene photography. The ESP build embeds those assets and enforces the existing 1,572,864-byte application slot. **Do not use `idf.py flash` on an installed light:** its newly built bootloader and partition table are not part of the application-only migration.
 
 For dashboard development, run `npm run dev` in `dashboard` and open the displayed URL with `?demo=1`. The demo has a persistent label, uses an isolated transport and is excluded from production device builds.
 
