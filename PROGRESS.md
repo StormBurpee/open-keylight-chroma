@@ -8,7 +8,11 @@ Focus, Blue hour, Ember and Afterglow are seeded once into free scene slots with
 
 The existing SPI worker now owns a bounded blue-to-purple ESP upload indication, with two red failure pulses and guarded restoration of the prior output. Off, Recording Lock, transport uncertainty and newer commands take precedence. The indication becomes available only after this application is installed; the previous live application cannot display it during this first upgrade. Controller flashing remains separate and excludes cosmetic output work.
 
-The dashboard passes 75 tests and embeds in 152,944 compressed bytes. All 17 host suites and the ESP-IDF build pass; the updated actual worker passes 66,172 assertions plus startup/adapter checks. Independent source reviews cover output ordering, storage migration, encoding and indication. Live deployment and optical transition verification are still pending for this candidate.
+The dashboard passes 75 tests and embeds in 152,944 compressed bytes. All 17 host suites and the ESP-IDF build pass; the updated actual worker passes 66,172 assertions plus startup/adapter checks. Independent source reviews cover output ordering, storage migration, encoding and indication. GitHub CI passed all jobs for deployed source commit `af24fc7`.
+
+The 1,195,136-byte application was uploaded once through authenticated OTA and booted into a fresh trial. Its SHA-256 is `e875775e4e0890c287caa777681e3a024b4ec4c736c0e3ad0bed9b7bdcaf51bb`. Qualification verified the default sRGB setting, all four stored scenes and matching controller readback for white, Off, instant colour, a 300 ms colour transition and Off again. All four served dashboard assets matched their build hashes, and the physical lamp's dashboard displayed Connected with the new settings and scenes. The trial was explicitly confirmed on that evidence, and the owner's prior colour, brightness and transition setting were restored with matching readback at revision 6.
+
+Optical smoothness and the newly installed upload indication remain unverified. The ESP application is original; the working NXP controller is still legacy version 1.3.0.0. No independent NXP PWM qualification is claimed.
 
 ## Stream Deck installation and settings corrections
 
