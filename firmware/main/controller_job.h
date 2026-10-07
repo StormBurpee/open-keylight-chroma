@@ -11,6 +11,7 @@ typedef struct {
     const uint8_t *package;
     okl_loader_image image;
     okl_loader_source source;
+    uint32_t resident_proof_job_id;
 } app_controller_job;
 
 /* Volatile evidence produced only by the sole worker's update adapter. A
@@ -25,6 +26,11 @@ typedef enum {
 typedef struct {
     app_controller_entry_outcome entry;
     bool synchronized;
+    bool diagnostic_trial_observed;
+    bool profile_verified, command_attempted, command_acknowledged, registers_verified;
+    uint32_t resident_proof_job_id;
+    uint32_t diagnostic_words[224];
+    char diagnostic_error[81];
 } app_controller_worker_outcome;
 
 /* Call once after NVS initialization, before starting the controller worker.
@@ -33,6 +39,8 @@ typedef struct {
 esp_err_t app_controller_update_init(void);
 bool app_controller_update_blocked(void); /* Safe while app.mutex is held. */
 int app_controller_update_begin(uint32_t *job_id);
+/* Explicit bench admission; role must be diagnostic1 or production2. */
+int app_controller_update_begin_role(uint32_t *job_id, uint8_t role);
 /* 202 transfers ownership; every other result leaves ownership with caller. */
 int app_controller_update_submit(uint32_t id, uint8_t *package, size_t size);
 void app_controller_update_cancel_upload(uint32_t id);
@@ -49,6 +57,11 @@ int app_controller_update_persist(uint32_t id, const okl_loader_audit *audit);
 bool app_controller_update_finish(uint32_t id, const okl_loader_audit *audit,
                                   okl_loader_result result, bool confirmed,
                                   const char *error);
+/* Role1 never confirms or clears its journal. Returns no output readiness;
+ * any fresh-resident capability is volatile and consumed by a new job. */
+void app_controller_update_diagnostic_finish(uint32_t id, const okl_loader_audit *audit,
+                                           okl_loader_result result,
+                                           const app_controller_worker_outcome *outcome);
 /* Separate failed-job path, never successful installation. True means a
  * synchronized, read-only incompatibility was durably cleared. Readiness stays
  * closed until fresh normal bootstrap; no interrupted journal can use this. */

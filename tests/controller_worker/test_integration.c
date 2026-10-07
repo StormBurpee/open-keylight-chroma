@@ -16,6 +16,7 @@ static okl_result native_read(okl_nxp *, okl_light_state *, uint64_t);
 #undef okl_nxp_execute
 #undef okl_nxp_claim
 #undef okl_nxp_read_state
+#include "../controller_job/off_fixture.h"
 
 static unsigned checks, cases;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr,"case %u, line %d: %s\n",cases,__LINE__,#x); exit(1); } } while (0)
@@ -31,6 +32,10 @@ typedef struct {
     unsigned entry_fault, send_fault, boundary_fault, observation_fault, acquire_fault;
     unsigned postcommit_queries, observation_reads, persist_count;
     unsigned unsupported_query, malformed_query, claim_fault, poison_query, release_poison;
+    unsigned owner_gate, denied_fault, bench_fault, bench_commands, bench_pages, bench_claims, preserves, resumes;
+    unsigned bench_fail_page;
+    uint32_t bench_words[224];
+    uint64_t bench_last_page;
     bool original, loader, observing;
     okl_loader_phase persisted;
     okl_loader_delivery delivery;
@@ -60,17 +65,55 @@ static void call(okl_nxp *d,uint64_t deadline,uint64_t maximum) {
 static okl_result native_execute(okl_nxp *d,const okl_request *q,okl_reply *r,uint64_t deadline) {
     call(d,deadline,150000);CHECK(!m.loader);memset(r,0,sizeof(*r));
     r->received=r->acknowledged=1;r->report.status=2;uint8_t *p=r->report.arguments;
+    if(q->command==OKL_GET_DIAGNOSTIC_PROFILE) {
+        CHECK(m.job.image.role==1 && m.observing && m.bench_claims==1);
+        r->report.opcode=0xf0;r->report.size=8;memcpy(p,"OFF1",4);p[6]=1;p[7]=144;
+        if(m.bench_fault==1)p[0]^=1;
+        return OKL_OK;
+    }
+    if(q->command==OKL_GET_DIAGNOSTIC_PAGE) {
+        CHECK(q->size==1 && q->arguments[0]<14 && m.bench_claims==1);
+        uint8_t page=q->arguments[0];++m.bench_pages;
+        if(m.bench_pages==m.bench_fail_page)return OKL_TIMEOUT;
+        r->report.opcode=0xf1;r->report.size=72;memcpy(p,"OFF1",4);p[4]=page;p[5]=14;p[6]=64;
+        uint32_t initial[16]={0x4f464631,1,0,0,0,0,0,0,0,0,0,0,0,0x193,30000,17};
+        if(m.bench_fault==2)initial[2]=1;
+        const uint32_t *values=m.bench_commands?m.bench_words+page*16:initial;
+        CHECK(m.bench_commands || !page);
+        for(unsigned i=0;i<16;++i)word(p+8+i*4,values[i]);
+        if(m.bench_fault==4 && m.bench_commands && page==13)p[71]=1;
+        if(m.bench_fault==5 && m.bench_pages==16)p[71]^=1;
+        m.bench_last_page=m.now;return OKL_OK;
+    }
+    if(q->command==OKL_RUN_DIAGNOSTIC_OFF) {
+        CHECK(q->size==4 && !memcmp(q->arguments,"OFF1",4) && m.bench_claims==1 && !m.bench_commands);
+        ++m.bench_commands;r->report.opcode=0x70;r->report.size=4;memcpy(p,"OFF1",4);
+        return m.bench_fault==3?OKL_TIMEOUT:OKL_OK;
+    }
     if(q->command==OKL_GET_FIRMWARE) {
         ++m.queries;r->report.opcode=0x87;r->report.size=4;
         if(m.observing)memcpy(p,m.package+24,4);else {p[0]=m.original?0:1;p[1]=m.original?1:3;}
         if(m.wrong_version || (m.observing && m.observation_fault==1))++p[1];
     } else if(q->command==OKL_GET_CONTROLLER_STATUS) {
         ++m.queries;r->report.opcode=0xfc;
-        if(!m.original) {r->acknowledged=0;r->report.status=5;return OKL_REMOTE;}
+        if(!m.original) {
+            r->acknowledged=0;r->report.status=5;
+            if(m.owner_gate && !m.claims) {
+                r->report.status=8;
+                if(m.denied_fault==1)r->received=0;
+                if(m.denied_fault==2)r->acknowledged=1;
+                if(m.denied_fault==3)r->report.command_class=1;
+                if(m.denied_fault==4)r->report.opcode=0xfd;
+                if(m.denied_fault==5)r->report.size=1;
+                return OKL_OWNER_DENIED;
+            }
+            return OKL_REMOTE;
+        }
         r->report.size=24;memcpy(p,"OKLC",4);p[4]=1;p[6]=m.wrong_role?1:2;
         p[7]=m.changed_status && m.writes?2:0;
         word(p+8,m.wrong_caps?1:3);word(p+12,m.wrong_part?0xbc41:OKL_LOADER_PART_ID);word(p+16,5);
         if(m.observing) {
+            p[6]=m.job.image.role;word(p+8,p[6]==1?1:3);
             if(m.observation_fault==2)p[6]=1;
             if(m.observation_fault==3)word(p+8,1);
             if(m.observation_fault==4)p[4]=2;
@@ -99,8 +142,10 @@ static okl_result native_execute(okl_nxp *d,const okl_request *q,okl_reply *r,ui
     return OKL_OK;
 }
 static okl_result native_claim(okl_nxp *d,const uint8_t *name,size_t n,uint64_t deadline) {
-    call(d,deadline,600000);CHECK(m.persisted==OKL_LOADER_ENTERING && !m.loader && !m.commits);
-    CHECK(n==13 && !memcmp(name,"Open Keylight",13));++m.claims;
+    call(d,deadline,600000);CHECK(!m.loader);
+    CHECK(n==13 && !memcmp(name,"Open Keylight",13));
+    if(m.commits) {CHECK(m.persisted==OKL_LOADER_APPLICATION_SEEN && m.job.image.role==1);++m.bench_claims;}
+    else {CHECK(m.persisted==OKL_LOADER_ENTERING);++m.claims;}
     return m.claim_fault?OKL_TIMEOUT:OKL_OK;
 }
 static okl_result native_read(okl_nxp *d,okl_light_state *s,uint64_t deadline) {
@@ -119,6 +164,15 @@ void app_nxp_loader_release(okl_nxp *d,uint32_t id) {
     if(m.entries || m.commits || m.aborts)CHECK(m.now-m.reset_at>=OKL_LOADER_QUIET_US);
     m.leased=0;++m.ended;
     if(m.release_poison)d->needs_recovery=1;
+}
+okl_result app_nxp_loader_preserve_resident(okl_nxp *d,uint32_t id,uint64_t deadline) {
+    call(d,deadline,150000);CHECK(id==11 && m.bench_commands==1 && m.bench_pages==16);
+    CHECK(m.now-m.bench_last_page>=33000000);++m.preserves;
+    return m.bench_fault==7?OKL_IO:OKL_OK;
+}
+okl_result app_nxp_loader_use_resident(okl_nxp *d,uint32_t id,uint32_t proof,uint64_t deadline) {
+    call(d,deadline,120000000);CHECK(id==11 && proof==10);++m.resumes;
+    m.loader=true;return m.bench_fault==8?OKL_NEEDS_RECOVERY:OKL_OK;
 }
 okl_result app_nxp_loader_enter(okl_nxp *d,uint32_t id,okl_loader_source source,okl_loader_delivery *sent,uint64_t deadline) {
     call(d,deadline,2000000);CHECK(id==11 && source==m.job.source && !m.state.effect && !m.state.white_brightness);
@@ -140,6 +194,15 @@ static void flush(void) {
 }
 okl_result app_nxp_loader_exchange(okl_nxp *d,uint32_t id,const uint8_t raw[90],uint8_t response[90],okl_loader_delivery *sent,uint64_t deadline) {
     okl_report q;uint8_t args[80];call(d,deadline,2000000);
+    if(m.commits && m.job.image.role==1) {
+        CHECK(m.now-m.bench_last_page>=33000000 && m.bench_commands==1 && m.bench_pages==16);
+        CHECK(okl_report_decode(&q,raw,90)==OKL_OK && q.command_class==0x10 && q.opcode==0x80 && q.size==80);
+        CHECK(!memcmp(q.arguments,(uint8_t[80]){0},80));m.loader=true;
+        CHECK(okl_report_encode(response,0,0x10,0x80,(uint8_t[80]){3,24,1,2,0,0,0,2,93},80)==OKL_OK);
+        response[0]=2;*sent=OKL_LOADER_SENT_COMPLETE;
+        if(m.bench_fault==6)response[88]^=1;
+        return OKL_OK;
+    }
     CHECK(id==11 && m.loader && !m.commits && !m.aborts);
     CHECK(okl_report_decode(&q,raw,90)==OKL_OK && !q.status && !q.transaction && q.command_class==0x10);
     ++m.exchanges;*sent=OKL_LOADER_SENT_COMPLETE;
@@ -200,7 +263,7 @@ static void reset(bool original) {
 }
 static okl_loader_result run(okl_loader_audit *a) {
     okl_loader_result r=app_controller_worker_run(&m.driver,&m.job,a,&m.outcome);
-    CHECK(!m.leased && m.ended==!m.acquire_fault && m.entries<=1 && m.commits<=1 && m.aborts<=1);
+    CHECK(!m.leased && m.ended==(unsigned)(!m.acquire_fault)+(unsigned)(m.bench_claims!=0) && m.entries<=1 && m.commits<=1 && m.aborts<=1);
     CHECK(!(m.commits && m.aborts));return r;
 }
 int main(void) {
@@ -297,6 +360,38 @@ int main(void) {
         if(variant>=5)CHECK(m.outcome.entry==APP_CONTROLLER_MUTATION_ATTEMPTED && m.claims==1);
         CHECK(!m.entries && !m.exchanges);
     }
+    /* The actual legacy bridge denies unknown FC until we own it. The exact
+     * version/denial exception claims once, never weakens the part proof. */
+    reset(false);m.owner_gate=1;CHECK(run(&a)==OKL_LOADER_OK && m.claims==1 && m.entries==1);
+    for(unsigned bad=1;bad<=5;++bad) {
+        reset(false);m.owner_gate=1;m.denied_fault=bad;
+        CHECK(run(&a)!=OKL_LOADER_OK && !m.claims && !m.entries && !m.writes);
+    }
+    reset(false);m.owner_gate=1;m.unsupported_query=4;
+    CHECK(run(&a)!=OKL_LOADER_OK && m.claims==1 && !m.entries && !m.writes);
+    CHECK(m.outcome.entry==APP_CONTROLLER_MUTATION_ATTEMPTED); /* no read-only clear after claim */
+    for(unsigned fault=0;fault<=7;++fault) {
+        reset(false);m.owner_gate=1;m.bench_fault=fault;
+        m.package[22]=m.job.image.role=1;m.package[26]=m.job.image.version.component[2]=0;
+        off_fixture(m.bench_words);
+        CHECK(run(&a)==OKL_LOADER_OK && m.outcome.diagnostic_trial_observed && m.bench_commands<=1);
+        CHECK(m.commits==1 && m.claims==1 && !m.aborts && !a.observation.controller.trial_confirmed);
+        CHECK((m.outcome.resident_proof_job_id==11)==(fault==0));
+        CHECK(m.outcome.diagnostic_error[0]!=(fault==0));
+        if(!fault)CHECK(m.outcome.registers_verified && m.preserves==1 && m.bench_pages==16 && m.waits==3955);
+    }
+    for(unsigned page=1;page<=16;++page) {
+        reset(true);m.bench_fail_page=page;
+        m.package[22]=m.job.image.role=1;m.package[26]=m.job.image.version.component[2]=0;
+        off_fixture(m.bench_words);
+        CHECK(run(&a)==OKL_LOADER_OK && m.bench_pages==page && !m.preserves && !m.outcome.resident_proof_job_id);
+        CHECK(m.bench_commands<=1 && m.outcome.diagnostic_error[0]);
+    }
+    reset(true);m.job.source=OKL_LOADER_FROM_FRESH_RESIDENT;m.job.resident_proof_job_id=10;
+    m.state.effect=0;m.state.white_brightness=0;
+    CHECK(run(&a)==OKL_LOADER_OK && m.resumes==1 && !m.entries && !m.claims && !m.writes);
+    reset(true);m.job.source=OKL_LOADER_FROM_FRESH_RESIDENT;m.job.resident_proof_job_id=10;m.bench_fault=8;
+    CHECK(run(&a)!=OKL_LOADER_OK && m.resumes==1 && !m.exchanges && !m.writes);
     printf("%u real controller-worker/core integration assertions across %u cases passed\n",checks,cases);
     return 0;
 }

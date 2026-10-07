@@ -162,6 +162,57 @@ describe("controller update panel", () => {
     expect(screen.getByLabelText("Controller firmware package")).toBeDisabled();
     expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
   });
+  it("keeps a diagnostic trial distinct from a completed lighting installation", async () => {
+    const { request } = setup({
+      ...idle(),
+      job_id: 3,
+      state: "diagnostic_trial",
+      program_blocks_acked: 448,
+      readback_blocks_verified: 448,
+      quiet_completed: true,
+      commit_attempted: true,
+      commit_delivery: "complete",
+    });
+    expect(
+      await screen.findByText("Controller diagnostic trial"),
+    ).toBeVisible();
+    expect(screen.getByText(/Lighting remains unavailable/)).toBeVisible();
+    expect(
+      screen.queryByText("Installed and verified"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Controller firmware package")).toBeDisabled();
+    expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
+  });
+  it("reports diagnostic completion without enabling ordinary lighting installation", async () => {
+    setup({
+      ...idle(),
+      job_id: 3,
+      state: "diagnostic_trial",
+      resident_recovery_ready: true,
+    });
+    expect(
+      await screen.findByText("Controller diagnostic complete"),
+    ).toBeVisible();
+    expect(
+      screen.queryByText("Installed and verified"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Controller firmware package")).toBeDisabled();
+  });
+  it("rejects completion without complete programming, verification and commit evidence", async () => {
+    setup({
+      ...idle(),
+      job_id: 3,
+      state: "completed",
+      controller_confirmed: true,
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "incomplete controller update status",
+    );
+    expect(
+      screen.queryByText("Installed and verified"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Controller firmware package")).toBeDisabled();
+  });
   it("shows completion only after controller startup confirmation", async () => {
     setup({
       ...idle(),

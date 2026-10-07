@@ -72,6 +72,12 @@ okl_result app_nxp_loader_acquire(okl_nxp *driver,uint32_t id,uint64_t deadline)
     bounded_call(driver,deadline,120000000);CHECK(id==11 && !leases);++leases;return OKL_OK;
 }
 void app_nxp_loader_release(okl_nxp *driver,uint32_t id) { CHECK(driver==&test_driver && id==11 && leases==1);++ended;--leases; }
+okl_result app_nxp_loader_preserve_resident(okl_nxp *d,uint32_t id,uint64_t deadline) {
+    (void)d;(void)id;(void)deadline;CHECK(false);return OKL_IO;
+}
+okl_result app_nxp_loader_use_resident(okl_nxp *d,uint32_t id,uint32_t proof,uint64_t deadline) {
+    (void)d;(void)id;(void)proof;(void)deadline;CHECK(false);return OKL_IO;
+}
 okl_result app_nxp_loader_enter(okl_nxp *driver,uint32_t id,okl_loader_source source,okl_loader_delivery *delivery,uint64_t deadline) {
     bounded_call(driver,deadline,2000000);CHECK(id==11 && source==test_job.source && !native.effect && !native.white_brightness);
     ++entries;entry_us=current_us;*delivery=entry_delivery;return entry_result;

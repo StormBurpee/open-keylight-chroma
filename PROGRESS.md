@@ -1,5 +1,11 @@
 # Development record
 
+## Complete controller replacement in progress
+
+The remaining target is the original NXP LED application running alongside the original ESP application, followed by usable installation and integration checks. The compatibility ESP deployment is a milestone, not completion of the project.
+
+The next hardware sequence is an explicitly selected all-off controller diagnostic, bounded low-output channel checks, then the original lighting application. Diagnostic images cannot receive production confirmation. A current-boot recovery proof can be passed to one subsequent explicit package only after the diagnostic's fixed recovery deadline and a fresh resident-loader response; any intervening SPI attempt, uncertain bus state or ESP restart invalidates it. The transport guard passes 9,574 assertions across 59 cases on Windows and Linux. These are software checks; the new diagnostic and PWM handoff have not yet run on hardware.
+
 ## Colour rendering, stored scenes and upload indication
 
 The 0.1.1-dev candidate makes sRGB the default and places its persistent linear override in System. Colour transitions now seed a custom frame before entering custom mode, keep a constant native master and park the exact final acknowledged colour. Zero-duration changes use that same direct frame path to bypass the legacy Static-to-Static fade. Retarget and slow-ACK regressions check that an intermediate frame cannot be mistaken for completion. After reboot, a native colour can only be reconstructed approximately; its original chosen hex and brightness decomposition are not claimed as confirmed. Eight-bit output still limits very dim fades.

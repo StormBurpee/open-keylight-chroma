@@ -1,10 +1,12 @@
 #include "controller_worker.h"
 #include "nxp_transport.h"
 #include "output_policy.h"
+#include "controller_diagnostic.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/sha256.h"
 #include <string.h>
+#include <stdio.h>
 
 typedef struct {
     okl_nxp *driver;
@@ -36,7 +38,12 @@ static bool qualified(const okl_controller_status *s) {
 }
 static int original_identity(update_context *c, okl_controller_status *status) {
     okl_reply reply; uint32_t part;
-    if (!qualified(status) || query(c, OKL_GET_PART_ID, &reply) != OKL_OK ||
+    bool identity = qualified(status);
+    if (c->job->image.role == OKL_ROLE_SPI_DIAGNOSTIC)
+        identity = status->abi_major == 1 && !status->abi_minor &&
+            status->role == OKL_ROLE_SPI_DIAGNOSTIC && status->capabilities == OKL_CAP_RECOVERY_READY &&
+            status->part_id == OKL_LOADER_PART_ID && !status->boot_requested && !status->trial_confirmed;
+    if (!identity || query(c, OKL_GET_PART_ID, &reply) != OKL_OK ||
         okl_reply_decode_part_id(&part, &reply) != OKL_OK || part != status->part_id) return -1;
     return 0;
 }
@@ -75,6 +82,11 @@ static bool unsupported_reply(okl_result result, const okl_reply *reply, uint8_t
         reply->report.status == 5 && !reply->report.command_class &&
         reply->report.opcode == opcode && !reply->report.size;
 }
+static bool legacy_owner_denied(okl_result result, const okl_reply *reply) {
+    return result == OKL_OWNER_DENIED && reply->received && !reply->acknowledged &&
+        reply->report.status == 8 && !reply->report.command_class &&
+        reply->report.opcode == 0xfc && !reply->report.size;
+}
 static int reject_unsupported(update_context *c) {
     if (c->outcome.entry == APP_CONTROLLER_ENTRY_UNPROVEN && !c->driver->needs_recovery)
         c->outcome.entry = APP_CONTROLLER_READ_ONLY_UNSUPPORTED;
@@ -84,6 +96,14 @@ static int enter(void *user, okl_loader_source source, uint64_t deadline) {
     update_context *c = user; c->deadline = deadline;
     okl_reply reply; okl_firmware_version version; okl_controller_status status;
     const uint8_t legacy[4] = {1, 3, 0, 0};
+    bool claimed = false;
+    if (source == OKL_LOADER_FROM_FRESH_RESIDENT) {
+        /* This capability is created only by this boot's completed OFF1 job;
+         * the transport consumes it once. Neither HTTP nor NVS can forge it. */
+        return c->job->resident_proof_job_id &&
+            app_nxp_loader_use_resident(c->driver, c->job->id, c->job->resident_proof_job_id,
+                deadline) == OKL_OK ? 0 : -1;
+    }
     if (source != OKL_LOADER_FROM_ORIGINAL && source != OKL_LOADER_FROM_LEGACY_1_3) return -1;
     okl_result result = query(c, OKL_GET_FIRMWARE, &reply);
     if (unsupported_reply(result, &reply, 0x87)) return reject_unsupported(c);
@@ -91,6 +111,17 @@ static int enter(void *user, okl_loader_source source, uint64_t deadline) {
     if (source == OKL_LOADER_FROM_LEGACY_1_3 && memcmp(version.component, legacy, 4))
         return reject_unsupported(c);
     result = query(c, OKL_GET_CONTROLLER_STATUS, &reply);
+    if (source == OKL_LOADER_FROM_LEGACY_1_3 && legacy_owner_denied(result, &reply)) {
+        /* Exact legacy version is known before this ownership exception.
+         * Unknown FC is owner-gated by that application. Claim once, then
+         * require the same unsupported-FC and exact-part proof as usual.
+         * Claim is a mutation even if its reply is lost: this path can never
+         * use the read-only journal-rejection shortcut afterward. */
+        c->outcome.entry = APP_CONTROLLER_MUTATION_ATTEMPTED;
+        if (okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000)) != OKL_OK) return -1;
+        claimed = true;
+        result = query(c, OKL_GET_CONTROLLER_STATUS, &reply);
+    }
     if (source == OKL_LOADER_FROM_ORIGINAL) {
         if (unsupported_reply(result, &reply, 0xfc)) return reject_unsupported(c);
         if (result != OKL_OK || okl_reply_decode_controller_status(&status, &reply) != OKL_OK) return -1;
@@ -111,7 +142,7 @@ static int enter(void *user, okl_loader_source source, uint64_t deadline) {
     if (part != OKL_LOADER_PART_ID || (source == OKL_LOADER_FROM_ORIGINAL && part != status.part_id))
         return reject_unsupported(c);
     c->outcome.entry = APP_CONTROLLER_MUTATION_ATTEMPTED;
-    if (okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000)) != OKL_OK) return -1;
+    if (!claimed && okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000)) != OKL_OK) return -1;
     /* The durable ENTERING journal exists before either Off write. Verify
      * native Off settings, never replay the previous scene. These getters do
      * not measure pin/optical darkness or legacy fade completion. */
@@ -159,6 +190,70 @@ static int observe(void *user, okl_loader_observation *observation, uint64_t dea
     value.dark_state_verified = state.effect == 0 && state.white_brightness == 0;
     *observation = value; return 0;
 }
+
+static int diagnostic_request(update_context *c, okl_command command,
+                              const uint8_t *args, size_t size, okl_reply *reply) {
+    okl_request request;
+    return okl_request_build(&request, command, args, size) == OKL_OK &&
+        okl_nxp_execute(c->driver, &request, reply, bounded(c, 150000)) == OKL_OK ? 0 : -1;
+}
+static int diagnostic_page(update_context *c, uint8_t page, uint32_t *words) {
+    okl_reply reply; uint8_t bytes[64];
+    if (diagnostic_request(c, OKL_GET_DIAGNOSTIC_PAGE, &page, 1, &reply) ||
+        okl_reply_decode_diagnostic_page(bytes, page, &reply) != OKL_OK) return -1;
+    const uint8_t *p = bytes;
+    for (unsigned i = 0; i < 16; ++i)
+        words[i] = (uint32_t)p[i * 4] << 24 | (uint32_t)p[i * 4 + 1] << 16 |
+            (uint32_t)p[i * 4 + 2] << 8 | p[i * 4 + 3];
+    return 0;
+}
+static void diagnostic(update_context *c, const okl_loader_audit *audit) {
+    app_controller_worker_outcome *out = &c->outcome;
+    out->diagnostic_trial_observed = true;
+    const uint8_t expected_version[4] = {0, 1, 0, 0};
+    const char *error = "Diagnostic profile was not verified; no bench command sent";
+    uint32_t initial[16], final_header[16]; okl_reply reply; okl_diagnostic_profile profile;
+    if (memcmp(c->job->image.version.component, expected_version, 4) ||
+        audit->observation.controller.uptime_ms >= 26000 ||
+        begin(c, clock_us(c) + UINT64_C(45000000))) goto failed;
+    if (okl_nxp_claim(c->driver, (const uint8_t *)"Open Keylight", 13, bounded(c, 600000)) != OKL_OK ||
+        diagnostic_request(c, OKL_GET_DIAGNOSTIC_PROFILE, NULL, 0, &reply) ||
+        okl_reply_decode_diagnostic_profile(&profile, &reply) != OKL_OK || profile.requested ||
+        diagnostic_page(c, 0, initial) || !app_diagnostic_initial(initial)) goto failed;
+    out->profile_verified = true;
+    out->command_attempted = true;
+    error = "OFF1 acknowledgement was not verified; command was not retried";
+    if (diagnostic_request(c, OKL_RUN_DIAGNOSTIC_OFF, (const uint8_t *)"OFF1", 4, &reply) ||
+        okl_reply_check_diagnostic_off(&reply) != OKL_OK) goto failed;
+    out->command_acknowledged = true;
+    uint64_t settle = clock_us(c) + UINT64_C(550000);
+    while (clock_us(c) < settle) wait_until(c, settle);
+    error = "OFF1 register snapshots were not verified";
+    for (uint8_t page = 0; page < APP_DIAGNOSTIC_PAGES; ++page)
+        if (diagnostic_page(c, page, out->diagnostic_words + page * 16)) goto failed;
+    if (diagnostic_page(c, 0, final_header) || memcmp(final_header, out->diagnostic_words, sizeof(final_header)) ||
+        !app_diagnostic_registers(out->diagnostic_words, initial[15])) goto failed;
+    out->registers_verified = true;
+    /* A known-complete End reset and the exact compiled OFF1 recovery profile
+     * preceded this wait. Do not send anything until its immutable 30s expiry
+     * plus the proven 3s guard has passed, even if our uptime estimate was low.
+     * No loader writes/reads have occurred since that reset. Info80 below is
+     * therefore not a claim that arbitrary resident RAM is fresh. */
+    uint64_t quiet_end = clock_us(c) + UINT64_C(33000000);
+    while (clock_us(c) < quiet_end) wait_until(c, quiet_end);
+    uint8_t request[90], response[90], args[80] = {0};
+    okl_loader_delivery delivery;
+    error = "Diagnostic returned no qualified resident loader; explicit recovery required";
+    if (okl_report_encode(request, 0, 0x10, 0x80, args, 80) != OKL_OK ||
+        app_nxp_loader_exchange(c->driver, c->job->id, request, response, &delivery, bounded(c, 2000000)) != OKL_OK ||
+        delivery != OKL_LOADER_SENT_COMPLETE || !okl_loader_information_valid(response) ||
+        app_nxp_loader_preserve_resident(c->driver, c->job->id, bounded(c, 150000)) != OKL_OK) goto failed;
+    out->resident_proof_job_id = c->job->id;
+    error = NULL;
+failed:
+    if (error) snprintf(out->diagnostic_error, sizeof(out->diagnostic_error), "%s", error);
+    if (c->leased) end(c);
+}
 okl_loader_result app_controller_worker_run(okl_nxp *driver, const app_controller_job *job,
                                           okl_loader_audit *audit, app_controller_worker_outcome *outcome) {
     if (outcome) memset(outcome, 0, sizeof(*outcome));
@@ -170,6 +265,8 @@ okl_loader_result app_controller_worker_run(okl_nxp *driver, const app_controlle
         .cancelled = cancelled, .reset_boundary = reset_boundary, .observe_readonly = observe, .progress = progress};
     okl_loader_result result = okl_loader_run(&job->image, job->source, &ops,
         clock_us(&context) + UINT64_C(120000000), audit);
+    if (result == OKL_LOADER_OK && job->image.role == OKL_ROLE_SPI_DIAGNOSTIC)
+        diagnostic(&context, audit);
     *outcome = context.outcome;
     if (outcome->entry == APP_CONTROLLER_READ_ONLY_UNSUPPORTED && outcome->synchronized &&
         !audit->persistence_failed && result == OKL_LOADER_IO) audit->result = result = OKL_LOADER_INVALID;

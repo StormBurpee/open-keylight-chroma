@@ -13,6 +13,7 @@ export type ControllerJob = {
     | "queued"
     | "running"
     | "completed"
+    | "diagnostic_trial"
     | "failed"
     | "recovery_required";
   phase: string;
@@ -25,6 +26,7 @@ export type ControllerJob = {
   commit_delivery: "not_sent" | "complete" | "maybe_sent";
   quiet_completed: boolean;
   controller_confirmed: boolean;
+  resident_recovery_ready?: boolean;
   error: string | null;
 };
 
@@ -37,6 +39,7 @@ function validJob(job: ControllerJob): boolean {
       "queued",
       "running",
       "completed",
+      "diagnostic_trial",
       "failed",
       "recovery_required",
     ].includes(job.state) &&
@@ -49,7 +52,17 @@ function validJob(job: ControllerJob): boolean {
     typeof job.controller_confirmed === "boolean" &&
     typeof job.commit_attempted === "boolean" &&
     typeof job.quiet_completed === "boolean" &&
-    ["not_sent", "complete", "maybe_sent"].includes(job.commit_delivery)
+    (job.resident_recovery_ready === undefined ||
+      typeof job.resident_recovery_ready === "boolean") &&
+    ["not_sent", "complete", "maybe_sent"].includes(job.commit_delivery) &&
+    (job.state !== "completed" ||
+      (job.controller_confirmed &&
+        job.program_blocks_acked === 448 &&
+        job.readback_blocks_verified === 448 &&
+        job.commit_attempted &&
+        job.commit_delivery === "complete" &&
+        job.quiet_completed)) &&
+    (job.state !== "diagnostic_trial" || !job.controller_confirmed)
   );
 }
 
@@ -122,7 +135,7 @@ export function ControllerUpdate({
     !!readError ||
     !!device.trial_pending ||
     device.controller.ready !== true ||
-    job.state === "recovery_required";
+    ["recovery_required", "diagnostic_trial"].includes(job.state);
 
   useEffect(() => {
     if (!enabled) return;
@@ -253,9 +266,13 @@ export function ControllerUpdate({
                     ? "Installed and verified"
                     : job.state === "recovery_required"
                       ? "Recovery required"
-                      : active
-                        ? "Installing controller firmware"
-                        : "Ready for a controller package"}
+                      : job.state === "diagnostic_trial"
+                        ? job.resident_recovery_ready
+                          ? "Controller diagnostic complete"
+                          : "Controller diagnostic trial"
+                        : active
+                          ? "Installing controller firmware"
+                          : "Ready for a controller package"}
                 </strong>
                 <span>
                   {active
@@ -285,6 +302,13 @@ export function ControllerUpdate({
                 <p>
                   <Check size={14} /> Controller startup confirmed. Choose a
                   scene when you’re ready.
+                </p>
+              )}
+              {job.state === "diagnostic_trial" && (
+                <p>
+                  Lighting remains unavailable while the controller is being
+                  tested. A diagnostic does not install a confirmed light
+                  engine.
                 </p>
               )}
               {job.error && <p className="inline-error">{job.error}</p>}

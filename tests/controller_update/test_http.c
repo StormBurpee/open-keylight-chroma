@@ -8,7 +8,8 @@ static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); abort(); } } while (0)
 
 static struct {
-    const char *type, *digest;
+    const char *type, *digest, *mode;
+    uint8_t role;
     bool pending, allocation_fail, get_timeout_fail, sha_start_fail, sha_finish_fail, wrong_digest;
     int begin_status, submit_status, response_result, socket;
     unsigned begins, cancels, submits, reads, sets, restores, allocations, frees, sha_frees;
@@ -34,6 +35,7 @@ static void test_free(void *value) { if (value) ++mock.frees; free(value); }
 uint64_t app_now_ms(void) { return mock.now; }
 bool app_trial_pending(void) { return mock.pending; }
 int app_controller_update_begin(uint32_t *id) { ++mock.begins; *id = 73; return mock.begin_status; }
+int app_controller_update_begin_role(uint32_t *id, uint8_t role) { mock.role = role; return app_controller_update_begin(id); }
 int app_controller_update_submit(uint32_t id, uint8_t *package, size_t size) {
     ++mock.submits;
     CHECK(id == 73 && size == OKL_LOADER_PACKAGE_BYTES && mock.restores == 1);
@@ -58,10 +60,15 @@ int setsockopt(int socket, int level, int option, const void *value, socklen_t s
 }
 esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *request, const char *name, char *out, size_t size) {
     (void)request;
-    const char *source = !strcmp(name, "Content-Type") ? mock.type : mock.digest;
+    const char *source = !strcmp(name, "Content-Type") ? mock.type :
+        !strcmp(name, "X-Controller-Mode") ? mock.mode : mock.digest;
     if (!source || strlen(source) >= size) return ESP_FAIL;
     memcpy(out, source, strlen(source) + 1);
     return ESP_OK;
+}
+size_t httpd_req_get_hdr_value_len(httpd_req_t *request, const char *name) {
+    (void)request; CHECK(!strcmp(name, "X-Controller-Mode"));
+    return mock.mode ? strlen(mock.mode) : 0;
 }
 int httpd_req_recv(httpd_req_t *request, char *buffer, size_t size) {
     (void)request;
@@ -114,7 +121,15 @@ int main(void) {
     CHECK(http_controller_update(&request) == ESP_OK && mock.status == 202);
     CHECK(mock.response.accepted && mock.response.job_id == 73 && mock.owned);
     CHECK(mock.begins == 1 && mock.submits == 1 && !mock.cancels && !mock.frees && mock.sha_frees == 1);
+    CHECK(mock.role == OKL_ROLE_LIGHTING);
     unsigned chunks = mock.reads, sets = mock.sets;
+    reset(); mock.mode = "diagnostic-off";
+    CHECK(http_controller_update(&request) == ESP_OK && mock.status == 202 && mock.role == OKL_ROLE_SPI_DIAGNOSTIC);
+    const char *bad_modes[] = {"diagnostic", "production", "DIAGNOSTIC-OFF", "diagnostic-off ",
+        "diagnostic-off,diagnostic-off", "diagnostic-off01234567890123456789"};
+    for (unsigned i = 0; i < sizeof(bad_modes) / sizeof(*bad_modes); ++i) {
+        reset(); mock.mode = bad_modes[i]; reject(400); CHECK(!mock.begins && !mock.reads);
+    }
     reset(); mock.response_result = ESP_FAIL;
     CHECK(http_controller_update(&request) == ESP_FAIL && mock.owned && !mock.cancels && !mock.frees);
 

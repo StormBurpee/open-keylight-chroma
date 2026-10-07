@@ -369,14 +369,16 @@ static void worker_task(void *unused) {
             app_controller_worker_outcome outcome;
             okl_loader_result updated = app_controller_worker_run(&nxp, &job, &audit, &outcome);
             bool confirmed = false;
-            if (updated == OKL_LOADER_OK) {
+            bool diagnostic = job.image.role == OKL_ROLE_SPI_DIAGNOSTIC;
+            if (updated == OKL_LOADER_OK && job.image.role == OKL_ROLE_LIGHTING) {
                 lifecycle.confirmation_uncertain = false;
                 result = bootstrap(&current, &seen_revision, false, &job.image.version);
                 confirmed = result == OKL_OK && lifecycle.backend == CONTROLLER_ORIGINAL && lifecycle.status.trial_confirmed;
             }
-            bool rejected = updated == OKL_LOADER_INVALID &&
+            bool rejected = !diagnostic && updated == OKL_LOADER_INVALID &&
                 app_controller_update_reject(job.id, &audit, updated, &outcome);
-            bool durable = !rejected && app_controller_update_finish(job.id, &audit, updated, confirmed,
+            if (diagnostic) app_controller_update_diagnostic_finish(job.id, &audit, updated, &outcome);
+            bool durable = !diagnostic && !rejected && app_controller_update_finish(job.id, &audit, updated, confirmed,
                 "Controller update unresolved; explicit recovery required");
             /* A successful update executes Off itself. Read-only rejection
              * must preserve a newly accepted Off from the receive window,

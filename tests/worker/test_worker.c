@@ -52,6 +52,8 @@ static uint64_t boot_at, reset_at;
 static bool reset_done;
 static bool journal_blocked, job_queued, finish_durable, finished_confirmed, off_on_read;
 static unsigned transport_inits, job_runs, job_finishes, job_rejections;
+static unsigned diagnostic_finishes;
+static uint8_t job_role;
 static okl_loader_result job_result;
 static bool job_read_only_rejection;
 static kl_update_indicator upload;
@@ -68,14 +70,15 @@ bool app_controller_update_take(app_controller_job *out) {
     if (!job_queued || journal_blocked) return false;
     CHECK(!locks); job_queued = false; app.updating = true; app.controller_ready = false;
     memset(out, 0, sizeof(*out)); out->id = 7; out->image.version.component[1] = 1;
+    out->image.role = job_role;
     return true;
 }
 okl_loader_result app_controller_worker_run(okl_nxp *driver, const app_controller_job *job,
                                           okl_loader_audit *audit, app_controller_worker_outcome *outcome) {
     CHECK(driver == &nxp && job->id == 7 && !app.controller_ready && app.updating && !locks); ++job_runs;
     memset(audit, 0, sizeof(*audit));
-    *outcome=(app_controller_worker_outcome){job_read_only_rejection?
-        APP_CONTROLLER_READ_ONLY_UNSUPPORTED:APP_CONTROLLER_MUTATION_ATTEMPTED,true};
+    *outcome=(app_controller_worker_outcome){.entry=job_read_only_rejection?
+        APP_CONTROLLER_READ_ONLY_UNSUPPORTED:APP_CONTROLLER_MUTATION_ATTEMPTED,.synchronized=true};
     if (job_result == OKL_LOADER_OK) {
         original = true; boot_at = now; remote_status.trial_confirmed = 0;
         controller = (okl_light_state){.temperature_kelvin = 5000};
@@ -95,6 +98,12 @@ bool app_controller_update_finish(uint32_t id, const okl_loader_audit *audit, ok
     bool success = finish_durable && confirmed && result == OKL_LOADER_OK;
     journal_blocked = !success;
     return success;
+}
+void app_controller_update_diagnostic_finish(uint32_t id, const okl_loader_audit *audit,
+                                             okl_loader_result result, const app_controller_worker_outcome *outcome) {
+    CHECK(id == 7 && audit && result == job_result && outcome && !locks);
+    ++diagnostic_finishes; journal_blocked = true; app.updating = false;
+    app.controller_ready = false; app.reported_valid = false; app.reported_fields = 0;
 }
 
 uint64_t app_now_ms(void) { return now; }
@@ -282,6 +291,7 @@ static void reset(void) {
         .part_id = CONTROLLER_PART_ID, .reset_cause = 0x13};
     journal_blocked = job_queued = finished_confirmed = off_on_read = false; finish_durable = true;
     transport_inits = job_runs = job_finishes = job_rejections = 0; job_result = OKL_LOADER_OK;
+    diagnostic_finishes = 0; job_role = OKL_ROLE_LIGHTING;
     job_read_only_rejection=false;
     memset(&upload,0,sizeof(upload));upload_at=upload_terminal_at=off_at=0;upload_success=false;
     queued_duration=600;frame_latency=encoding_at=stolen_at=corrupt_read=owner_reads=0;owner_result=OKL_OK;
@@ -546,6 +556,15 @@ static void test_update_worker_gates(void) {
     CHECK(versions == 3 && status_reads == 3 && !writes); /* Health continues during HTTP reservation. */
     reset(); app.updating = true; off_on_read = true; run();
     CHECK(writes == 2 && !controller.effect && !controller.white_brightness && app.completed_revision == 1);
+    for (unsigned failure = 0; failure < 2; ++failure) {
+        reset(); job_queued = true; job_role = OKL_ROLE_SPI_DIAGNOSTIC;
+        stop_after = 4; delay_step = 1000; app.desired.power = true; app.output_revision = 9;
+        if (failure) job_result = OKL_LOADER_UNRESOLVED;
+        run();
+        CHECK(job_runs == 1 && diagnostic_finishes == 1 && !job_finishes && !job_rejections);
+        CHECK(!confirmations && !writes && journal_blocked && !app.controller_ready);
+        CHECK(!app.reported_valid && app.output_revision == 9 && versions == 1);
+    }
     for (unsigned failure = 0; failure < 3; ++failure) {
         reset(); job_queued = true; app.desired.power = true; app.desired.effect = KL_EFFECT_AURORA;
         app.output_revision = 9; stop_after = 3; delay_step = 1000;

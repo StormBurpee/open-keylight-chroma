@@ -951,7 +951,7 @@
       "get": {
         "operationId": "getControllerUpdate",
         "summary": "Read the cached controller update job",
-        "description": "Public LAN metadata. This endpoint does not probe SPI. Counters describe staging transfer and verification, not overall installation progress. completed requires a matching fresh application, typed controller confirmation and durable journal clearing. Recovery-required state never triggers an automatic retry or restore. There is no recovery/reset endpoint in this version.",
+        "description": "Public LAN metadata, read from the cached job without SPI. Counters describe staging, not overall installation. completed requires fresh application identity, production confirmation and durable journal clearing. diagnostic_trial never confirms or enables lighting. A successful fixed diagnostic can prove a fresh resident loader in this ESP boot, admitting a subsequent explicit package; no automatic retry or restore occurs. Interrupted jobs remain gated after reboot.",
         "security": [],
         "responses": {
           "200": {
@@ -972,7 +972,7 @@
       "post": {
         "operationId": "uploadControllerApplication",
         "summary": "Admit an original LED-controller package",
-        "description": "Authenticated upload of a fixed 28,736-byte Open Keylight NXP package. Requires a confirmed ESP trial and an available supported controller. The whole package is received in RAM within 30 seconds and checked before queuing controller work. X-SHA256 covers the whole package; the internal header separately hashes its 28,672-byte bank. Metadata and hashes do not authenticate a publisher or establish hardware qualification. The worker turns the light off, verifies darkness, enters the loader once, verifies all 448 blocks, commits once, holds SPI quiet, then checks the new application. 202 only transfers ownership to a background job; poll GET for its outcome. Do not retry an ambiguous response automatically. Legacy migration requires exact 1.3.0.0 plus an observed supported part getter; ordinary stock firmware without that getter is not admitted.",
+        "description": "Authenticated upload of a fixed 28,736-byte Open Keylight NXP package. Requires a confirmed ESP trial and an available supported controller. The whole package is received in RAM within 30 seconds and checked before queuing controller work. X-SHA256 covers the whole package; the internal header separately hashes its 28,672-byte bank. Metadata and hashes do not authenticate a publisher or establish hardware qualification. The worker turns the light off, verifies native Off settings, enters the loader once, verifies all 448 blocks, commits once, holds SPI quiet, then checks the new application. 202 only transfers ownership to a background job; poll GET for its outcome. Do not retry an ambiguous response automatically. Legacy migration requires exact 1.3.0.0 plus an observed supported part getter; ordinary stock firmware without that getter is not admitted. Production lighting role2 is the default. X-Controller-Mode: diagnostic-off explicitly selects a trusted role1 OFF1 bench image; the package role must match the selected mode. The worker checks its fixed profile, requests the bounded off-only experiment once, captures register snapshots and waits silently through its immutable recovery deadline. It never sends trial confirmation to a diagnostic. Successful diagnostic recovery retains the journal and permits a subsequent explicitly uploaded package from the proven fresh resident loader, in the same ESP boot. Diagnostic profile declarations and hashes do not authenticate an arbitrary owner-supplied binary.",
         "parameters": [
           {
             "name": "X-SHA256",
@@ -983,6 +983,18 @@
               "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
             },
             "description": "Lowercase SHA-256 of the complete controller package, including its 64-byte header."
+          },
+          {
+            "name": "X-Controller-Mode",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "diagnostic-off"
+              ]
+            },
+            "description": "Omit for a production lighting package. diagnostic-off explicitly selects the bounded OFF1 bench procedure for a diagnostic-role package. Other values are rejected."
           }
         ],
         "requestBody": {
@@ -2036,7 +2048,8 @@
               "running",
               "completed",
               "recovery_required",
-              "failed"
+              "failed",
+              "diagnostic_trial"
             ]
           },
           "phase": {
@@ -2121,6 +2134,74 @@
               "string",
               "null"
             ]
+          },
+          "target_role": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "enum": [
+              null,
+              1,
+              2
+            ]
+          },
+          "diagnostic_trial_observed": {
+            "type": "boolean"
+          },
+          "resident_recovery_ready": {
+            "type": "boolean"
+          },
+          "diagnostic": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "profile": {
+                "const": "OFF1"
+              },
+              "command_attempted": {
+                "type": "boolean"
+              },
+              "command_acknowledged": {
+                "type": "boolean"
+              },
+              "registers_verified": {
+                "type": "boolean"
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "snapshot_words": {
+                "type": "array",
+                "minItems": 224,
+                "maxItems": 224,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                }
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "profile",
+              "command_attempted",
+              "command_acknowledged",
+              "registers_verified",
+              "generation",
+              "snapshot_words",
+              "error"
+            ]
           }
         },
         "required": [
@@ -2137,7 +2218,11 @@
           "quiet_completed",
           "controller_confirmed",
           "recovery_required",
-          "error"
+          "error",
+          "target_role",
+          "diagnostic_trial_observed",
+          "resident_recovery_ready",
+          "diagnostic"
         ]
       },
       "ControllerUpdateAccepted": {
