@@ -9,6 +9,14 @@ esp_err_t app_nxp_transport_init(okl_nxp *driver, const uint8_t mac[6]);
  * mutex. The lease does not clear any pre-existing ambiguous wire state. */
 okl_result app_nxp_loader_acquire(okl_nxp *driver, uint32_t lease_id, uint64_t deadline_us);
 void app_nxp_loader_release(okl_nxp *driver, uint32_t lease_id);
+/* Caller must first prove a fresh diagnostic recovery reset, uninterrupted
+ * silence through its deadline, and exact resident Info under this lease.
+ * This stores only that caller's volatile evidence, not a generic reset proof.
+ * Any attempted SPI transfer invalidates it. It cannot clear an unknown phase
+ * and never survives ESP startup. A new explicitly admitted job consumes it. */
+okl_result app_nxp_loader_preserve_resident(okl_nxp *driver, uint32_t lease_id, uint64_t deadline_us);
+okl_result app_nxp_loader_use_resident(okl_nxp *driver, uint32_t lease_id,
+    uint32_t proof_job_id, uint64_t deadline_us);
 /* Caller first freshly qualifies the exact source and ownership. Legacy1.3
  * resets without a reply; original resets only after its ACK body is consumed.
  * Both arm the typed 0x84 entry boundary, then require the same quiet guard. */

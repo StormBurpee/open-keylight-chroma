@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include <stdbool.h>
 #include <string.h>
 
 enum { PIN_READY = 4, PIN_MOSI = 12, PIN_MISO = 13, PIN_CLOCK = 14, PIN_SELECT = 15 };
@@ -16,6 +17,8 @@ typedef struct {
     size_t pending_length;
     uint32_t loader_lease;
     unsigned loader_known;
+    uint32_t resident_proof_job_id;
+    bool resident_information_seen;
     uint8_t reset_opcode;
     uint64_t reset_completed_us;
     okl_loader_delivery last_delivery;
@@ -49,6 +52,8 @@ static okl_result wait_ready(void *unused, uint64_t deadline) { (void)unused; re
 
 static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t size, uint64_t deadline) {
     nxp_bus *b = context;
+    b->resident_proof_job_id = 0;
+    b->resident_information_seen = false;
     b->last_delivery = OKL_LOADER_NOT_SENT;
     if (b->phase == ZERO_COMPLETE || b->phase == BUS_UNKNOWN || b->phase == RESET_PENDING) return OKL_NEEDS_RECOVERY;
     if (!size || size > OKL_SPI_LIMIT || !ticks_left(deadline)) return OKL_TIMEOUT;
@@ -126,7 +131,40 @@ void app_nxp_loader_release(okl_nxp *driver, uint32_t lease_id) {
      * Preserve an unresolved reset/DMA phase for later explicit recovery. */
     if (!loader_driver(driver) || !lease_id || bus.loader_lease != lease_id) return;
     bus.loader_lease = 0; bus.loader_known = 0; bus.reset_opcode = 0;
-    if (bus.phase != BUS_IDLE) driver->needs_recovery = 1;
+    if (bus.phase != BUS_IDLE || driver->needs_recovery) {
+        bus.resident_proof_job_id = 0;
+        bus.resident_information_seen = false;
+        driver->needs_recovery = 1;
+    }
+}
+
+okl_result app_nxp_loader_preserve_resident(okl_nxp *driver, uint32_t lease_id, uint64_t deadline) {
+    if (!loader_driver(driver) || !lease_id || bus.loader_lease != lease_id) return OKL_INVALID;
+    okl_result result = lock_bus(&bus, deadline);
+    if (result != OKL_OK) return result;
+    if (bus.phase != BUS_IDLE || driver->needs_recovery || !bus.loader_known ||
+        !bus.resident_information_seen || gpio_get_level(PIN_READY) != 1) result = OKL_NEEDS_RECOVERY;
+    else {
+        bus.resident_proof_job_id = lease_id;
+        bus.resident_information_seen = false;
+    }
+    unlock_bus(&bus); return result;
+}
+
+okl_result app_nxp_loader_use_resident(okl_nxp *driver, uint32_t lease_id,
+                                      uint32_t proof_job_id, uint64_t deadline) {
+    if (!loader_driver(driver) || !lease_id || !proof_job_id || lease_id == proof_job_id ||
+        bus.loader_lease != lease_id) return OKL_INVALID;
+    okl_result result = lock_bus(&bus, deadline);
+    if (result != OKL_OK) return result;
+    if (bus.resident_proof_job_id != proof_job_id) result = OKL_NEEDS_RECOVERY;
+    else {
+        bus.resident_proof_job_id = 0;
+        if (bus.phase != BUS_IDLE || driver->needs_recovery || gpio_get_level(PIN_READY) != 1)
+            result = OKL_NEEDS_RECOVERY;
+        else bus.loader_known = 1;
+    }
+    unlock_bus(&bus); return result;
 }
 
 okl_result app_nxp_loader_enter(okl_nxp *driver, uint32_t lease_id,
@@ -206,7 +244,10 @@ okl_result app_nxp_loader_exchange(okl_nxp *driver, uint32_t lease_id, const uin
     if (report.opcode == 0x80 && report.size == 80) {
         unsigned zero = 1;
         for (unsigned i = 0; i < 80; ++i) if (report.arguments[i]) zero = 0;
-        if (zero && okl_loader_information_valid(response)) bus.loader_known = 1;
+        if (zero && okl_loader_information_valid(response)) {
+            bus.loader_known = 1;
+            bus.resident_information_seen = true;
+        }
     }
 finished:
     if (result != OKL_OK) driver->needs_recovery = 1;
@@ -251,6 +292,8 @@ okl_result app_nxp_loader_reset_boundary(okl_nxp *driver, uint32_t lease_id, uin
 }
 
 esp_err_t app_nxp_transport_init(okl_nxp *driver, const uint8_t mac[6]) {
+    bus.resident_proof_job_id = 0;
+    bus.resident_information_seen = false;
     bus.mutex = xSemaphoreCreateMutex();
     if (!bus.mutex) return ESP_ERR_NO_MEM;
     gpio_config_t ready = {.pin_bit_mask = 1ULL << PIN_READY, .mode = GPIO_MODE_INPUT,

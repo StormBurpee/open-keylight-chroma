@@ -393,6 +393,64 @@ static void test_typed_entry_boundary(void) {
     CHECK(app_nxp_loader_reset_boundary(&driver, 17, 0x84, delivery, time_us + 10000) != OKL_OK && driver.needs_recovery);
     consumed();
 }
+static void test_resident_proof_is_scoped_and_consumed(void) {
+    reset(); known_loader();
+    CHECK(app_nxp_loader_preserve_resident(&driver, 18, time_us + 10000) == OKL_INVALID);
+    CHECK(app_nxp_loader_preserve_resident(&driver, 17, time_us + 10000) == OKL_OK);
+    CHECK(bus.resident_proof_job_id == 17);
+    CHECK(app_nxp_loader_preserve_resident(&driver, 17, time_us + 10000) != OKL_OK);
+    app_nxp_loader_release(&driver, 17);
+    CHECK(bus.resident_proof_job_id == 17);
+    CHECK(app_nxp_loader_acquire(&driver, 18, time_us + 10000) == OKL_OK);
+    CHECK(app_nxp_loader_use_resident(&driver, 18, 19, time_us + 10000) != OKL_OK);
+    CHECK(app_nxp_loader_use_resident(&driver, 18, 17, time_us + 10000) == OKL_OK);
+    CHECK(bus.loader_known && !bus.resident_proof_job_id);
+    CHECK(app_nxp_loader_use_resident(&driver, 18, 17, time_us + 10000) != OKL_OK);
+    CHECK(starts == 3); consumed();
+
+    reset(); CHECK(app_nxp_loader_acquire(&driver, 17, 10000) == OKL_OK);
+    CHECK(app_nxp_loader_preserve_resident(&driver, 17, 10000) != OKL_OK);
+    CHECK(!bus.resident_proof_job_id && !starts);
+    for (unsigned failure = 0; failure < 5; ++failure) {
+        reset(); known_loader();
+        CHECK(app_nxp_loader_preserve_resident(&driver, 17, time_us + 10000) == OKL_OK);
+        app_nxp_loader_release(&driver, 17);
+        if (failure < 2) {
+            valid_getter();
+            if (failure == 1) script[used].start_result = ESP_ERR_TIMEOUT;
+            CHECK(execute(10000) == (failure ? OKL_TIMEOUT : OKL_OK));
+        } else if (failure == 2) {
+            CHECK(app_nxp_transport_init(&driver, identity) == ESP_OK);
+        } else {
+            CHECK(app_nxp_loader_acquire(&driver, 19, time_us + 10000) == OKL_OK);
+            if (failure == 3) bus.phase = BUS_UNKNOWN;
+            else driver.needs_recovery = 1;
+            app_nxp_loader_release(&driver, 19);
+        }
+        CHECK(!bus.resident_proof_job_id);
+        if (!driver.needs_recovery) {
+            CHECK(app_nxp_loader_acquire(&driver, 18, time_us + 10000) == OKL_OK);
+            CHECK(app_nxp_loader_use_resident(&driver, 18, 17, time_us + 10000) != OKL_OK);
+        }
+    }
+    for (unsigned failure = 0; failure < 3; ++failure) {
+        reset(); known_loader();
+        if (!failure) ready = 0;
+        if (failure == 1) bus.phase = BUS_UNKNOWN;
+        if (failure == 2) driver.needs_recovery = 1;
+        CHECK(app_nxp_loader_preserve_resident(&driver, 17, time_us + 10000) != OKL_OK);
+        CHECK(!bus.resident_proof_job_id && starts == 3);
+    }
+    reset(); known_loader();
+    CHECK(app_nxp_loader_preserve_resident(&driver, 17, time_us + 10000) == OKL_OK);
+    app_nxp_loader_release(&driver, 17);
+    CHECK(app_nxp_loader_acquire(&driver, 18, time_us + 10000) == OKL_OK);
+    ready = 0;
+    CHECK(app_nxp_loader_use_resident(&driver, 18, 17, time_us + 10000) != OKL_OK);
+    ready = 1;
+    CHECK(app_nxp_loader_use_resident(&driver, 18, 17, time_us + 10000) != OKL_OK);
+    CHECK(!bus.resident_proof_job_id && starts == 3);
+}
 int main(void) {
     test_normal_and_zero(); test_zero_wait_preserves_boundary(); test_zero_length_crosses_deadline();
     test_startup_zero(); test_zero_completion_does_not_clock(); test_retained_stale_body();
@@ -403,5 +461,6 @@ int main(void) {
     test_loader_lease_and_qualification(); test_expected_reset_is_one_shot();
     test_reset_delivery_failures_stay_distinct(); test_unqualified_reply_cannot_arm_reset();
     test_typed_entry_boundary();
+    test_resident_proof_is_scoped_and_consumed();
     printf("native transport: %u checks across %u cases passed\n", checks, cases); return 0;
 }
