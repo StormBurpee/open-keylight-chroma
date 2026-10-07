@@ -1,0 +1,1842 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Open Keylight Chroma local API",
+    "version": "1.0.0",
+    "description": "Contract for the original ESP application, reviewed against the handlers. This is not a hardware qualification or release claim. HTTP uses port 80 on a trusted LAN; no TLS listener or cross-origin API. Host must be the device IP, hostname, hostname.local, or setup IP 192.168.4.1, optionally followed by :80. If supplied, Origin must equal http:// plus the exact Host value. API routes accept no query parameters. Public reads expose metadata; mutations and client listing require a paired bearer token, except POST /pair. JSON bodies are 1–2048 bytes, read within 10 seconds; malformed, duplicate or unknown fields and NUL are rejected. String limits are UTF-8 byte limits, recorded by x-maxUtf8Bytes and x-minUtf8Bytes. JSON replies use Cache-Control: no-store and Connection: close. Errors can follow partial hardware/update work; do not infer that a failed command restored the previous state."
+  },
+  "servers": [
+    {
+      "url": "http://{host}/api/v1",
+      "variables": {
+        "host": {
+          "default": "keylight-example.local",
+          "description": "Replace with this device hostname or IPv4 address."
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "BearerToken": []
+    }
+  ],
+  "paths": {
+    "/device": {
+      "get": {
+        "operationId": "getDevice",
+        "summary": "Read identity, health and capabilities",
+        "description": "Public LAN metadata. Capabilities describe the running implementation; do not infer absent features. Controller connectivity is independent of Wi-Fi connectivity.",
+        "responses": {
+          "200": {
+            "description": "Read identity, health and capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Device"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/state": {
+      "get": {
+        "operationId": "getState",
+        "summary": "Read desired state and controller evidence",
+        "description": "Returns desired intent and the most recent controller report. reported.valid plus confirmed_fields describe getter evidence; operation.status alone does not confirm an active effect RGB value. A pending command may coexist with an older report. Refresh after a 202 response and compare the requested fields before treating a change as confirmed.",
+        "responses": {
+          "200": {
+            "description": "Read desired state and controller evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      },
+      "patch": {
+        "operationId": "patchState",
+        "summary": "Accept a partial lighting command",
+        "description": "202 accepts intent; it does not confirm output. expected_revision must match the global revision from GET /state, or 409 is returned without applying that patch. Every accepted patch increments revision, including lock-only changes. Recording Lock rejects output changes except Off; unlock in a separate request. OTA in progress returns 503 except for exactly {power:false}. Never blindly retry a timed-out mutation. White-mode transitions are not rendered even though transition_ms is stored.",
+        "responses": {
+          "202": {
+            "description": "Accept a partial lighting command",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing or invalid paired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision or operation conflict; refresh current state before choosing a next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Recording Lock blocked the requested output change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service, persistence or trial operation unavailable; inspect the error string.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StatePatch"
+              },
+              "examples": {
+                "white": {
+                  "value": {
+                    "power": true,
+                    "mode": "white",
+                    "brightness": 30,
+                    "temperature_k": 4500,
+                    "expected_revision": 7
+                  }
+                },
+                "color": {
+                  "value": {
+                    "power": true,
+                    "mode": "color",
+                    "rgb": {
+                      "r": 255,
+                      "g": 0,
+                      "b": 32
+                    },
+                    "effect": "none",
+                    "transition_ms": 1000
+                  }
+                },
+                "off": {
+                  "value": {
+                    "power": false
+                  }
+                },
+                "unlock": {
+                  "value": {
+                    "recording_lock": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Keylight-Actor",
+            "in": "header",
+            "required": false,
+            "description": "Attribution only; grants no additional permission. Other values are recorded as api.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "dashboard",
+                "streamdeck",
+                "automation"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "/history": {
+      "get": {
+        "operationId": "getHistory",
+        "summary": "Read bounded recent events",
+        "description": "At most 32 volatile events, newest first. Includes accepted, failed and getter-confirmed controller operations; resets on application restart.",
+        "responses": {
+          "200": {
+            "description": "Read bounded recent events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/History"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/pair": {
+      "post": {
+        "operationId": "pairClient",
+        "summary": "Issue one client token inside an open pairing window",
+        "description": "Body is exactly one nonempty label of at most 32 UTF-8 bytes. A physical three-second hold or authenticated POST /pairing opens a 180-second window consumed by one successful pairing. Four clients maximum; an application with no clients opens its initial window. Closed window, full capacity or token persistence failure returns 403. The token is returned only once.",
+        "responses": {
+          "201": {
+            "description": "Issue one client token inside an open pairing window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairRequest"
+              },
+              "examples": {
+                "client": {
+                  "value": {
+                    "label": "Home Assistant setup"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/pairing": {
+      "post": {
+        "operationId": "openPairing",
+        "summary": "Open one pairing window",
+        "description": "Requires an existing token. No body is needed. Also requests a temporary setup AP if a configured device is offline.",
+        "responses": {
+          "200": {
+            "description": "Open one pairing window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairingResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing or invalid paired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clients": {
+      "get": {
+        "operationId": "listClients",
+        "summary": "List paired client identifiers",
+        "description": "Authenticated even though it is GET. Returns labels and revocation IDs, never bearer tokens.",
+        "responses": {
+          "200": {
+            "description": "List paired client identifiers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Clients"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing or invalid paired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/clients/{id}": {
+      "delete": {
+        "operationId": "revokeClient",
+        "summary": "Revoke one client token",
+        "description": "Revocation of the calling token also removes its subsequent access. No body is needed.",
+        "responses": {
+          "200": {
+            "description": "Revoke one client token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "revoked": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "revoked"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing or invalid paired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "description": "Service, persistence or trial operation unavailable; inspect the error string.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{16}(?![\\s\\S])"
+            }
+          }
+        ]
+      }
+    },
+    "/settings": {
+      "get": {
+        "operationId": "getSettings",
+        "summary": "Read non-secret configuration",
+        "description": "Public device role, MQTT broker metadata and fixed button actions. SSID and passwords are omitted. MQTT username and broker URI are visible on the LAN.",
+        "responses": {
+          "200": {
+            "description": "Read non-secret configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      },
+      "patch": {
+        "operationId": "patchSettings",
+        "summary": "Persist configuration changes",
+        "description": "Omitted settings retain their previous values. Settings persist before 200; Wi-Fi or MQTT fields request a delayed restart, while name/role-only changes do not. Reconnect and inspect settings rather than assuming reboot succeeded. SSID and all passwords are omitted from the response. Update in progress returns 409. No expected_revision field is supported here.",
+        "responses": {
+          "200": {
+            "description": "Persist configuration changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing or invalid paired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision or operation conflict; refresh current state before choosing a next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service, persistence or trial operation unavailable; inspect the error string.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsPatch"
+              },
+              "examples": {
+                "name": {
+                  "value": {
+                    "name": "Studio Key",
+                    "role": "key"
+                  }
+                },
+                "mqtt": {
+                  "value": {
+                    "mqtt": {
+                      "enabled": true,
+                      "uri": "mqtts://broker.example:8883",
+                      "username": "keylight",
+                      "password": "replace-locally"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scenes": {
+      "get": {
+        "operationId": "listScenes",
+        "summary": "List saved scenes",
+        "description": "Only saved slots are returned, in ascending ID order. No delete endpoint is implemented; PUT replaces a slot.",
+        "responses": {
+          "200": {
+            "description": "List saved scenes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Scenes"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": []
+      }
+    },
+    "/scenes/{id}": {
+      "put": {
+        "operationId": "saveScene",
+        "summary": "Create or replace a scene slot",
+        "description": "Exactly name and state. Partial state is merged with factory defaults; recording_lock is cleared. This saves a scene and does not activate it.",
+        "responses": {
+          "200": {
+            "description": "Create or replace a scene slot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Scene"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing or invalid paired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "description": "Service, persistence or trial operation unavailable; inspect the error string.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SceneWrite"
+              },
+              "examples": {
+                "scene": {
+                  "value": {
+                    "name": "Interview",
+                    "state": {
+                      "power": true,
+                      "mode": "white",
+                      "brightness": 30,
+                      "temperature_k": 4500
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8
+            }
+          }
+        ]
+      }
+    },
+    "/scenes/{id}/activate": {
+      "post": {
+        "operationId": "activateScene",
+        "summary": "Accept a saved scene",
+        "description": "Body may be absent, empty object, or expected_revision only. Respects Recording Lock and optimistic concurrency. 202 does not confirm physical output.",
+        "responses": {
+          "202": {
+            "description": "Accept a saved scene",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing or invalid paired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "description": "Revision or operation conflict; refresh current state before choosing a next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Recording Lock blocked the requested output change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service, persistence or trial operation unavailable; inspect the error string.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevisionRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8
+            }
+          }
+        ]
+      }
+    },
+    "/confirm": {
+      "post": {
+        "operationId": "confirmTrial",
+        "summary": "Persist acceptance of this application trial",
+        "description": "No body is needed. Authenticated confirmation persists acceptance of this exact application image. A pending trial lasts 180 seconds after application initialization; confirmation and expiry select one terminal decision. Already confirmed is idempotent. Expired, failed, uninitialized or concurrent confirmation returns 503. The retained bootloader has no automatic crash rollback: application fallback requires its code/task to execute. Do not confirm before checking identity, networking and controller operation.",
+        "responses": {
+          "200": {
+            "description": "Persist acceptance of this application trial",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "confirmed": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "confirmed"
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing or invalid paired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service, persistence or trial operation unavailable; inspect the error string.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/update": {
+      "post": {
+        "operationId": "uploadApplication",
+        "summary": "Verify an application image and schedule reboot",
+        "description": "Application-only OTA into the existing inactive ESP slot. Requires a confirmed current trial and no concurrent upload, otherwise 409. Exact Content-Type application/octet-stream, known Content-Length of 288–1572864 bytes (also within the actual slot), lowercase X-SHA256 matching the full body, and ESP image validation are required. The total upload budget is 120 seconds. Failure schedules no reboot; the inactive slot may have been modified. Never upload a bootloader, partition table, NXP image or merged flash image. 202 schedules reboot; it does not prove the new image booted. Reconnect, verify identity and operation, then confirm its 180-second trial. Do not automatically retry an ambiguous response.",
+        "responses": {
+          "202": {
+            "description": "Verify an application image and schedule reboot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateAccepted"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing or invalid paired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/origin rejected, or pairing unavailable for POST /pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "OTA upload exceeded its time budget or failed to receive the remaining body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision or operation conflict; refresh current state before choosing a next action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "OTA image is too small or exceeds the existing application slot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service, persistence or trial operation unavailable; inspect the error string.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "minLength": 288,
+                "maxLength": 1572864
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-SHA256",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+            },
+            "description": "Lowercase SHA-256 of the exact complete application binary. This verifies integrity against the supplied digest, not publisher authenticity."
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "64 lowercase hexadecimal characters",
+        "description": "Token returned once by POST /pair. Never place it in a URL."
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Request failed; inspect the error string. No success should be inferred.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "RGB": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "r": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "g": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "b": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          }
+        },
+        "required": [
+          "r",
+          "g",
+          "b"
+        ]
+      },
+      "Light": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "power": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "white",
+              "color"
+            ]
+          },
+          "brightness": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "temperature_k": {
+            "type": "integer",
+            "minimum": 3000,
+            "maximum": 7000
+          },
+          "rgb": {
+            "$ref": "#/components/schemas/RGB"
+          },
+          "transition_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "effect": {
+            "type": "string",
+            "enum": [
+              "none",
+              "aurora",
+              "breathe"
+            ]
+          },
+          "recording_lock": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "power",
+          "mode",
+          "brightness",
+          "temperature_k",
+          "rgb",
+          "transition_ms",
+          "effect",
+          "recording_lock"
+        ],
+        "description": "Logical light state. White mode requires effect none. transition_ms is a retained preference; the current worker renders color transitions only. RGB and brightness are control levels, not calibrated photometry."
+      },
+      "StatePatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "power": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "white",
+              "color"
+            ]
+          },
+          "brightness": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "temperature_k": {
+            "type": "integer",
+            "minimum": 3000,
+            "maximum": 7000
+          },
+          "rgb": {
+            "$ref": "#/components/schemas/RGB"
+          },
+          "transition_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "effect": {
+            "type": "string",
+            "enum": [
+              "none",
+              "aurora",
+              "breathe"
+            ]
+          },
+          "recording_lock": {
+            "type": "boolean"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "required": [],
+        "anyOf": [
+          {
+            "required": [
+              "power"
+            ]
+          },
+          {
+            "required": [
+              "mode"
+            ]
+          },
+          {
+            "required": [
+              "brightness"
+            ]
+          },
+          {
+            "required": [
+              "temperature_k"
+            ]
+          },
+          {
+            "required": [
+              "rgb"
+            ]
+          },
+          {
+            "required": [
+              "transition_ms"
+            ]
+          },
+          {
+            "required": [
+              "effect"
+            ]
+          },
+          {
+            "required": [
+              "recording_lock"
+            ]
+          }
+        ],
+        "description": "At least one state field. RGB requires all three channels. Mode is explicit: RGB alone does not select color. Validation also checks the merged current state. White mode cannot use a non-none effect. Duplicate object keys are rejected. expected_revision is optional optimistic concurrency control."
+      },
+      "SceneStatePatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "power": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "white",
+              "color"
+            ]
+          },
+          "brightness": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "temperature_k": {
+            "type": "integer",
+            "minimum": 3000,
+            "maximum": 7000
+          },
+          "rgb": {
+            "$ref": "#/components/schemas/RGB"
+          },
+          "transition_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "effect": {
+            "type": "string",
+            "enum": [
+              "none",
+              "aurora",
+              "breathe"
+            ]
+          },
+          "recording_lock": {
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "minProperties": 1,
+        "description": "At least one state field, merged with factory defaults rather than the current light. recording_lock is cleared on save. Defaults: power off, white mode, 50% brightness, 4500 K, RGB 255/96/32, transition 600 ms, effect none, unlocked. expected_revision is not accepted."
+      },
+      "State": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "desired": {
+            "$ref": "#/components/schemas/Light"
+          },
+          "reported": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "power": {
+                "type": "boolean"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "white",
+                  "color"
+                ]
+              },
+              "brightness": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "temperature_k": {
+                "type": "integer",
+                "minimum": 3000,
+                "maximum": 7000
+              },
+              "rgb": {
+                "$ref": "#/components/schemas/RGB"
+              },
+              "transition_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "effect": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "aurora",
+                  "breathe"
+                ]
+              },
+              "recording_lock": {
+                "type": "boolean"
+              },
+              "valid": {
+                "type": "boolean"
+              },
+              "confirmed_fields": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "power",
+                    "mode",
+                    "brightness",
+                    "temperature_k",
+                    "rgb",
+                    "effect"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "power",
+              "mode",
+              "brightness",
+              "temperature_k",
+              "rgb",
+              "transition_ms",
+              "effect",
+              "recording_lock",
+              "valid",
+              "confirmed_fields"
+            ]
+          },
+          "operation": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "idle",
+                  "pending",
+                  "error"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "error"
+            ]
+          },
+          "last_actor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "desired",
+          "reported",
+          "operation",
+          "last_actor"
+        ],
+        "description": "desired is intent; reported is the last normalized controller snapshot. Use valid, confirmed_fields and operation together, then compare your requested values. Fields outside confirmed_fields can be retained preferences and are not getter-confirmed. A pending operation can coexist with an older valid report. Native RGB is unavailable during custom-frame rendering, so the report is invalidated. Controller levels and optical light output are different kinds of evidence."
+      },
+      "SettingsPatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 32,
+            "x-maxUtf8Bytes": 32,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "key",
+              "fill",
+              "background",
+              "other"
+            ]
+          },
+          "ssid": {
+            "type": "string",
+            "maxLength": 32,
+            "x-maxUtf8Bytes": 32,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
+            "writeOnly": true
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 64,
+            "x-maxUtf8Bytes": 64,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
+            "writeOnly": true,
+            "anyOf": [
+              {
+                "maxLength": 0
+              },
+              {
+                "minLength": 1,
+                "x-minUtf8Bytes": 8
+              }
+            ],
+            "description": "Empty for an open network, otherwise 8–64 UTF-8 bytes; control characters are rejected."
+          },
+          "mqtt": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "uri": {
+                "type": "string",
+                "maxLength": 128,
+                "x-maxUtf8Bytes": 128,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
+                "description": "mqtt:// or mqtts:// with a DNS/IPv4 host and optional port 1–65535. No embedded credentials, path, query or IPv6 literal. Empty is allowed only when the resulting configuration is disabled. enabled and URI are validated together."
+              },
+              "username": {
+                "type": "string",
+                "maxLength": 64,
+                "x-maxUtf8Bytes": 64,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+              },
+              "password": {
+                "type": "string",
+                "maxLength": 64,
+                "x-maxUtf8Bytes": 64,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
+                "writeOnly": true
+              }
+            },
+            "required": []
+          }
+        },
+        "required": [],
+        "minProperties": 1,
+        "description": "String limits are UTF-8 byte limits; x-maxUtf8Bytes records the firmware constraint. Control characters are rejected. Wi-Fi and MQTT changes schedule a restart; name/role-only changes do not. Fields omitted retain their previous values. Passwords are never returned."
+      },
+      "Settings": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 32,
+            "x-maxUtf8Bytes": 32,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "key",
+              "fill",
+              "background",
+              "other"
+            ]
+          },
+          "mqtt": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "uri": {
+                "type": "string",
+                "maxLength": 128,
+                "x-maxUtf8Bytes": 128,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+              },
+              "username": {
+                "type": "string",
+                "maxLength": 64,
+                "x-maxUtf8Bytes": 64,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+              },
+              "connected": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "enabled",
+              "uri",
+              "username",
+              "connected"
+            ]
+          },
+          "button": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "single": {
+                "const": "toggle"
+              },
+              "double": {
+                "const": "next_scene"
+              },
+              "hold": {
+                "const": "pair"
+              }
+            },
+            "required": [
+              "single",
+              "double",
+              "hold"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "role",
+          "mqtt",
+          "button"
+        ]
+      },
+      "Scene": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 32,
+            "x-maxUtf8Bytes": 32,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+          },
+          "state": {
+            "$ref": "#/components/schemas/Light"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "state"
+        ]
+      },
+      "Scenes": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scenes": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/Scene"
+            }
+          }
+        },
+        "required": [
+          "scenes"
+        ]
+      },
+      "SceneWrite": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 32,
+            "x-maxUtf8Bytes": 32,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+          },
+          "state": {
+            "$ref": "#/components/schemas/SceneStatePatch"
+          }
+        },
+        "required": [
+          "name",
+          "state"
+        ]
+      },
+      "RevisionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "required": []
+      },
+      "PairRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "type": "string",
+            "maxLength": 32,
+            "x-maxUtf8Bytes": 32,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+          }
+        },
+        "required": [
+          "label"
+        ]
+      },
+      "PairResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "token": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+            "description": "Returned once; keep private. The device stores a SHA256 hash."
+          }
+        },
+        "required": [
+          "token"
+        ]
+      },
+      "PairingResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "pairing_open": {
+            "const": true
+          },
+          "duration_ms": {
+            "const": 180000
+          }
+        },
+        "required": [
+          "pairing_open",
+          "duration_ms"
+        ]
+      },
+      "Clients": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "clients": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{16}(?![\\s\\S])"
+                },
+                "label": {
+                  "type": "string",
+                  "maxLength": 32,
+                  "x-maxUtf8Bytes": 32,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "id",
+                "label"
+              ]
+            }
+          }
+        },
+        "required": [
+          "clients"
+        ]
+      },
+      "History": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "type": "array",
+            "maxItems": 32,
+            "description": "Newest first; volatile bounded event history.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "uptime_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "actor": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "sequence",
+                "uptime_ms",
+                "actor",
+                "event",
+                "detail"
+              ]
+            }
+          }
+        },
+        "required": [
+          "entries"
+        ]
+      },
+      "UpdateAccepted": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "accepted": {
+            "const": true
+          },
+          "rebooting": {
+            "const": true
+          }
+        },
+        "required": [
+          "accepted",
+          "rebooting"
+        ]
+      },
+      "Device": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 32,
+            "x-maxUtf8Bytes": 32,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+          },
+          "model": {
+            "const": "Open Keylight Chroma"
+          },
+          "firmware": {
+            "type": "string"
+          },
+          "api_version": {
+            "const": 1
+          },
+          "uptime_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "free_heap_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reset_reason": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pairing_open": {
+            "type": "boolean"
+          },
+          "trial_pending": {
+            "type": "boolean"
+          },
+          "network": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "connected": {
+                "type": "boolean"
+              },
+              "rssi": {
+                "type": "integer"
+              },
+              "ip": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "connected",
+              "rssi",
+              "ip"
+            ]
+          },
+          "controller": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "connected": {
+                "type": "boolean"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "connected",
+              "version"
+            ]
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "white": {
+                "type": "boolean"
+              },
+              "color": {
+                "type": "boolean"
+              },
+              "transitions": {
+                "type": "boolean"
+              },
+              "effects": {
+                "type": "boolean"
+              },
+              "scenes": {
+                "type": "boolean"
+              },
+              "settings": {
+                "type": "boolean"
+              },
+              "ota": {
+                "type": "boolean"
+              },
+              "white_transitions": {
+                "type": "boolean"
+              },
+              "effect_names": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "aurora",
+                    "breathe"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "white",
+              "color",
+              "transitions",
+              "effects",
+              "scenes",
+              "settings",
+              "ota",
+              "white_transitions",
+              "effect_names"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "model",
+          "firmware",
+          "api_version",
+          "uptime_ms",
+          "free_heap_bytes",
+          "reset_reason",
+          "pairing_open",
+          "trial_pending",
+          "network",
+          "controller",
+          "capabilities"
+        ]
+      }
+    }
+  }
+}
