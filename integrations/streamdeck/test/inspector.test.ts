@@ -83,6 +83,8 @@ test("property inspector sends its registered UUID and action type, then verifie
       color: "#FF8844",
       hueStep: 5,
       fadeMs: 150,
+      temperature: 4500,
+      temperatureStep: 100,
     },
   });
   assert.deepEqual(sent[2], {
@@ -234,6 +236,66 @@ test("future settings survive edits and changed fade is not falsely acknowledged
       event: "didReceiveSettings",
       context: "key-context",
       payload: { settings: { ...saved, fadeMs: 0 } },
+    }),
+  });
+  assert.match($("status").textContent, /different settings/);
+  dom.window.close();
+});
+
+test("temperature PI exposes Kelvin controls only and preserves existing saved fields", async () => {
+  const { dom, sent, ws, $ } = await page("temperature");
+  assert.equal($("temperature-field").hidden, false);
+  assert.equal($("color-field").hidden, true);
+  assert.equal($("fade-field").hidden, true);
+  assert.equal($("step-field").hidden, true);
+  assert.equal($("temperature").value, "4500");
+  assert.equal($("temperatureStep").value, "100");
+  assert.match($("temperature-field").textContent, /direct/);
+  assert.match(
+    $("temperature-field").textContent,
+    /Power and brightness stay unchanged/,
+  );
+  $("temperature").value = "5300";
+  $("temperatureStep").value = "250";
+  $("settings").dispatchEvent(
+    new dom.window.Event("submit", { cancelable: true }),
+  );
+  const value = sent[1].payload as any;
+  assert.equal(value.temperature, 5300);
+  assert.equal(value.temperatureStep, 250);
+  assert.equal(value.token, "secret");
+  assert.equal(value.scene, 2);
+  assert.equal(sent[1].context, "pi-uuid");
+  ws.onmessage({
+    data: JSON.stringify({
+      event: "didReceiveSettings",
+      context: "key-context",
+      payload: { settings: value },
+    }),
+  });
+  assert.match($("status").textContent, /saved and read back/);
+  dom.window.close();
+});
+test("invalid Kelvin settings never replace saved settings; readback mismatch is not success", async () => {
+  const { dom, sent, ws, $ } = await page("temperature");
+  for (const value of ["2999", "7001", "4500.5"]) {
+    $("temperature").value = value;
+    $("settings").dispatchEvent(
+      new dom.window.Event("submit", { cancelable: true }),
+    );
+    assert.equal(sent.length, 1);
+    assert.match($("status").textContent, /3000 to 7000 K/);
+  }
+  $("temperature").value = "3000";
+  $("settings").dispatchEvent(
+    new dom.window.Event("submit", { cancelable: true }),
+  );
+  const saved = sent[1].payload as any;
+  ws.onmessage({
+    data: JSON.stringify({
+      event: "didReceiveSettings",
+      context: "key-context",
+      payload: { settings: { ...saved, temperature: 4500 } },
     }),
   });
   assert.match($("status").textContent, /different settings/);

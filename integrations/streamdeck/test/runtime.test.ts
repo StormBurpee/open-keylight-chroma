@@ -32,6 +32,7 @@ test(
             capabilities: {
               scenes: true,
               color: true,
+              white: true,
               transitions: true,
               white_transitions: false,
             },
@@ -130,7 +131,7 @@ test(
           size: { columns: 5, rows: 3 },
         },
       ],
-      plugin: { uuid: "org.openkeylight.chroma", version: "0.1.3.0" },
+      plugin: { uuid: "org.openkeylight.chroma", version: "0.2.0.0" },
     };
     const plugin = fileURLToPath(
       new URL("../org.openkeylight.chroma.sdPlugin/", import.meta.url),
@@ -185,6 +186,8 @@ test(
       step: 5,
       scene: 2,
       color: "#0080FF",
+      temperature: 4700,
+      temperatureStep: 100,
     };
     const send = (
       event: string,
@@ -313,6 +316,88 @@ test(
         ),
       "saved key colour",
     );
+    await new Promise((r) => setTimeout(r, 200));
+    const beforeTemperature = mutations.length;
+    send("willAppear", "temperature");
+    await until(
+      () =>
+        messages.some(
+          (m) => m.context === "temperature" && m.payload?.title === "Colour",
+        ),
+      "temperature key shows current colour mode",
+    );
+    send("keyDown", "temperature");
+    await until(
+      () => mutations.length === beforeTemperature + 1,
+      "configured white temperature key",
+    );
+    assert.deepEqual(mutations.at(-1)?.body, {
+      mode: "white",
+      temperature_k: 4700,
+      effect: "none",
+      transition_ms: 0,
+      expected_revision: state.revision - 1,
+    });
+    assert.equal(state.desired.power, false);
+    assert.equal(state.desired.brightness, 33);
+    await new Promise((r) => setTimeout(r, 200));
+    send("willDisappear", "temperature");
+    send("willAppear", "temperature", "Encoder");
+    await until(
+      () =>
+        messages.some(
+          (m) => m.context === "temperature" && m.payload?.value === "4700 K",
+        ),
+      "temperature dial readback",
+    );
+    holdResponse = true;
+    const beforeTemperatureBurst = mutations.length;
+    send("dialRotate", "temperature", "Encoder", { ticks: 1 });
+    await until(
+      () => mutations.length === beforeTemperatureBurst + 1,
+      "slow first temperature write",
+    );
+    assert.equal(mutations.at(-1)?.body.temperature_k, 4800);
+    send("dialRotate", "temperature", "Encoder", { ticks: 100 });
+    send("dialRotate", "temperature", "Encoder", { ticks: -1 });
+    await until(
+      () =>
+        messages.some(
+          (m) => m.context === "temperature" && m.payload?.value === "6900 K *",
+        ),
+      "Kelvin reversal at upper bound remains visible while HTTP is blocked",
+    );
+    holdResponse = false;
+    releaseResponse!();
+    await until(
+      () => mutations.length === beforeTemperatureBurst + 2,
+      "single accumulated temperature continuation",
+    );
+    assert.equal(mutations.at(-1)?.body.temperature_k, 6900);
+    assert.equal(
+      mutations.at(-1)?.body.expected_revision,
+      (mutations.at(-2)!.body.expected_revision as number) + 1,
+    );
+    assert.equal(state.desired.brightness, 33);
+    assert.equal(state.desired.power, false);
+    await new Promise((r) => setTimeout(r, 200));
+    send("dialDown", "temperature", "Encoder");
+    await until(
+      () => mutations.length === beforeTemperatureBurst + 3,
+      "temperature press toggles on",
+    );
+    assert.equal(state.desired.power, true);
+    await new Promise((r) => setTimeout(r, 200));
+    send("touchTap", "temperature", "Encoder", {
+      tapPos: [50, 50],
+      hold: false,
+    });
+    await until(
+      () => mutations.length === beforeTemperatureBurst + 4,
+      "temperature touch toggles off",
+    );
+    assert.equal(state.desired.power, false);
+    assert.equal(state.desired.temperature_k, 6900);
     await new Promise((r) => setTimeout(r, 200));
     holdResponse = true;
     const beforeBurst = mutations.length;

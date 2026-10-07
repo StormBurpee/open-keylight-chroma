@@ -7,6 +7,8 @@ export type Config = {
   color?: string;
   hueStep?: number;
   fadeMs?: number;
+  temperature?: number;
+  temperatureStep?: number;
 };
 export type Output = {
   power: boolean;
@@ -31,6 +33,7 @@ export type Device = {
   capabilities: {
     scenes?: boolean;
     color?: boolean;
+    white?: boolean;
     transitions?: boolean;
     white_transitions?: boolean;
   };
@@ -41,6 +44,7 @@ export type Intent =
   | { kind: "brightness"; delta: number }
   | { kind: "color"; rgb: RGB }
   | { kind: "hue"; degrees: number }
+  | { kind: "temperature"; kelvin: number }
   | { kind: "scene"; id: number };
 export class DeviceError extends Error {
   constructor(
@@ -185,6 +189,15 @@ export function patchFor(
         0,
         Math.min(100, state.desired.brightness + intent.delta),
       ),
+    };
+  } else if (intent.kind === "temperature") {
+    if (!integer(intent.kelvin, 3000, 7000))
+      throw new DeviceError("Choose a white temperature from 3000 to 7000 K.");
+    patch = {
+      mode: "white",
+      temperature_k: intent.kelvin,
+      effect: "none",
+      transition_ms: 0,
     };
   } else {
     const rgb =
@@ -343,6 +356,11 @@ export class DeviceClient {
       };
     }
     const patch = patchFor(state, intent);
+    if (
+      intent.kind === "temperature" &&
+      (await this.device()).capabilities.white !== true
+    )
+      throw new DeviceError("This light does not support white temperature.");
     if (["brightness", "color", "hue"].includes(intent.kind)) {
       const device = await this.device();
       if (intent.kind !== "brightness" && !device.capabilities.color)
@@ -388,7 +406,9 @@ export function stateLabel(kind: string, state: State, scene = 1): string {
   const fields: (keyof Output)[] =
     kind === "color"
       ? ["mode", "rgb", "effect"]
-      : [kind === "power" ? "power" : "brightness"];
+      : kind === "temperature"
+        ? ["mode", "temperature_k", "effect"]
+        : [kind === "power" ? "power" : "brightness"];
   const confirmed =
     state.operation.status === "idle" &&
     state.reported.valid &&
@@ -402,11 +422,15 @@ export function stateLabel(kind: string, state: State, scene = 1): string {
       ? state.desired.mode === "color"
         ? rgbHex(state.desired.rgb)
         : "White"
-      : kind === "power"
-        ? state.desired.power
-          ? "ON"
-          : "OFF"
-        : `${state.desired.brightness}%`;
+      : kind === "temperature"
+        ? state.desired.mode === "white"
+          ? `${state.desired.temperature_k} K`
+          : "Colour"
+        : kind === "power"
+          ? state.desired.power
+            ? "ON"
+            : "OFF"
+          : `${state.desired.brightness}%`;
   return label + (confirmed ? "" : " *");
 }
 export function errorLabel(error: unknown) {

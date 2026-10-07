@@ -1,5 +1,9 @@
 # Development record
 
+**Current status — 8 October 2026:** both chips run Open Keylight. The packaged 0.2.0 installer has completed a stock installation, and an existing installation has upgraded successfully. See the [0.2.0 qualification record](docs/releases/0.2.0.md).
+
+The entries below are chronological. Earlier limitations and failed attempts describe the project at that point; later observations supersede them where stated.
+
 ## Complete controller replacement in progress
 
 The remaining target is the original NXP LED application running alongside the original ESP application, followed by usable installation and integration checks. The compatibility ESP deployment is a milestone, not completion of the project.
@@ -403,3 +407,5 @@ The owner launched the extracted Windows 0.2.0 package and reached **Ready to us
 The first light received the same image through the native update API. Its private verification helper stopped on a readiness check during the old application's planned shutdown; the upload itself returned 202. A separate acceptance attempt made no mutation because the owner had already confirmed the new image in the dashboard. Independent read-only verification then matched the release ELF and all four assets, preserved settings/scenes, fresh controller health and the owner's confirmation history. This qualifies the upload/dashboard-confirmation path, not the failed helper as an automated acceptance pass. The owner reported correct update and pairing feedback.
 
 Stream Deck 0.2.0 is installed and its five actions are present. The owner confirmed responsive rapid 5% brightness turns and reversals on the Stream Deck Plus. Device history independently records accepted Stream Deck commands. Publication follows the final documentation and artifact checks.
+
+The final Stream Deck candidate adds a sixth action, Temperature. A key recalls 3000–7000 K; a dial adjusts it in 50, 100, 250 or 500 K increments while preserving power and brightness. It selects static white and uses the same bounded dial queue, including reversals at either limit. All 51 tests pass, including delayed HTTP and actual compiled SDK events under Stream Deck's installed Node runtime. Existing action identifiers, saved settings and raster assets are unchanged.

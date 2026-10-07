@@ -28,6 +28,7 @@ export const device = {
   capabilities: {
     scenes: true,
     color: true,
+    white: true,
     transitions: true,
     white_transitions: false,
   },

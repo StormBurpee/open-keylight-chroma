@@ -3,7 +3,7 @@
   "Name": "Open Keylight Chroma",
   "Version": "0.2.0.0",
   "Author": "Open Keylight contributors",
-  "Description": "Local controls for Open Keylight Chroma: power, brightness, colour, scenes and recording lock.",
+  "Description": "Local controls for Open Keylight Chroma: power, brightness, colour, white temperature, scenes and recording lock.",
   "Icon": "imgs/plugin",
   "Category": "Open Keylight Chroma",
   "CategoryIcon": "imgs/category",
@@ -95,6 +95,34 @@
       "States": [
         {
           "Image": "imgs/scene",
+          "TitleAlignment": "bottom",
+          "FontSize": 13
+        }
+      ],
+      "SupportedInMultiActions": false,
+      "DisableAutomaticStates": true
+    },
+    {
+      "UUID": "org.openkeylight.chroma.temperature",
+      "Name": "Temperature",
+      "Icon": "imgs/brightness-list",
+      "Tooltip": "Select white temperature with a key, or turn a dial from warm to cool. Preserves power and brightness.",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "Encoder": {
+        "Icon": "imgs/brightness",
+        "layout": "$B1",
+        "TriggerDescription": {
+          "Rotate": "Adjust white temperature",
+          "Push": "Toggle power",
+          "Touch": "Toggle power"
+        }
+      },
+      "States": [
+        {
+          "Image": "imgs/brightness",
           "TitleAlignment": "bottom",
           "FontSize": 13
         }

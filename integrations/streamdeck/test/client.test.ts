@@ -256,3 +256,62 @@ test("accepted controller error stops continuation instead of declaring success"
   state.desired.recording_lock = true;
   assert.equal(stateLabel("scene", state, 2), "Scene 2\nLocked");
 });
+
+test("temperature selects static white directly and preserves power, brightness and colour memory", async () => {
+  const s = fixture();
+  s.desired.power = false;
+  s.desired.effect = "aurora";
+  const c = new DeviceClient(
+    { url: "http://light.local", fadeMs: 400 },
+    async () => response(device),
+  );
+  for (const kelvin of [3000, 4500, 7000])
+    assert.deepEqual(await c.prepare(s, { kind: "temperature", kelvin }), {
+      mode: "white",
+      temperature_k: kelvin,
+      effect: "none",
+      transition_ms: 0,
+      expected_revision: 7,
+    });
+  assert.equal(s.desired.mode, "color");
+  assert.equal(s.desired.brightness, 40);
+  assert.equal(s.desired.power, false);
+  for (const kelvin of [2999, 7001, 4500.5, NaN, Infinity])
+    assert.throws(() => patchFor(s, { kind: "temperature", kelvin }));
+  s.desired.recording_lock = true;
+  assert.throws(() => patchFor(s, { kind: "temperature", kelvin: 4500 }), {
+    status: 423,
+  });
+});
+test("temperature requires an explicit white capability and exact controller field readback", async () => {
+  for (const white of [false, undefined, "true", 1]) {
+    let writes = 0;
+    const c = new DeviceClient(
+      { url: "http://light.local", token: "x" },
+      async (u, o) => {
+        if (o?.method === "PATCH") writes++;
+        return String(u).endsWith("/device")
+          ? response({
+              ...device,
+              capabilities: { ...device.capabilities, white },
+            })
+          : response(fixture());
+      },
+    );
+    await assert.rejects(
+      c.apply({ kind: "temperature", kelvin: 4500 }),
+      /does not support white/,
+    );
+    assert.equal(writes, 0);
+  }
+  const s = fixture();
+  assert.equal(stateLabel("temperature", s), "Colour");
+  s.desired.mode = "white";
+  assert.equal(stateLabel("temperature", s), "4500 K *");
+  s.reported.mode = "white";
+  assert.equal(stateLabel("temperature", s), "4500 K");
+  s.reported.confirmed_fields = s.reported.confirmed_fields.filter(
+    (f) => f !== "temperature_k",
+  );
+  assert.equal(stateLabel("temperature", s), "4500 K *");
+});

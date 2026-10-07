@@ -250,3 +250,88 @@ test("hue input remains bounded, cyclic and does not turn the light on", async (
   assert.deepEqual(x.client.writes[0].rgb, { r: 0, g: 255, b: 0 });
   assert.equal(x.client.writes[0].power, undefined);
 });
+
+test("Kelvin clamp composition preserves every step and reversal across both temperature limits", () => {
+  let seed = 29;
+  for (let start = 3000; start <= 7000; start += 50) {
+    const motion = new Motion("temperature");
+    let expected = start;
+    for (let n = 0; n < 1000; n++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      const delta = ((seed % 41) - 20) * 250;
+      motion.add(delta);
+      expected = Math.max(3000, Math.min(7000, expected + delta));
+      const s = fixture();
+      s.desired.temperature_k = start;
+      const preview = motion.preview(s);
+      assert.equal(preview.desired.temperature_k, expected);
+      assert.equal(preview.desired.mode, "white");
+      assert.equal(preview.desired.brightness, s.desired.brightness);
+      assert.equal(preview.desired.power, s.desired.power);
+    }
+  }
+});
+test("temperature burst during an active write keeps reversal and CAS without changing brightness or power", async () => {
+  const x = setup(),
+    gate = deferred<void>();
+  x.client.value.desired.temperature_k = 6900;
+  x.client.value.desired.power = false;
+  x.client.onWrite = () => gate.promise;
+  x.control.motion(x.owner, x.client, "temperature", 100);
+  await until(() => x.client.writes.length === 1);
+  x.control.motion(x.owner, x.client, "temperature", 1000);
+  x.control.motion(x.owner, x.client, "temperature", -100);
+  assert.equal(x.previews.at(-1)?.desired.temperature_k, 6900);
+  gate.resolve();
+  await until(() => !x.control.busy);
+  assert.deepEqual(
+    x.client.writes.map((p) => p.temperature_k),
+    [7000, 6900],
+  );
+  assert.deepEqual(
+    x.client.writes.map((p) => p.expected_revision),
+    [7, 8],
+  );
+  assert(
+    x.client.writes.every(
+      (p) =>
+        p.mode === "white" &&
+        p.effect === "none" &&
+        p.transition_ms === 0 &&
+        p.power === undefined &&
+        p.brightness === undefined,
+    ),
+  );
+  assert.equal(x.client.maxInflight, 1);
+});
+test("temperature continuation stops on an external revision, and power supersedes pending Kelvin work", async () => {
+  const x = setup(),
+    gate = deferred<void>();
+  x.client.onWrite = () => gate.promise;
+  x.control.motion(x.owner, x.client, "temperature", 100);
+  await until(() => x.client.writes.length === 1);
+  x.control.motion(x.owner, x.client, "temperature", 100);
+  x.client.onRead = async () => {
+    x.client.value.revision++;
+  };
+  gate.resolve();
+  await until(() => !x.control.busy);
+  assert.equal(x.client.writes.length, 1);
+  assert.equal((x.failures[0] as any).status, 409);
+  const y = setup(),
+    held = deferred<void>();
+  y.client.onWrite = () => held.promise;
+  y.control.motion(y.owner, y.client, "temperature", 100);
+  await until(() => y.client.writes.length === 1);
+  y.control.motion(y.owner, y.client, "temperature", 500);
+  y.control.command(y.other, y.client, { kind: "power" });
+  held.resolve();
+  await until(() => !y.control.busy);
+  assert.deepEqual(
+    y.client.writes.map((p) => [p.temperature_k, p.power]),
+    [
+      [4600, undefined],
+      [undefined, false],
+    ],
+  );
+});

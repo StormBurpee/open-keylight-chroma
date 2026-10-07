@@ -21,7 +21,7 @@ import {
   type State,
 } from "./client.js";
 import { DeviceControl } from "./control.js";
-type Kind = "power" | "brightness" | "color" | "scene" | "lock";
+type Kind = "power" | "brightness" | "color" | "temperature" | "scene" | "lock";
 type Entry = {
   action: Action<Config>;
   settings: Config;
@@ -44,7 +44,12 @@ async function label(entry: Entry, text: string, value = 0) {
   if (!current(entry)) return;
   if (entry.action.isDial())
     await entry.action.setFeedback({
-      title: entry.kind === "color" ? "Colour · hue" : "Brightness",
+      title:
+        entry.kind === "color"
+          ? "Colour · hue"
+          : entry.kind === "temperature"
+            ? "White · temperature"
+            : "Brightness",
       value: text,
       indicator: value,
     });
@@ -56,7 +61,9 @@ async function display(entry: Entry, state: State) {
     stateLabel(entry.kind, state, entry.settings.scene ?? 1),
     entry.kind === "color"
       ? hue(state.desired.rgb) / 3.6
-      : state.desired.brightness,
+      : entry.kind === "temperature"
+        ? (state.desired.temperature_k - 3000) / 40
+        : state.desired.brightness,
   );
   if (current(entry) && entry.action.isKey() && entry.kind === "lock")
     await entry.action.setState(state.desired.recording_lock ? 1 : 0);
@@ -124,6 +131,11 @@ function hueStep(config: Config) {
   return [1, 5, 10, 15].includes(config.hueStep ?? 5)
     ? (config.hueStep ?? 5)
     : 5;
+}
+function temperatureStep(config: Config) {
+  return [50, 100, 250, 500].includes(config.temperatureStep ?? 100)
+    ? (config.temperatureStep ?? 100)
+    : 100;
 }
 async function poll() {
   await Promise.allSettled(
@@ -212,7 +224,12 @@ class Control extends SingletonAction<Config> {
                   kind: "color",
                   rgb: parseColor(entry.settings.color ?? "#FF8844"),
                 }
-              : { kind: this.kind };
+              : this.kind === "temperature"
+                ? {
+                    kind: "temperature",
+                    kelvin: entry.settings.temperature ?? 4500,
+                  }
+                : { kind: this.kind };
       this.command(entry, intent);
     } catch (error) {
       await fail(entry, error);
@@ -220,17 +237,24 @@ class Control extends SingletonAction<Config> {
   }
   override async onDialRotate(ev: DialRotateEvent<Config>) {
     const entry = entries.get(ev.action.id);
-    if (!entry || !["brightness", "color"].includes(this.kind)) return;
+    if (!entry || !["brightness", "color", "temperature"].includes(this.kind))
+      return;
     try {
       const { client, control } = connection(entry);
       control.motion(
         entry,
         client,
-        this.kind === "color" ? "hue" : "brightness",
+        this.kind === "color"
+          ? "hue"
+          : this.kind === "temperature"
+            ? "temperature"
+            : "brightness",
         ev.payload.ticks *
           (this.kind === "color"
             ? hueStep(entry.settings)
-            : Math.abs(step(entry.settings))),
+            : this.kind === "temperature"
+              ? temperatureStep(entry.settings)
+              : Math.abs(step(entry.settings))),
       );
     } catch (error) {
       await fail(entry, error);
@@ -283,7 +307,14 @@ class Control extends SingletonAction<Config> {
     }
   }
 }
-for (const kind of ["power", "brightness", "color", "scene", "lock"] as const)
+for (const kind of [
+  "power",
+  "brightness",
+  "color",
+  "temperature",
+  "scene",
+  "lock",
+] as const)
   streamDeck.actions.registerAction(new Control(kind));
 let polling = false;
 setInterval(() => {

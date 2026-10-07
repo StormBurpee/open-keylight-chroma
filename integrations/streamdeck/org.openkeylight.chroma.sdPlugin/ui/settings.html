@@ -76,6 +76,31 @@
           tap toggles power. Brightness and power are preserved.
         </p>
       </div>
+      <div id="temperature-field" hidden>
+        <label for="temperature">Key temperature · Kelvin</label>
+        <input
+          id="temperature"
+          type="number"
+          min="3000"
+          max="7000"
+          step="1"
+          value="4500"
+          inputmode="numeric"
+        />
+        <label for="temperatureStep">Dial temperature step</label>
+        <select id="temperatureStep">
+          <option value="50">50 K · fine</option>
+          <option value="100" selected>100 K</option>
+          <option value="250">250 K</option>
+          <option value="500">500 K</option>
+        </select>
+        <p class="hint">
+          Selects white light from warm 3000 K to cool 7000 K and stops any
+          effect. Power and brightness stay unchanged. Turn left for warmer,
+          right for cooler; press or tap toggles power. White temperature
+          changes are direct, without a colour fade.
+        </p>
+      </div>
       <div id="fade-field" hidden>
         <label for="fadeMs">Colour fade</label
         ><select id="fadeMs">

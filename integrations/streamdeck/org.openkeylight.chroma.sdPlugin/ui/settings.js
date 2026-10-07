@@ -20,6 +20,8 @@ function fill() {
     color: "#FF8844",
     hueStep: 5,
     fadeMs: 150,
+    temperature: 4500,
+    temperatureStep: 100,
   };
   for (const key of Object.keys(defaults))
     $(key).value = String(settings[key] ?? defaults[key]);
@@ -51,6 +53,7 @@ window.connectElgatoStreamDeckSocket = (
   $("step-field").hidden = !actionId.endsWith(".brightness");
   $("scene-field").hidden = !actionId.endsWith(".scene");
   $("color-field").hidden = !actionId.endsWith(".color");
+  $("temperature-field").hidden = !actionId.endsWith(".temperature");
   $("fade-field").hidden = ![".color", ".brightness"].some((kind) =>
     actionId.endsWith(kind),
   );
@@ -132,6 +135,8 @@ $("settings").addEventListener("submit", (event) => {
       color: $("color").value.toUpperCase(),
       hueStep: Number($("hueStep").value),
       fadeMs: Number($("fadeMs").value),
+      temperature: Number($("temperature").value),
+      temperatureStep: Number($("temperatureStep").value),
     };
     if (
       !/^#[0-9A-F]{6}$/.test(next.color) ||
@@ -139,6 +144,15 @@ $("settings").addEventListener("submit", (event) => {
       ![0, 100, 150, 200, 400].includes(next.fadeMs)
     )
       throw Error("Choose a valid colour, hue step and fade.");
+    if (
+      !Number.isInteger(next.temperature) ||
+      next.temperature < 3000 ||
+      next.temperature > 7000 ||
+      ![50, 100, 250, 500].includes(next.temperatureStep)
+    )
+      throw Error(
+        "Choose a white temperature from 3000 to 7000 K and a supported dial step.",
+      );
     pendingSave = next;
     $("save").disabled = true;
     $("check").disabled = true;
