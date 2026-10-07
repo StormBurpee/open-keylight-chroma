@@ -164,6 +164,7 @@ esp_err_t http_update(httpd_req_t *request) {
         app_unlock(); return http_error(request, 409, "An application upload is already active");
     }
     app.updating = true; app_event_locked("update", "upload.started", "Receiving application into inactive slot"); app_unlock();
+    app_mqtt_availability();
     uint64_t started_ms = app_now_ms();
     esp_ota_handle_t ota = 0; bool began = false;
     esp_err_t result = esp_ota_begin(partition, request->content_len, &ota);
@@ -213,6 +214,7 @@ esp_err_t http_update(httpd_req_t *request) {
         app_event_locked("update", "upload.verified", "Application verified; restarting into trial");
     }
     app_unlock();
+    app_mqtt_availability();
     if (result != ESP_OK) return http_error(request, result == ESP_ERR_TIMEOUT ? 408 : result == ESP_ERR_NO_MEM ? 503 : 400,
         "Update did not complete; no reboot was scheduled");
     cJSON *json = cJSON_CreateObject(); cJSON_AddBoolToObject(json, "accepted", true); cJSON_AddBoolToObject(json, "rebooting", true);

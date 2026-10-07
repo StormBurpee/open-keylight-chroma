@@ -90,6 +90,23 @@ const duration = (ms: number) => {
     m = Math.floor(ms / 60000) % 60;
   return h ? `${h}h ${m}m` : `${m}m`;
 };
+const restartLabel = (reason?: number) => {
+  if (reason === undefined) return "Not reported";
+  return (
+    [
+      "Unknown",
+      "Power on",
+      "External reset",
+      "Software restart",
+      "Firmware exception",
+      "Interrupt watchdog",
+      "Task watchdog",
+      "Watchdog",
+      "Wake from sleep",
+      "Supply dip (brownout)",
+    ][reason] || `Reset code ${reason}`
+  );
+};
 
 export default function App() {
   const [store, setStore] = useState<StudioStore | null>(null),
@@ -1175,6 +1192,10 @@ export function Studio({ store }: { store: StudioStore }) {
                   <div>
                     <dt>Running for</dt>
                     <dd>{device ? duration(device.uptime_ms) : "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Last restart</dt>
+                    <dd>{restartLabel(device?.reset_reason)}</dd>
                   </div>
                 </dl>
                 {settings && (

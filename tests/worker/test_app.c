@@ -4,7 +4,7 @@
 #include "../../firmware/main/app.c"
 
 static unsigned checks, locked, sequence, worker_order, network_order, http_order, trial_order, journal_order, pairing, buttons, mqtt;
-static bool worker_failure;
+static bool worker_failure, button_failure;
 #define CHECK(value) do { ++checks; if (!(value)) { fprintf(stderr,"FAIL app line %u: %s\n",__LINE__,#value); exit(1); } } while (0)
 void mock_log(const char *tag,const char *format,...) { CHECK(tag && format); }
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return &locked; }
@@ -20,11 +20,11 @@ void app_pair_window(void) { ++pairing; }
 esp_err_t app_worker_start(void) { worker_order=++sequence;return worker_failure?ESP_FAIL:ESP_OK; }
 esp_err_t app_network_start(void) { network_order=++sequence;return ESP_OK; }
 esp_err_t app_http_start(void) { http_order=++sequence;return ESP_OK; }
-void app_button_start(void) { ++buttons; }
+esp_err_t app_button_start(void) { ++buttons; return button_failure ? ESP_ERR_NO_MEM : ESP_OK; }
 void app_mqtt_start(void) { ++mqtt; }
 static void reset(void) {
     memset(&app,0,sizeof(app));locked=sequence=worker_order=network_order=http_order=trial_order=pairing=buttons=mqtt=0;
-    worker_failure=false;app.mutex=&locked;app.desired=kl_state_default();
+    worker_failure=button_failure=false;app.mutex=&locked;app.desired=kl_state_default();
 }
 int main(void) {
     for(unsigned failure=0;failure<2;++failure) {
@@ -33,6 +33,9 @@ int main(void) {
         CHECK(http_order && pairing==1 && buttons==1 && mqtt==1 && !locked);
         if(failure)CHECK(!strcmp(app.controller_status,"fault") && !app.controller_ready);
     }
+    reset();button_failure=true;app_main();
+    CHECK(http_order && mqtt==1 && buttons==1 && !locked && app.history_sequence==1);
+    CHECK(!strcmp(app.history[0].event,"startup.failed") && !strcmp(app.history[0].actor,"button"));
     reset();kl_state original=app.desired;
     const uint32_t fields[]={KL_POWER,KL_MODE,KL_BRIGHTNESS,KL_TEMPERATURE,KL_RGB,KL_EFFECT};
     for(unsigned i=0;i<sizeof(fields)/sizeof(fields[0]);++i) {

@@ -25,6 +25,7 @@ export type Device = {
   api_version: 1;
   trial_pending?: boolean;
   uptime_ms: number;
+  reset_reason?: number;
   network: { connected: boolean; rssi: number; ip: string };
   controller: {
     connected: boolean;

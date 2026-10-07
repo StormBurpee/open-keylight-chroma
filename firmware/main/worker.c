@@ -3,6 +3,7 @@
 #include "output_policy.h"
 #include "controller_worker.h"
 #include "update_indicator_output.h"
+#include "esp_system.h"
 #include "freertos/task.h"
 #include <stdio.h>
 #include <string.h>
@@ -20,6 +21,10 @@ static struct {
     bool confirmation_uncertain;
     okl_controller_status status;
 } lifecycle;
+static struct {
+    bool required, attempted, failed;
+    okl_result error;
+} brownout_recovery;
 #define CONTROLLER_PART_ID UINT32_C(0x0000bc40)
 #define HEALTH_INTERVAL_MS UINT64_C(1000)
 
@@ -73,8 +78,12 @@ static void fault(okl_result result, bool fresh_mismatch) {
         app.controller_ready = false;
         snprintf(app.controller_status, sizeof(app.controller_status), "fault");
     }
-    app_event_locked("controller", "command.failed", app.error);
+    if (brownout_recovery.failed) {
+        snprintf(app.error, sizeof(app.error), "Brownout recovery Off was not verified (%u); no retry this boot", (unsigned)result);
+        app_event_locked("controller", "brownout.recovery_failed", app.error);
+    } else app_event_locked("controller", "command.failed", app.error);
     app_unlock();
+    app_mqtt_availability();
 }
 
 static kl_frame observed_frame(const okl_light_state *state) {
@@ -217,10 +226,31 @@ static void lifecycle_observed(const char *status, bool connected) {
             "Unsupported controller identity or readiness; lighting is disabled");
     }
     app_unlock();
+    app_mqtt_availability();
 }
 
-static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision, bool publish_ready,
-                            const okl_firmware_version *expected_version) {
+static okl_result brownout_off(kl_frame *current) {
+    /* This is power-failure recovery, not a diagnosis of the supply fault.
+     * Do not first import the controller's retained high-output state. */
+    brownout_recovery.attempted = true;
+    app_lock();
+    app_event_locked("controller", "brownout.off_started", "Brownout reset; requesting Off once before enabling controls");
+    app_unlock();
+    kl_state off = kl_state_default(); off.power = false;
+    okl_result result = kl_output_prepare(&off, false, NULL, &native_effect, execute, NULL);
+    okl_light_state state;
+    if (result == OKL_OK) result = okl_nxp_read_state(&nxp, &state, nxp.transport.now_us(NULL) + 800000);
+    if (result == OKL_OK && (state.white_brightness != 0 || state.effect != 0)) result = OKL_VERIFY;
+    if (result == OKL_OK) {
+        native_effect = 0;
+        *current = observed_frame(&state);
+        publish_native(&state, false, 0);
+    }
+    return result;
+}
+
+static okl_result bootstrap_controller(kl_frame *current, uint32_t *seen_revision, bool publish_ready,
+                                       const okl_firmware_version *expected_version) {
     okl_reply reply; okl_firmware_version version;
     okl_controller_status status = {0}; uint32_t part;
     bool mismatch = false, admission_claimed = false;
@@ -270,7 +300,8 @@ static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision, bool pub
     lifecycle_observed("starting", true);
     result = admission_claimed ? OKL_OK : okl_nxp_claim(&nxp, (const uint8_t *)"Open Keylight", 13,
                                                       nxp.transport.now_us(NULL) + 600000);
-    if (result == OKL_OK) result = read_and_publish(true, NULL, 0, &mismatch, current);
+    if (result == OKL_OK) result = brownout_recovery.required ? brownout_off(current) :
+        read_and_publish(true, NULL, 0, &mismatch, current);
     if (result == OKL_OK && lifecycle.backend == CONTROLLER_ORIGINAL) {
         result = controller_status(&status);
         if (result == OKL_OK && !lighting_status(&status)) result = OKL_VERIFY;
@@ -301,6 +332,12 @@ static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision, bool pub
     snprintf(app.controller_status, sizeof(app.controller_status), "%s", publish_ready ? "ready" : "starting");
     app.controller_trial_confirmed = lifecycle.backend == CONTROLLER_ORIGINAL && lifecycle.status.trial_confirmed;
     app.controller_last_health_ms = app_now_ms();
+    if (brownout_recovery.required) {
+        app.desired = app.reported;
+        app.reported_revision = app.completed_revision = app.output_revision;
+        snprintf(app.operation, sizeof(app.operation), "idle"); app.error[0] = 0;
+        app_event_locked("controller", "brownout.off_verified", "Off verified after brownout; previous output was not resumed");
+    }
     if (app.output_revision == 0) { snprintf(app.operation, sizeof(app.operation), "idle"); app.error[0] = 0; }
     if (publish_ready) app_event_locked("controller", "controller.ready", lifecycle.backend == CONTROLLER_LEGACY ?
         "Legacy 1.3 controller; no original trial confirmation" : "Original controller identity and trial verified");
@@ -308,6 +345,17 @@ static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision, bool pub
     return OKL_OK;
 admission_failed:
     return admission_claimed ? release_if_synchronized(result) : result;
+}
+
+static okl_result bootstrap(kl_frame *current, uint32_t *seen_revision, bool publish_ready,
+                            const okl_firmware_version *expected_version) {
+    if (brownout_recovery.failed) return brownout_recovery.error;
+    okl_result result = bootstrap_controller(current, seen_revision, publish_ready, expected_version);
+    if (brownout_recovery.required) {
+        if (result == OKL_OK) brownout_recovery.required = false;
+        else { brownout_recovery.failed = true; brownout_recovery.error = result; }
+    }
+    return result;
 }
 
 static okl_result health(void) {
@@ -413,7 +461,7 @@ static void worker_task(void *unused) {
         /* A receiving reservation (including ESP OTA) still permits the
          * already accepted Off command and ordinary health. Only the taken
          * synchronous controller job excludes all other SPI work. */
-        if (app_controller_update_blocked()) {
+        if (app_controller_update_blocked() || brownout_recovery.failed) {
             rendering = false; vTaskDelay(pdMS_TO_TICKS(10)); continue;
         }
         app_lock(); bool ready = app.controller_ready; app_unlock();
@@ -546,6 +594,8 @@ static void worker_task(void *unused) {
 esp_err_t app_worker_start(void) {
     memset(&lifecycle, 0, sizeof(lifecycle));
     memset(&color_intent, 0, sizeof(color_intent));
+    memset(&brownout_recovery, 0, sizeof(brownout_recovery));
+    brownout_recovery.required = esp_reset_reason() == ESP_RST_BROWNOUT;
     if (!app_controller_update_blocked()) {
         lifecycle_observed("starting", false);
         esp_err_t result = app_nxp_transport_init(&nxp, app.mac);

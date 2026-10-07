@@ -148,6 +148,7 @@ esp_err_t app_controller_update_init(void) {
             "Controller update journal unavailable or invalid; explicit recovery required");
     }
     app_unlock();
+    app_mqtt_availability();
     return ESP_OK;
 }
 
@@ -164,7 +165,7 @@ int app_controller_recovery_begin(uint32_t expected_job_id, bool acknowledged) {
     job.recovery_only = true; job.state = JOB_QUEUED; app.updating = true;
     job.error[0] = 0; memset(&job.diagnostic, 0, sizeof(job.diagnostic));
     app_event_locked("owner", "controller.recovery.queued", "Power-cycle acknowledged; explicit read-only classification queued");
-    app_unlock(); return 202;
+    app_unlock(); app_mqtt_availability(); return 202;
 }
 
 int app_controller_update_begin(uint32_t *id) {
@@ -206,7 +207,7 @@ int app_controller_update_begin_mode(uint32_t *id, uint8_t profile) {
     app.updating = true;
     app_event_locked("update", "controller.receiving", "Receiving controller package; no SPI mutation started");
     *id = job.id;
-    app_unlock(); return 200;
+    app_unlock(); app_mqtt_availability(); return 200;
 }
 
 int app_controller_update_submit(uint32_t id, uint8_t *package, size_t size) {
@@ -231,6 +232,7 @@ void app_controller_update_cancel_upload(uint32_t id) {
         app_event_locked("update", "controller.cancelled", "Controller upload cancelled before admission");
     }
     app_unlock();
+    app_mqtt_availability();
 }
 
 bool app_controller_update_take(app_controller_job *out) {
@@ -251,7 +253,9 @@ bool app_controller_update_take(app_controller_job *out) {
         app.controller_ready = false; app.reported_valid = false; app.reported_fields = 0;
         snprintf(app.operation, sizeof(app.operation), "pending");
     }
-    app_unlock(); return available;
+    app_unlock();
+    if (available) app_mqtt_availability();
+    return available;
 }
 
 bool app_controller_recovery_finish(uint32_t id, const app_controller_worker_outcome *outcome) {
@@ -279,7 +283,7 @@ bool app_controller_recovery_finish(uint32_t id, const app_controller_worker_out
     app_event_locked("owner", resident || cleared ? "controller.recovered" : "controller.recovery.failed",
         resident ? "Fresh resident verified; submit a new explicit package" :
         cleared ? "Unchanged legacy application verified Off; ordinary bootstrap may resume" : job.error);
-    app_unlock(); return cleared;
+    app_unlock(); app_mqtt_availability(); return cleared;
 }
 
 void app_controller_update_progress(uint32_t id, const okl_loader_audit *audit) {
@@ -300,7 +304,9 @@ int app_controller_update_persist(uint32_t id, const okl_loader_audit *audit) {
     bool saved = encode_journal(record, audit) && write_journal(record) == ESP_OK;
     job.audit = *audit;
     if (!saved) disable_locked("Controller update journal write failed; explicit recovery required");
-    app_unlock(); return saved ? 0 : -1;
+    app_unlock();
+    if (!saved) app_mqtt_availability();
+    return saved ? 0 : -1;
 }
 
 bool app_controller_update_finish(uint32_t id, const okl_loader_audit *audit,
@@ -344,6 +350,7 @@ bool app_controller_update_finish(uint32_t id, const okl_loader_audit *audit,
     app_event_locked("update", complete ? "controller.updated" : "controller.unresolved",
         complete ? "Controller image verified and typed trial confirmed" : job.error);
     app_unlock();
+    app_mqtt_availability();
     free(package);
     return complete;
 }
@@ -407,7 +414,7 @@ void app_controller_update_diagnostic_finish(uint32_t id, const okl_loader_audit
     job.package = NULL; job.image.package = NULL; job.image.size = 0; app.updating = false;
     app_event_locked("update", proof ? "controller.diagnostic" : "controller.unresolved", proof ?
         "Diagnostic register record and resident return verified; explicit next package required" : job.error);
-    app_unlock(); free(package);
+    app_unlock(); app_mqtt_availability(); free(package);
 }
 
 static bool read_only_failure(const okl_loader_audit *a) {
@@ -453,6 +460,7 @@ bool app_controller_update_reject(uint32_t id, const okl_loader_audit *audit,
     app.updating = false;
     app_event_locked("update", cleared ? "controller.rejected" : "controller.unresolved", job.error);
     app_unlock();
+    app_mqtt_availability();
     free(package);
     return cleared;
 }

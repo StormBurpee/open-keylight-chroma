@@ -18,6 +18,20 @@ async function setup(change?: (api: DemoTransport) => void) {
   return { api, store, user: userEvent.setup() };
 }
 describe("studio controls", () => {
+  it.each([
+    [9, "Supply dip (brownout)"],
+    [3, "Software restart"],
+    [0, "Unknown"],
+    [31, "Reset code 31"],
+    [undefined, "Not reported"],
+  ] as const)("reports the last restart reason %s without changing output", async (reason, label) => {
+    const { api, user } = await setup((api) => { api.device.reset_reason = reason; });
+    const request = vi.spyOn(api, "request");
+    await user.click(screen.getByRole("tab", { name: "System" }));
+    expect(screen.getByText("Last restart").nextElementSibling).toHaveTextContent(label);
+    expect(request.mock.calls.filter(([method]) => method !== "GET")).toEqual([]);
+  });
+
   it("keeps colour encoding in System and applies it without rewriting the selected colour", async () => {
     const { api, user } = await setup();
     expect(screen.queryByLabelText("Colour rendering")).not.toBeInTheDocument();

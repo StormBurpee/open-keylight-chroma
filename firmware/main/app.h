@@ -72,7 +72,9 @@ esp_err_t app_http_start(void);
 esp_err_t app_worker_start(void);
 void app_mqtt_start(void);
 void app_mqtt_publish(void);
-void app_button_start(void);
+/* Queue cached controller availability; call after releasing app.mutex. No SPI. */
+void app_mqtt_availability(void);
+esp_err_t app_button_start(void);
 /* Receiving reservations own app.updating. Submit transfers the immutable
  * package only on 202; the caller frees it on all other outcomes. */
 int app_controller_update_begin(uint32_t *job_id);

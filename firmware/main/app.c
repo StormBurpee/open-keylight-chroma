@@ -77,6 +77,12 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(app_network_start());
     ESP_ERROR_CHECK(app_http_start());
-    app_button_start();
+    esp_err_t button = app_button_start();
+    if (button != ESP_OK) {
+        ESP_LOGE("keylight", "Physical button unavailable: %s", esp_err_to_name(button));
+        app_lock();
+        app_event_locked("button", "startup.failed", "Physical button unavailable; dashboard remains available");
+        app_unlock();
+    }
     app_mqtt_start();
 }

@@ -5,11 +5,8 @@
 
 static void button_task(void *unused) {
     (void)unused;
-    gpio_config_t config = {.pin_bit_mask = 1ULL << 34, .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE, .intr_type = GPIO_INTR_DISABLE};
-    gpio_config(&config);
-    okl_button button; okl_button_init(&button, gpio_get_level(34) == 0, app_now_ms());
     bool recovery_held = gpio_get_level(34) == 0;
+    okl_button button; okl_button_init(&button, recovery_held, app_now_ms());
     uint64_t recovery_started = app_now_ms();
     unsigned scene_index = 0;
     for (;;) {
@@ -32,11 +29,18 @@ static void button_task(void *unused) {
                 for (unsigned i = 0; i < KL_SCENES; i++) {
                     unsigned index = (scene_index + i) % KL_SCENES;
                     int result = app_activate_scene(index, "button", 0, false);
-                    if (result != 404) { scene_index = (index + 1) % KL_SCENES; break; }
+                    if (result == 202) { scene_index = (index + 1) % KL_SCENES; break; }
+                    if (result != 404) break;
                 }
             }
         }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
-void app_button_start(void) { xTaskCreate(button_task, "button", 3072, NULL, 5, NULL); }
+esp_err_t app_button_start(void) {
+    gpio_config_t config = {.pin_bit_mask = 1ULL << 34, .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE, .intr_type = GPIO_INTR_DISABLE};
+    esp_err_t result = gpio_config(&config);
+    if (result != ESP_OK) return result;
+    return xTaskCreate(button_task, "button", 3072, NULL, 5, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+}

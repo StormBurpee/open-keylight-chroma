@@ -40,6 +40,7 @@ extern app_context app;
 uint64_t app_now_ms(void);
 void app_lock(void);
 void app_unlock(void);
+void app_mqtt_availability(void);
 void app_event_locked(const char *, const char *, const char *);
 const char *esp_err_to_name(esp_err_t);
 const esp_app_desc_t *esp_app_get_description(void);

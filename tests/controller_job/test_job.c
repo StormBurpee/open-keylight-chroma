@@ -5,7 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-static unsigned checks, frees, locked, nvs_calls;
+static unsigned checks, frees, locked, nvs_calls, availability_calls;
+static bool availability_ready;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "line %u: %s\n", __LINE__, #x); exit(1); } } while (0)
 static void job_free(void *pointer) { CHECK(pointer != NULL); ++frees; free(pointer); }
 #define free job_free
@@ -25,6 +26,10 @@ static uint64_t elapsed_ms;
 
 void app_lock(void) { CHECK(!locked); locked = 1; }
 void app_unlock(void) { CHECK(locked == 1); locked = 0; }
+void app_mqtt_availability(void) {
+    CHECK(!locked); ++availability_calls;
+    availability_ready=app.controller_ready && app.controller_connected && !app.updating && !app_controller_update_blocked();
+}
 uint64_t app_now_ms(void) { return elapsed_ms; }
 int esp_reset_reason(void) { return reset_reason; }
 void app_event_locked(const char *actor, const char *event, const char *detail) {
@@ -84,6 +89,7 @@ static void reset(bool retain_disk) {
     CHECK(!locked);
     if (job.package) free(job.package); /* Simulated reset discards volatile ownership. */
     memset(&job, 0, sizeof(job)); memset(&app, 0, sizeof(app));
+    availability_calls=0;availability_ready=false;
     atomic_store(&blocked, true); ready(); frees = 0; nvs_calls = 0;
     fail_open = fail_read = fail_set = fail_erase = fail_commit = fail_hash = 0;
     dirty = false; commit_despite_error = false;
@@ -535,7 +541,9 @@ static void recovery_tests(void) {
     reset_reason=ESP_RST_POWERON;elapsed_ms=180000;CHECK(app_controller_recovery_begin(id,true)==503);
     elapsed_ms=179999;app.updating=true;CHECK(app_controller_recovery_begin(id,true)==409);app.updating=false;
     CHECK(nvs_calls==calls && disk_present && !job.recovery_only);
+    unsigned availability_before=availability_calls;
     CHECK(app_controller_recovery_begin(id,true)==202);
+    CHECK(availability_calls==availability_before+1 && !availability_ready);
     CHECK(app_controller_recovery_begin(id,true)==409);
     app_controller_job j;CHECK(app_controller_update_take(&j));
     CHECK(j.recovery_only && j.allow_legacy_reconcile && !j.package && j.id==id);
@@ -544,7 +552,9 @@ static void recovery_tests(void) {
     app_controller_worker_outcome proof={.synchronized=true,.resident_proof_job_id=id};
     CHECK(!app_controller_recovery_finish(id+1,&proof));
     CHECK(app.updating && job.state==JOB_RUNNING);
+    availability_before=availability_calls;
     CHECK(!app_controller_recovery_finish(id,&proof));
+    CHECK(availability_calls==availability_before+1 && !availability_ready);
     CHECK(!app.updating && disk_present && app_controller_update_blocked() && job.resident_proof_job_id==id);
     CHECK(nvs_calls==calls && !frees);
     CHECK(app_controller_recovery_begin(id,true)==503);
@@ -601,7 +611,23 @@ static void recovery_tests(void) {
         CHECK(app_controller_recovery_begin(id,true)!=202);
     }
 }
+static void availability_tests(void) {
+    initialize(); app.controller_connected=true;
+    uint32_t id;unsigned before=availability_calls;
+    CHECK(app_controller_update_begin(&id)==200);
+    CHECK(availability_calls==before+1 && !availability_ready);
+    before=availability_calls;app_controller_update_cancel_upload(id);
+    CHECK(availability_calls==before+1 && availability_ready);
+    app_controller_job active=running();CHECK(!availability_ready);
+    okl_loader_audit a=audit_for(&active);before=availability_calls;fail_set=1;
+    CHECK(app_controller_update_persist(active.id,&a)==-1);
+    CHECK(availability_calls==before+1 && !availability_ready);
+    before=availability_calls;
+    CHECK(!app_controller_update_finish(active.id,&a,OKL_LOADER_IO,false,"injected"));
+    CHECK(availability_calls==before+1 && !availability_ready && !app.updating);
+}
 int main(void) {
+    availability_tests();
     admission_tests(); package_tests(); persistence_tests(); reboot_tests(); finish_tests(); rejection_tests(); diagnostic_tests();low_diagnostic_tests();
     recovery_tests();reset(false); CHECK(!locked);
     printf("controller job: %u assertions passed\n", checks);

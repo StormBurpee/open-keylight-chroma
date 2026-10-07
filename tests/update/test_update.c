@@ -5,7 +5,8 @@
 #include <string.h>
 #include "../../firmware/main/update.c"
 
-static unsigned assertions;
+static unsigned assertions, availability_calls;
+static bool availability_updating;
 #define CHECK(x) do { ++assertions; if (!(x)) { fprintf(stderr, "%s:%u: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 app_context app;
 static uint64_t now_ms, begin_delay, recv_delay, write_delay, end_delay, create_delay;
@@ -39,6 +40,7 @@ static void indicator_receiving(unsigned bytes) {
     CHECK(kl_update_indicator_progress(&snapshot) <= KL_UPDATE_PROGRESS_RECEIVED);
 }
 
+void app_mqtt_availability(void) { CHECK(!locked); ++availability_calls; availability_updating=app.updating; }
 uint64_t app_now_ms(void) { return now_ms; }
 void app_lock(void) { CHECK(!locked); locked = 1; }
 void app_unlock(void) { CHECK(locked); locked = 0; }
@@ -175,6 +177,7 @@ void mbedtls_sha256_free(mbedtls_sha256_context *sha) { (void)sha; }
 
 static void reset(void) {
     CHECK(!locked); memset(&app, 0, sizeof(app));
+    availability_calls=0;availability_updating=false;
     now_ms = 100; begin_delay = recv_delay = write_delay = end_delay = create_delay = 0;
     nvs_failure = create_failure = boot_failure = sha_failure = socket_failure = ota_failure = 0;
     recv_failure = bad_digest = header_failure = accepted_present = partition_missing = 0;
@@ -226,6 +229,7 @@ static void trial_tests(void) {
 static void upload_tests(void) {
     httpd_req_t request = {8193};
     reset(); accepted(); CHECK(http_update(&request) == ESP_OK);
+    CHECK(availability_calls==2 && availability_updating);
     CHECK(response_status == 202 && hash_bytes == request.content_len && write_calls == 5);
     CHECK(end_calls == 1 && !abort_calls && boot_calls == 1 && notify_calls == 1 && app.updating);
     CHECK(last_timeout.tv_sec == 5 && !last_timeout.tv_usec);
@@ -243,6 +247,7 @@ static void upload_tests(void) {
         else if (fault == 16) bad_digest = 1;
         else create_failure = 1;
         CHECK(http_update(&request) != ESP_OK); CHECK(!boot_calls && !notify_calls);
+        CHECK(!availability_calls || (availability_calls==2 && !availability_updating));
         CHECK(fault == 7 || !app.updating); CHECK(fault != 17 || (response_status == 503 && end_calls == 1));
         kl_update_indicator snapshot = indicator_snapshot();
         CHECK(snapshot.phase == (begin_calls ? KL_UPDATE_FAILED : KL_UPDATE_IDLE));

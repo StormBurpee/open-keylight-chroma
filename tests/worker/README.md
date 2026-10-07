@@ -24,3 +24,13 @@ The adapter tests execute `controller_worker.c` against bounded protocol/RTOS mo
 An unresolved resident response remains unresolved: the read-only observer cannot prove a loader's RAM is fresh. Interrupted journals currently require an explicit recovery workflow that is not implemented here. No flash, GPIO writes or device requests occur in these tests.
 
 The loader's `dark_state_verified` field means effect0 and white-brightness0 were read back. Original rendering maps those settings to all-off PWM matches; legacy effect0 selects a black target and can still be completing a fade. Neither a getter nor these host tests measures instantaneous pin levels, optical darkness or completion of that legacy fade.
+
+
+Brownout startup cases use the actual worker and output policy. Only reset reason
+ESP_RST_BROWNOUT invokes native Off after the normal identity/ownership gate.
+Both setters must succeed, fresh getters must report white0/effect0, and release
+must complete before readiness. Claim, setter, ambiguous transport, readback and
+release failures are held unavailable without a second startup attempt. Invalid
+role/part/version receives no output writes. Ordinary reset reasons preserve
+retained-output adoption. These host checks prove sequencing and failure policy,
+not optical darkness or the cause of a supply-voltage drop.

@@ -15,7 +15,7 @@ compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
 if not compiler:
     raise SystemExit("Set CC to an AddressSanitizer-capable C compiler")
 stubs = OUT / "stubs"
-for header in ("esp_err.h", "cJSON.h", "freertos/FreeRTOS.h", "freertos/semphr.h", "freertos/task.h"):
+for header in ("esp_err.h", "esp_system.h", "cJSON.h", "freertos/FreeRTOS.h", "freertos/semphr.h", "freertos/task.h"):
     path = stubs / header
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('#include "worker_mocks.h"\n')

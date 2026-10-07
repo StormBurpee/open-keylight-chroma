@@ -1,5 +1,6 @@
 #include "app.h"
 #include "output_policy.h"
+#include "controller_job.h"
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
 #include "mqtt_client.h"
@@ -10,20 +11,65 @@
 
 static esp_mqtt_client_handle_t client;
 static char state_topic[80], command_topic[80], availability_topic[80];
+static bool availability_known, availability_online;
+enum { PUBLISH_AVAILABILITY = 1, PUBLISH_STATE = 2 };
+static unsigned pending_publications;
+static bool notification_queued;
+
+static void notify_publication(unsigned flags) {
+    app_lock();
+    if (client && app.mqtt_connected) {
+        pending_publications |= flags;
+        if (!notification_queued) {
+            esp_mqtt_event_t event = {0};
+            /* IDF posts this event with zero wait and without its MQTT API lock.
+             * All enqueue calls stay in the MQTT callback: the client invokes
+             * callbacks while holding that lock, so a worker must not invert
+             * it with app.mutex. If full, the next event consumes pending flags. */
+            notification_queued = esp_mqtt_dispatch_custom_event(client, &event) == ESP_OK;
+        }
+    }
+    app_unlock();
+}
+
+void app_mqtt_availability(void) { notify_publication(PUBLISH_AVAILABILITY); }
+void app_mqtt_publish(void) { notify_publication(PUBLISH_AVAILABILITY | PUBLISH_STATE); }
+
+/* Called with app.mutex held; journal blocking is an atomic cached read. */
+static bool controller_available(void) {
+    return app.controller_ready && app.controller_connected && !app.updating
+        && !app_controller_update_blocked();
+}
+
+static void publish_availability(void) {
+    app_lock();
+    if (client && app.mqtt_connected) {
+        bool online = controller_available();
+        /* Serialize the readiness snapshot with enqueue so a late publisher cannot
+         * replace a newer offline announcement with stale online state. */
+        if ((!availability_known || online != availability_online)
+            && esp_mqtt_client_enqueue(client, availability_topic, online ? "online" : "offline",
+                0, 1, true, true) >= 0) {
+            availability_online = online;
+            availability_known = true;
+        }
+    }
+    app_unlock();
+}
 
 static void publish_json(const char *topic, cJSON *json, bool retain) {
     char *text = cJSON_PrintUnformatted(json); cJSON_Delete(json);
     if (text) { esp_mqtt_client_enqueue(client, topic, text, 0, 1, retain, true); free(text); }
 }
 
-void app_mqtt_publish(void) {
+static void publish_state(void) {
     app_lock();
     kl_state state = app.reported;
     uint32_t fields = app.reported_fields, revision = app.reported_revision;
-    bool ready = app.mqtt_connected && kl_report_publishable(app.controller_connected, app.reported_valid,
+    bool ready = client && app.mqtt_connected && controller_available() && kl_report_publishable(app.controller_connected, app.reported_valid,
         !strcmp(app.operation, "idle"), app.output_revision, revision, fields);
     app_unlock();
-    if (!client || !ready) return;
+    if (!ready) return;
     cJSON *json = cJSON_CreateObject();
     cJSON_AddStringToObject(json, "state", state.power ? "ON" : "OFF");
     if (fields & KL_BRIGHTNESS) cJSON_AddNumberToObject(json, "brightness", state.brightness);
@@ -38,12 +84,22 @@ void app_mqtt_publish(void) {
     if (!text) return;
     /* Close the snapshot/build race: a newer output intent must not be published as confirmed. */
     app_lock();
-    ready = app.mqtt_connected && app.reported_revision == revision && app.reported_fields == fields
+    ready = app.mqtt_connected && controller_available() && app.reported_revision == revision && app.reported_fields == fields
         && kl_report_publishable(app.controller_connected, app.reported_valid, !strcmp(app.operation, "idle"),
             app.output_revision, revision, fields);
     if (ready) esp_mqtt_client_enqueue(client, state_topic, text, 0, 1, true, true);
     app_unlock();
     free(text);
+}
+
+static void flush_publications(void) {
+    app_lock();
+    unsigned pending = pending_publications;
+    pending_publications = 0;
+    notification_queued = false;
+    app_unlock();
+    publish_availability();
+    if (pending & PUBLISH_STATE) publish_state();
 }
 
 static void discovery(void) {
@@ -109,19 +165,24 @@ static void mqtt_event(void *unused, esp_event_base_t base, int32_t id, void *da
     (void)unused; (void)base;
     esp_mqtt_event_handle_t event = data;
     if (id == MQTT_EVENT_CONNECTED) {
-        app_lock(); app.mqtt_connected = true; app_event_locked("mqtt", "broker.connected", "Home Assistant discovery published"); app_unlock();
+        app_lock(); app.mqtt_connected = true; availability_known = false;
+        pending_publications |= PUBLISH_STATE;
+        app_event_locked("mqtt", "broker.connected", "Home Assistant discovery published"); app_unlock();
         esp_mqtt_client_subscribe(client, command_topic, 1);
         esp_mqtt_client_subscribe(client, "homeassistant/status", 1);
         discovery();
-        esp_mqtt_client_enqueue(client, availability_topic, "online", 0, 1, true, true); app_mqtt_publish();
     } else if (id == MQTT_EVENT_DISCONNECTED) {
-        app_lock(); app.mqtt_connected = false; app_unlock();
+        app_lock(); app.mqtt_connected = false; availability_known = false; app_unlock();
     } else if (id == MQTT_EVENT_DATA && event->current_data_offset == 0 && event->total_data_len == event->data_len) {
         if (event->topic_len == strlen(command_topic) && !memcmp(event->topic, command_topic, event->topic_len)) {
             if (!event->retain) command(event->data, event->data_len);
         } else if (event->topic_len == 20 && !memcmp(event->topic, "homeassistant/status", 20)
-            && event->data_len == 6 && !memcmp(event->data, "online", 6)) { discovery(); app_mqtt_publish(); }
+            && event->data_len == 6 && !memcmp(event->data, "online", 6)) {
+            app_lock(); availability_known = false; pending_publications |= PUBLISH_STATE; app_unlock();
+            discovery();
+        }
     }
+    flush_publications();
 }
 
 void app_mqtt_start(void) {
@@ -139,6 +200,7 @@ void app_mqtt_start(void) {
         .session.last_will.qos = 1, .session.last_will.retain = true,
         .buffer.size = 1024, .outbox.limit = 8192
     };
-    client = esp_mqtt_client_init(&mqtt);
+    esp_mqtt_client_handle_t created = esp_mqtt_client_init(&mqtt);
+    app_lock(); client = created; availability_known = false; app_unlock();
     if (client) { esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event, NULL); esp_mqtt_client_start(client); }
 }

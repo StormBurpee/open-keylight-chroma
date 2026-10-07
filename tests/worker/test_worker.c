@@ -34,6 +34,8 @@ static jmp_buf finished;
 static void (*task_entry)(void *);
 static uint64_t now;
 static unsigned locks, claims, releases, reads, versions, publications, faults, recoveries;
+static unsigned availability_calls;
+static bool availability_ready;
 static unsigned writes, delays, stop_after, fail_write, delay_step;
 static okl_request sent[4096];
 static okl_light_state controller;
@@ -64,6 +66,10 @@ static bool upload_success;
 static unsigned queued_duration, frame_latency, encoding_at, stolen_at, corrupt_read, owner_reads;
 static okl_result owner_result;
 static bool brightness_only_on_read;
+static int boot_reason;
+static unsigned brownout_started, brownout_verified, brownout_failed, brownout_bad_read;
+
+int esp_reset_reason(void) { return boot_reason; }
 
 void app_update_indicator_snapshot(kl_update_indicator *out) { CHECK(!locks); *out = upload; }
 
@@ -132,8 +138,16 @@ void app_unlock(void) { CHECK(locks == 1); --locks; }
 void app_event_locked(const char *actor, const char *event, const char *detail) {
     CHECK(locks == 1 && actor && event && detail);
     if (!strcmp(event, "command.failed")) ++faults;
+    if (!strcmp(event, "brownout.off_started")) ++brownout_started;
+    if (!strcmp(event, "brownout.off_verified")) ++brownout_verified;
+    if (!strcmp(event, "brownout.recovery_failed")) ++brownout_failed;
+}
+void app_mqtt_availability(void) {
+    CHECK(!locks); ++availability_calls;
+    availability_ready=app.controller_ready && app.controller_connected && !app.updating && !journal_blocked;
 }
 void app_mqtt_publish(void) {
+    app_mqtt_availability();
     CHECK(!locks); ++publications;
     /* A real API mutation is admitted only after the worker opens readiness. */
     if (queued_on_read && publications == 1 && app.controller_ready) {
@@ -203,6 +217,8 @@ static okl_result worker_read(okl_nxp *driver, okl_light_state *state, uint64_t 
     if (read_result == OKL_OK) {
         *state = controller;
         if (reads == corrupt_read) state->colors[0] ^= 1;
+        if (brownout_bad_read == 1) state->white_brightness = 1;
+        if (brownout_bad_read == 2) state->effect = 8;
     }
     return read_result;
 }
@@ -296,6 +312,7 @@ static void reset(void) {
     memset(&app, 0, sizeof(app)); app.desired = kl_state_default(); app.mac[0] = 2;
     memset(&nxp, 0, sizeof(nxp)); native_effect = 0;
     memset(sent, 0, sizeof(sent)); task_entry = NULL;
+    availability_calls=0; availability_ready=false;
     now = locks = claims = releases = reads = versions = publications = faults = recoveries = 0;
     writes = delays = fail_write = 0; stop_after = 1; delay_step = 5;
     claim_result = read_result = release_result = OKL_OK;
@@ -316,6 +333,7 @@ static void reset(void) {
     memset(&upload,0,sizeof(upload));upload_at=upload_terminal_at=off_at=0;upload_success=false;
     queued_duration=600;frame_latency=encoding_at=stolen_at=corrupt_read=owner_reads=0;owner_result=OKL_OK;
     brightness_only_on_read=false;
+    boot_reason=ESP_RST_SW;brownout_started=brownout_verified=brownout_failed=brownout_bad_read=0;
     controller = (okl_light_state){.effect = 1, .color_count = 1, .colors = {255, 0, 32},
                                   .color_brightness = 102, .temperature_kelvin = 4500};
 }
@@ -685,7 +703,64 @@ static void test_update_indicator_worker(void) {
     reset();CHECK(kl_update_indicator_begin(&upload,1000,0));journal_blocked=true;
     stop_after=5;run();CHECK(!writes && !transport_inits && !claims);
 }
+static void test_availability_lifecycle(void) {
+    reset();run();CHECK(availability_calls>=3 && availability_ready);
+    unsigned before=availability_calls;fault(OKL_TIMEOUT,false);
+    CHECK(availability_calls==before+1 && !availability_ready);
+    app.controller_ready=app.controller_connected=true;before=availability_calls;
+    lifecycle_observed("diagnostic",true);CHECK(availability_calls==before+1 && !availability_ready);
+    reset();app.updating=true;run();CHECK(availability_calls>=3 && !availability_ready);
+}
+static void test_brownout_recovery(void) {
+    for (unsigned backend=0;backend<2;++backend) {
+        reset();original=backend!=0;remote_status.trial_confirmed=1;
+        boot_reason=ESP_RST_BROWNOUT;controller.white_brightness=255;controller.color_brightness=255;
+        app.desired.power=true;app.desired.effect=KL_EFFECT_AURORA;app.output_revision=12;
+        stop_after=8;delay_step=1000;run();
+        CHECK(writes==2 && sent[0].command==OKL_SET_WHITE_BRIGHTNESS && sent[0].arguments[2]==0);
+        CHECK(sent[1].command==OKL_SET_EFFECT && sent[1].arguments[2]==0);
+        CHECK(reads==1 && !confirmations && brownout_started==1 && brownout_verified==1 && !brownout_failed);
+        CHECK(!app.desired.power && !app.reported.power && app.reported_valid && app.controller_ready);
+        CHECK(app.reported_revision==12 && app.completed_revision==12 && !app.error[0]);
+        CHECK(!brownout_recovery.required && brownout_recovery.attempted && !brownout_recovery.failed);
+    }
+    for (unsigned failure=0;failure<10;++failure) {
+        reset();original=true;remote_status.trial_confirmed=1;boot_reason=ESP_RST_BROWNOUT;
+        stop_after=8;delay_step=1000;
+        if(failure==0) claim_result=OKL_OWNER_DENIED;
+        if(failure==1) { claim_result=OKL_TIMEOUT;poison_claim=true; }
+        if(failure>=2 && failure<=5) { fail_write=1+(failure&1);poison_write=failure>=4; }
+        if(failure==6) { read_result=OKL_TIMEOUT;poison_read=true; }
+        if(failure==7) brownout_bad_read=1;
+        if(failure==8) brownout_bad_read=2;
+        if(failure==9) release_result=OKL_IO;
+        run();
+        CHECK(!app.controller_ready && !app.reported_valid && !app.controller_connected);
+        CHECK(brownout_recovery.failed && brownout_failed==1 && !brownout_verified && !confirmations);
+        CHECK(claims==1 && versions==1 && !recoveries && writes<=2);
+        CHECK(strstr(app.error,"Brownout recovery Off") && strstr(app.error,"no retry"));
+        unsigned before=writes;kl_frame frame={0};uint32_t revision=0;
+        CHECK(bootstrap(&frame,&revision,true,NULL)!=OKL_OK && writes==before && claims==1);
+    }
+    for(unsigned invalid=0;invalid<4;++invalid) {
+        reset();original=true;boot_reason=ESP_RST_BROWNOUT;stop_after=5;delay_step=1000;
+        if(invalid==0) remote_status.role=OKL_ROLE_SPI_DIAGNOSTIC;
+        if(invalid==1) remote_status.capabilities=OKL_CAP_RECOVERY_READY;
+        if(invalid==2) part_reply^=1;
+        if(invalid==3) malformed_version=true;
+        run();CHECK(!writes && !claims && !brownout_started && !app.controller_ready && brownout_recovery.failed);
+    }
+    const int ordinary[]={0,ESP_RST_POWERON,ESP_RST_SW,7};
+    for(unsigned i=0;i<sizeof(ordinary)/sizeof(ordinary[0]);++i) {
+        reset();boot_reason=ordinary[i];controller.color_brightness=255;run();
+        CHECK(!writes && !brownout_started && !brownout_recovery.required && app.desired.power && app.controller_ready);
+    }
+    reset();original=true;controller=(okl_light_state){.temperature_kelvin=4500};boot_reason=ESP_RST_BROWNOUT;run();
+    CHECK(writes==2 && confirmations==1 && brownout_verified==1 && app.controller_ready);
+}
 int main(void) {
+    test_brownout_recovery();
+    test_availability_lifecycle();
     test_startup(); test_startup_queued_transition(); test_setup_and_frame_failures();
     test_transition_completion();
     test_canonical_color_worker();
