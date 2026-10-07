@@ -13,6 +13,7 @@ add_test(NAME worker COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/t
 add_test(NAME transport COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/transport/run_tests.py)
 add_test(NAME loader COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/loader/run_tests.py)
 add_test(NAME controller_worker COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_worker/run_tests.py)
+add_test(NAME controller_diagnostic COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/controller_diagnostic/run_tests.py)
 add_executable(test_policy tests/test_policy.c firmware/components/keylight_json/keylight_policy.c)
 target_include_directories(test_policy PRIVATE firmware/components/keylight_json/include)
 add_test(NAME policy COMMAND test_policy)
