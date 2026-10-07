@@ -7,7 +7,8 @@ typedef const char *esp_event_base_t;
 #define WIFI_EVENT ((esp_event_base_t)1)
 #define IP_EVENT ((esp_event_base_t)2)
 enum { WIFI_EVENT_STA_START = 1, WIFI_EVENT_STA_DISCONNECTED, IP_EVENT_STA_GOT_IP, ESP_EVENT_ANY_ID,
-       WIFI_AUTH_OPEN, WIFI_MODE_STA, WIFI_MODE_APSTA, WIFI_MODE_AP, WIFI_IF_AP, WIFI_IF_STA, WIFI_STORAGE_RAM, WIFI_PS_NONE };
+       WIFI_AUTH_OPEN, WIFI_MODE_STA, WIFI_MODE_APSTA, WIFI_MODE_AP, WIFI_IF_AP, WIFI_IF_STA, WIFI_STORAGE_RAM, WIFI_PS_NONE,
+       WIFI_EVENT_STA_CONNECTED, IP_EVENT_STA_LOST_IP };
 typedef struct { int id; } esp_netif_t;
 typedef struct { unsigned char ssid[32]; unsigned char password[64]; struct { bool capable, required; } pmf_cfg; } wifi_sta_config_t;
 typedef struct { unsigned char ssid[32]; unsigned ssid_len, channel, max_connection, authmode; } wifi_ap_config_t;

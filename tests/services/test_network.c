@@ -15,6 +15,10 @@ static unsigned flash_held, flash_enter_calls, flash_leave_calls, wifi_init_call
 static esp_err_t flash_failure, init_failure, start_failure;
 static wifi_config_t last_ap, last_sta;
 static esp_netif_t ap_interface, sta_interface;
+static bool radio_associated;
+static int registered_wifi_event, registered_ip_event;
+static void (*wifi_handler)(void *, esp_event_base_t, int32_t, void *);
+static void (*ip_handler)(void *, esp_event_base_t, int32_t, void *);
 static jmp_buf stop_loop;
 uint64_t app_now_ms(void) { return now_ms; }
 void app_lock(void) { CHECK(!locked); locked = 1; }
@@ -52,10 +56,20 @@ esp_err_t esp_wifi_start(void) {
 }
 esp_err_t esp_wifi_set_ps(int value) { CHECK(!flash_held && value == WIFI_PS_NONE); ++ps_calls; return ESP_OK; }
 esp_err_t esp_wifi_connect(void) { ++connect_calls; return ESP_OK; }
-esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *record) { record->rssi = -50; return app.network_connected ? ESP_OK : ESP_FAIL; }
+esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *record) { record->rssi = -50; return radio_associated ? ESP_OK : ESP_FAIL; }
 esp_err_t esp_event_handler_register(esp_event_base_t base, int event, void (*handler)(void *, esp_event_base_t, int32_t, void *), void *arg) {
     CHECK(base == WIFI_EVENT || base == IP_EVENT); CHECK(event == ESP_EVENT_ANY_ID || event == IP_EVENT_STA_GOT_IP);
-    CHECK(handler == network_event && !arg); ++handlers; return ESP_OK;
+    CHECK(handler == network_event && !arg);
+    if (base == WIFI_EVENT) { registered_wifi_event = event; wifi_handler = handler; }
+    else { registered_ip_event = event; ip_handler = handler; }
+    ++handlers; return ESP_OK;
+}
+static void deliver(esp_event_base_t base, int id, void *data) {
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) radio_associated = true;
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) radio_associated = false;
+    int subscribed = base == WIFI_EVENT ? registered_wifi_event : registered_ip_event;
+    void (*handler)(void *, esp_event_base_t, int32_t, void *) = base == WIFI_EVENT ? wifi_handler : ip_handler;
+    if (handler && (subscribed == ESP_EVENT_ANY_ID || subscribed == id)) handler(NULL, base, id, data);
 }
 esp_err_t mdns_init(void) { return ESP_OK; }
 esp_err_t mdns_hostname_set(const char *name) { CHECK(name); return ESP_OK; }
@@ -85,6 +99,8 @@ static void reset(bool configured) {
     mode = fail_mode_call = config_failure = interface_failure = task_failure = 0;
     flash_enter_calls = flash_leave_calls = wifi_init_calls = wifi_start_calls = ps_calls = fail_flash_call = 0;
     flash_failure = init_failure = start_failure = ESP_OK;
+    station_associated = radio_associated = false; registered_wifi_event = registered_ip_event = 0;
+    wifi_handler = ip_handler = NULL;
     setup_interface = NULL; setup_active = false; setup_until_ms = 0; atomic_store(&recovery_requested, false);
 }
 int main(void) {
@@ -99,7 +115,8 @@ int main(void) {
     app.pair_until_ms = 0; tick(1); CHECK(setup_active && mode == WIFI_MODE_APSTA);
     now_ms = setup_until_ms - 5001; tick(1); CHECK(setup_active);
     tick(1); CHECK(!setup_active && mode == WIFI_MODE_STA && !memcmp(&original, &app.config, sizeof(original)));
-    reset(true); app.network_connected = true; app_network_recovery_request(); tick(1); CHECK(!setup_active && !mode_calls && !connect_calls && app.rssi == -50);
+    reset(true); station_associated = radio_associated = app.network_connected = true;
+    app_network_recovery_request(); tick(1); CHECK(!setup_active && !mode_calls && !connect_calls && app.rssi == -50);
     reset(false); CHECK(app_network_start() == ESP_OK && setup_active && mode == WIFI_MODE_AP && !strcmp(app.ip, "192.168.4.1"));
     tick(40); CHECK(setup_active && !connect_calls); /* Unconfigured first-boot setup remains available. */
     for (unsigned fault = 0; fault < 4; ++fault) {
@@ -128,5 +145,31 @@ int main(void) {
     ip_event_got_ip_t address = {.ip_info.ip.byte = {192, 0, 2, 33}}; network_event(NULL, IP_EVENT, IP_EVENT_STA_GOT_IP, &address);
     CHECK(app.network_connected && !strcmp(app.ip, "192.0.2.33"));
     network_event(NULL, WIFI_EVENT, WIFI_EVENT_STA_START, NULL); CHECK(connect_calls == 1);
+
+    /* Deliver through the actual registration filter: registering GOT_IP alone
+     * must fail this regression even if the callback handles LOST_IP directly. */
+    reset(true); CHECK(app_network_start() == ESP_OK);
+    original = app.config; app.desired.brightness = 17; app.desired.rgb.r = 91;
+    kl_state light = app.desired;
+    deliver(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, NULL);
+    CHECK(station_associated && radio_associated && !app.network_connected);
+    tick(2); CHECK(!connect_calls && app.rssi == -50); /* Associated, waiting for initial DHCP. */
+    deliver(IP_EVENT, IP_EVENT_STA_GOT_IP, &address);
+    CHECK(app.network_connected && !strcmp(app.ip, "192.0.2.33"));
+    deliver(IP_EVENT, IP_EVENT_STA_LOST_IP, NULL);
+    CHECK(!app.network_connected && !app.ip[0] && station_associated && radio_associated);
+    tick(2); CHECK(!connect_calls && app.rssi == -50); /* Renewal loss is not deassociation. */
+    CHECK(!memcmp(&original, &app.config, sizeof(original)) && !memcmp(&light, &app.desired, sizeof(light)));
+    app_network_recovery_request(); tick(1);
+    CHECK(setup_active && mode == WIFI_MODE_APSTA && !connect_calls);
+    CHECK(!atomic_load(&recovery_requested));
+    address.ip_info.ip.byte[3] = 34;
+    deliver(IP_EVENT, IP_EVENT_STA_GOT_IP, &address);
+    CHECK(app.network_connected && !strcmp(app.ip, "192.0.2.34") && station_associated);
+    tick(1); CHECK(!connect_calls && setup_active);
+    deliver(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &disconnected);
+    CHECK(!app.network_connected && !app.ip[0] && !station_associated && !radio_associated);
+    tick(1); CHECK(connect_calls == 1);
+    CHECK(!memcmp(&original, &app.config, sizeof(original)) && !memcmp(&light, &app.desired, sizeof(light)));
     printf("PASS %u assertions against actual network.c\n", assertions); return 0;
 }

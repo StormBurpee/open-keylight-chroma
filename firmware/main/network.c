@@ -13,6 +13,8 @@ static atomic_bool recovery_requested;
 static esp_netif_t *setup_interface;
 static bool setup_active;
 static uint64_t setup_until_ms;
+/* Protected by app.mutex. Association may outlive a usable DHCP address. */
+static bool station_associated;
 
 void app_network_recovery_request(void) { atomic_store(&recovery_requested, true); }
 
@@ -35,18 +37,25 @@ static esp_err_t start_setup_ap(bool with_station) {
 static void network_event(void *unused, esp_event_base_t base, int32_t id, void *data) {
     (void)unused;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) esp_wifi_connect();
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        app_lock(); station_associated = true; app_unlock();
+    }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *event = data;
         char detail[64]; snprintf(detail, sizeof(detail), "Wi-Fi disconnected (reason %u); output preserved", event->reason);
-        app_lock(); app.network_connected = false;
+        app_lock(); station_associated = false; app.network_connected = false; app.ip[0] = 0;
         app_event_locked("network", "wifi.disconnected", detail); app_unlock();
         /* The reconnect task spaces retries; credentials and lighting are untouched. */
     }
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = data;
-        app_lock(); app.network_connected = true;
+        app_lock(); station_associated = true; app.network_connected = true;
         snprintf(app.ip, sizeof(app.ip), IPSTR, IP2STR(&event->ip_info.ip));
         app_event_locked("network", "wifi.connected", "Local network available"); app_unlock();
+    }
+    if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) {
+        app_lock(); app.network_connected = false; app.ip[0] = 0;
+        app_event_locked("network", "wifi.ip_lost", "Local IP address lost; DHCP recovery continues"); app_unlock();
     }
 }
 
@@ -54,7 +63,8 @@ static void reconnect_task(void *unused) {
     (void)unused;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(5000));
-        app_lock(); bool connected = app.network_connected; bool configured = app.config.ssid[0] != 0;
+        app_lock(); bool connected = app.network_connected; bool associated = station_associated;
+        bool configured = app.config.ssid[0] != 0;
         app_unlock();
         if (atomic_exchange(&recovery_requested, false) && !connected && configured) {
             esp_err_t result = start_setup_ap(true);
@@ -62,7 +72,8 @@ static void reconnect_task(void *unused) {
                 "Temporary setup network available at 192.168.4.1" : "Could not start setup network"); app_unlock();
         }
         if (setup_active && configured && app_now_ms() >= setup_until_ms && esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK) setup_active = false;
-        if (!connected && configured) esp_wifi_connect();
+        /* DHCP can recover while still associated; do not restart that link. */
+        if (!associated && configured) esp_wifi_connect();
         wifi_ap_record_t record;
         if (esp_wifi_sta_get_ap_info(&record) == ESP_OK) { app_lock(); app.rssi = record.rssi; app_unlock(); }
     }
@@ -82,7 +93,7 @@ esp_err_t app_network_start(void) {
     if (result != ESP_OK) return result;
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, network_event, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, network_event, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, network_event, NULL));
     wifi_config_t wifi = {0};
     if (app.config.ssid[0]) {
         memcpy(wifi.sta.ssid, app.config.ssid, strlen(app.config.ssid));
