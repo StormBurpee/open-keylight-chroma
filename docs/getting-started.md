@@ -8,7 +8,7 @@ Open Keylight Chroma is a development preview for a qualified reference board. B
 | --- | --- |
 | Explore the interface without a light | Run the explicitly labelled [dashboard demo](dashboard.md#build-and-preview). It sends no device requests. |
 | Build or contribute | Follow the [README build steps](../README.md#build-and-test) and automated tests. Building does not establish hardware compatibility. |
-| A factory-firmware light | Stock migration is pending. There is no qualified public one-command installer. Preserve the factory installation until a procedure for the actual board is published. |
+| A factory-firmware light | The [experimental guided migration](stock-migration.md) is available for the reviewed stock profile. It requires prepared original builds, an owner-local restore bank and observed diagnostic checks. Fresh stock-to-original hardware qualification is still pending; this is not a general installation release. |
 | An already qualified Open Keylight light | Use its embedded dashboard and authenticated application-only update flow below. Keep its known-good image and qualification record. |
 
 The ESP image, NXP application bank and controller update package are different formats. Never upload a bootloader, partition table, merged flash image, raw NXP bank or diagnostic image through the ESP firmware control. `idf.py flash` is not the existing-light migration procedure. The NXP default build is deliberately inert and must not be installed; [reference lighting](../firmware-nxp/PRODUCTION.md) and diagnostic profiles have separate acceptance requirements.

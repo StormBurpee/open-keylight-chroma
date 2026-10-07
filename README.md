@@ -75,6 +75,8 @@ The dashboard build produces a manifest of four compressed assets, including the
 
 CI produces development artifacts, not qualified releases. Its ESP archive contains only the application image, matching ELF, build metadata, asset manifest and SHA-256 checksums. It checks the image descriptor against `VERSION` so a stale CMake version cannot silently label a different build. See [artifact verification](docs/getting-started.md#development-artifacts).
 
+For the reviewed stock profile, an [experimental guided migration tool](docs/stock-migration.md) prepares a target-bound plan and preserves an audit through controller trials and ESP replacement. Its builder workflow still requires a legitimate owner-local restore bank; fresh stock-to-original qualification remains pending.
+
 For dashboard development, run `npm run dev` in `dashboard` and open the displayed URL with `?demo=1`. The demo has a persistent label, uses an isolated transport and is excluded from production device builds.
 
 ## The engineering boundary
