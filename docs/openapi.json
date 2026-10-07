@@ -3,7 +3,7 @@
   "info": {
     "title": "Open Keylight Chroma local API",
     "version": "1.0.0",
-    "description": "Contract for the original ESP application, reviewed against the handlers. This is not a hardware qualification or release claim. HTTP uses port 80 on a trusted LAN; no TLS listener or cross-origin API. Host must be the device IP, hostname, hostname.local, or setup IP 192.168.4.1, optionally followed by :80. If supplied, Origin must equal http:// plus the exact Host value. API routes accept no query parameters. Public reads expose metadata; mutations and client listing require a paired bearer token, except POST /pair. JSON bodies are 1â€“2048 bytes, read within 10 seconds; malformed, duplicate or unknown fields and NUL are rejected. String limits are UTF-8 byte limits, recorded by x-maxUtf8Bytes and x-minUtf8Bytes. JSON replies use Cache-Control: no-store and Connection: close. Errors can follow partial hardware/update work; do not infer that a failed command restored the previous state."
+    "description": "Contract for the original ESP application, reviewed against the handlers. This is not a hardware qualification or release claim. HTTP uses port 80 on a trusted LAN; no TLS listener or cross-origin API. Host must be the device IP, hostname, hostname.local, or setup IP 192.168.4.1, optionally followed by :80. If supplied, Origin must equal http:// plus the exact Host value. API routes accept no query parameters. Public reads expose metadata; mutations and client listing require a paired bearer token, except POST /pair. JSON bodies are 1–2048 bytes, read within 10 seconds; malformed, duplicate or unknown fields and NUL are rejected. String limits are UTF-8 byte limits, recorded by x-maxUtf8Bytes and x-minUtf8Bytes. JSON replies use Cache-Control: no-store and Connection: close. Errors can follow partial hardware/update work; do not infer that a failed command restored the previous state."
   },
   "servers": [
     {
@@ -831,7 +831,7 @@
       "post": {
         "operationId": "uploadApplication",
         "summary": "Verify an application image and schedule reboot",
-        "description": "Application-only OTA into the existing inactive ESP slot. Requires a confirmed current trial and no concurrent upload, otherwise 409. Exact Content-Type application/octet-stream, known Content-Length of 288â€“1572864 bytes (also within the actual slot), lowercase X-SHA256 matching the full body, and ESP image validation are required. The total upload budget is 120 seconds. Failure schedules no reboot; the inactive slot may have been modified. Never upload a bootloader, partition table, NXP image or merged flash image. 202 schedules reboot; it does not prove the new image booted. Reconnect, verify identity and operation, then confirm its 180-second trial. Do not automatically retry an ambiguous response.",
+        "description": "Application-only OTA into the existing inactive ESP slot. Requires a confirmed current trial and no concurrent upload, otherwise 409. Exact Content-Type application/octet-stream, known Content-Length of 288–1572864 bytes (also within the actual slot), lowercase X-SHA256 matching the full body, and ESP image validation are required. The total upload budget is 120 seconds. Failure schedules no reboot; the inactive slot may have been modified. Never upload a bootloader, partition table, NXP image or merged flash image. 202 schedules reboot; it does not prove the new image booted. Reconnect, verify identity and operation, then confirm its 180-second trial. Do not automatically retry an ambiguous response.",
         "responses": {
           "202": {
             "description": "Verify an application image and schedule reboot",
@@ -935,6 +935,95 @@
             "description": "Lowercase SHA-256 of the exact complete application binary. This verifies integrity against the supplied digest, not publisher authenticity."
           }
         ]
+      }
+    },
+    "/controller/update": {
+      "get": {
+        "operationId": "getControllerUpdate",
+        "summary": "Read the cached controller update job",
+        "description": "Public LAN metadata. This endpoint does not probe SPI. Counters describe staging transfer and verification, not overall installation progress. completed requires a matching fresh application, typed controller confirmation and durable journal clearing. Recovery-required state never triggers an automatic retry or restore. There is no recovery/reset endpoint in this version.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Cached job state and audit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControllerUpdateStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "uploadControllerApplication",
+        "summary": "Admit an original LED-controller package",
+        "description": "Authenticated upload of a fixed 28,736-byte Open Keylight NXP package. Requires a confirmed ESP trial and an available supported controller. The whole package is received in RAM within 30 seconds and checked before queuing controller work. X-SHA256 covers the whole package; the internal header separately hashes its 28,672-byte bank. Metadata and hashes do not authenticate a publisher or establish hardware qualification. The worker turns the light off, verifies darkness, enters the loader once, verifies all 448 blocks, commits once, holds SPI quiet, then checks the new application. 202 only transfers ownership to a background job; poll GET for its outcome. Do not retry an ambiguous response automatically. Legacy migration requires exact 1.3.0.0 plus an observed supported part getter; ordinary stock firmware without that getter is not admitted.",
+        "parameters": [
+          {
+            "name": "X-SHA256",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+            },
+            "description": "Lowercase SHA-256 of the complete controller package, including its 64-byte header."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "minLength": 28736,
+                "maxLength": 28736
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Package admitted to a worker job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControllerUpdateAccepted"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
       }
     }
   },
@@ -1363,7 +1452,7 @@
                 "x-minUtf8Bytes": 8
               }
             ],
-            "description": "Empty for an open network, otherwise 8â€“64 UTF-8 bytes; control characters are rejected."
+            "description": "Empty for an open network, otherwise 8–64 UTF-8 bytes; control characters are rejected."
           },
           "mqtt": {
             "type": "object",
@@ -1377,7 +1466,7 @@
                 "maxLength": 128,
                 "x-maxUtf8Bytes": 128,
                 "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
-                "description": "mqtt:// or mqtts:// with a DNS/IPv4 host and optional port 1â€“65535. No embedded credentials, path, query or IPv6 literal. Empty is allowed only when the resulting configuration is disabled. enabled and URI are validated together."
+                "description": "mqtt:// or mqtts:// with a DNS/IPv4 host and optional port 1–65535. No embedded credentials, path, query or IPv6 literal. Empty is allowed only when the resulting configuration is disabled. enabled and URI are validated together."
               },
               "username": {
                 "type": "string",
@@ -1850,6 +1939,9 @@
                     "breathe"
                   ]
                 }
+              },
+              "controller_ota": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -1861,7 +1953,8 @@
               "settings",
               "ota",
               "white_transitions",
-              "effect_names"
+              "effect_names",
+              "controller_ota"
             ]
           }
         },
@@ -1879,6 +1972,148 @@
           "network",
           "controller",
           "capabilities"
+        ]
+      },
+      "ControllerUpdateStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "receiving",
+              "queued",
+              "running",
+              "completed",
+              "recovery_required"
+            ]
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "validated",
+              "entering",
+              "ready",
+              "erasing",
+              "programming",
+              "verifying",
+              "committing",
+              "quiet",
+              "observing",
+              "application_seen",
+              "precommit_failed",
+              "commit_unresolved"
+            ]
+          },
+          "result": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              null,
+              "ok",
+              "invalid",
+              "busy",
+              "cancelled",
+              "timeout",
+              "io",
+              "protocol",
+              "verify",
+              "persist",
+              "unresolved"
+            ]
+          },
+          "target_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+          },
+          "program_blocks_acked": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 448
+          },
+          "readback_blocks_verified": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 448
+          },
+          "total_blocks": {
+            "const": 448
+          },
+          "commit_attempted": {
+            "type": "boolean"
+          },
+          "commit_delivery": {
+            "type": "string",
+            "enum": [
+              "not_sent",
+              "complete",
+              "maybe_sent"
+            ]
+          },
+          "quiet_completed": {
+            "type": "boolean"
+          },
+          "controller_confirmed": {
+            "type": "boolean"
+          },
+          "recovery_required": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "state",
+          "phase",
+          "result",
+          "target_sha256",
+          "program_blocks_acked",
+          "readback_blocks_verified",
+          "total_blocks",
+          "commit_attempted",
+          "commit_delivery",
+          "quiet_completed",
+          "controller_confirmed",
+          "recovery_required",
+          "error"
+        ]
+      },
+      "ControllerUpdateAccepted": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "accepted": {
+            "const": true
+          },
+          "job_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          }
+        },
+        "required": [
+          "accepted",
+          "job_id"
         ]
       }
     }

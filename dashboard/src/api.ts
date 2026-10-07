@@ -45,6 +45,7 @@ export type Device = {
     scenes?: boolean;
     settings?: boolean;
     ota?: boolean;
+    controller_ota?: boolean;
     effect_names?: string[];
   };
 };
@@ -121,13 +122,18 @@ export class HttpTransport implements Transport {
   ): Promise<T> {
     if (
       !/^\/[a-z]+(?:\/[1-8](?:\/activate)?)?$/.test(path) &&
-      !/^\/clients\/[0-9a-f]{16}$/.test(path)
+      !/^\/clients\/[0-9a-f]{16}$/.test(path) &&
+      path !== "/controller/update"
     )
       throw new ApiError("Invalid API path");
     const controller = new AbortController(),
       timeout = setTimeout(
         () => controller.abort(),
-        path === "/update" ? 120000 : 8000,
+        path === "/update"
+          ? 120000
+          : path === "/controller/update" && method === "POST"
+            ? 35000
+            : 8000,
       );
     try {
       const headers: Record<string, string> = { ...extra };

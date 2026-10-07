@@ -37,6 +37,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { WifiSetup, ClientAccess } from "./SystemAccess";
+import { ControllerUpdate } from "./ControllerUpdate";
 import {
   HttpTransport,
   StudioStore,
@@ -1279,6 +1280,14 @@ export function Studio({ store }: { store: StudioStore }) {
                   </div>
                 )}
               </section>
+              {device && (
+                <ControllerUpdate
+                  store={store}
+                  device={device}
+                  authorized={authorized}
+                  busy={busy}
+                />
+              )}
               <section className="system-panel history-panel">
                 <div className="panel-heading">
                   <Activity size={19} />
