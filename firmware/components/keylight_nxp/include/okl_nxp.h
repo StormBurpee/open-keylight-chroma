@@ -52,8 +52,10 @@ typedef struct {
     okl_result (*arm_ready)(void *user, uint64_t deadline_us);
     okl_result (*wait_ready)(void *user, uint64_t deadline_us);
     /* Each call is a separate CS assertion; tx/rx are nonnull, size exact.
-     * Return only after DMA is finished; buffers live until return. Every
-     * callback must honor the absolute deadline and use a monotonic clock. */
+     * Callbacks use an absolute deadline and a monotonic clock. Do not begin
+     * a transfer after expiry. Once started, finish DMA before returning so
+     * these buffers remain valid; report OKL_TIMEOUT if completion is late.
+     * The deadline cannot safely cancel in-flight DMA or bound a hardware hang. */
     okl_result (*transfer)(void *user, const uint8_t *tx, uint8_t *rx,
                            size_t size, uint64_t deadline_us);
     /* Optional, explicitly invoked recovery. Must establish a known idle

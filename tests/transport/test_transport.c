@@ -15,7 +15,7 @@ typedef struct {
     esp_err_t start_result, end_result;
 } spi_step;
 static spi_step script[SCRIPT_LIMIT];
-static unsigned count, used, locked, starts, ends, delays;
+static unsigned count, used, locked, starts, ends, delays, start_calls, wire_starts, gpio_reads;
 static unsigned deny_mutex, fail_allocation;
 static uint64_t time_us, ready_change;
 static int ready, future_ready;
@@ -35,6 +35,7 @@ void xSemaphoreGive(SemaphoreHandle_t handle) { CHECK(handle == &locked && locke
 void vTaskDelay(TickType_t ticks) { CHECK(locked && ticks == 1); ++delays; time_us += 1000; CHECK(delays < 1000); }
 int gpio_get_level(unsigned pin) {
     CHECK(pin == 4 && locked);
+    ++gpio_reads;
     if (time_us >= ready_change) { ready = future_ready; ready_change = UINT64_MAX; }
     return ready;
 }
@@ -54,7 +55,10 @@ esp_err_t spi_bus_add_device(int host, const spi_device_interface_config_t *conf
     *device = &script; return ESP_OK;
 }
 esp_err_t spi_device_polling_start(spi_device_handle_t device, spi_transaction_t *transaction, TickType_t ticks) {
-    CHECK(device == &script && locked && ticks && !in_flight && used < count);
+    ++start_calls;
+    /* Installed Espressif IDF 5.5.5 rejects finite waits before wire setup. */
+    if (ticks != portMAX_DELAY) return ESP_ERR_INVALID_ARG;
+    CHECK(device == &script && locked && !in_flight && used < count);
     active_step = &script[used++]; ++starts;
     CHECK(transaction->length == active_step->size * 8 && transaction->tx_buffer && transaction->rx_buffer);
     const uint8_t *tx = transaction->tx_buffer;
@@ -64,7 +68,7 @@ esp_err_t spi_device_polling_start(spi_device_handle_t device, spi_transaction_t
         CHECK(okl_report_decode(&report, tx + 7, 90) == OKL_OK && report.command_class == 0 && report.opcode == 0x87);
     } else for (size_t i = 0; i < active_step->size; ++i) CHECK(tx[i] == 0);
     if (active_step->start_result != ESP_OK) return active_step->start_result;
-    in_flight = transaction; return ESP_OK;
+    in_flight = transaction; ++wire_starts; return ESP_OK;
 }
 esp_err_t spi_device_polling_end(spi_device_handle_t device, TickType_t ticks) {
     CHECK(device == &script && locked && ticks == portMAX_DELAY && in_flight);
@@ -82,6 +86,7 @@ esp_err_t spi_device_polling_end(spi_device_handle_t device, TickType_t ticks) {
 static void reset(void) {
     ++cases; memset(&bus, 0, sizeof(bus)); memset(&driver, 0, sizeof(driver)); memset(script, 0, sizeof(script));
     count = used = locked = starts = ends = delays = deny_mutex = fail_allocation = 0;
+    start_calls = wire_starts = gpio_reads = 0;
     time_us = 0; ready = 1; ready_change = UINT64_MAX; in_flight = NULL; active_step = NULL;
     CHECK(app_nxp_transport_init(&driver, identity) == ESP_OK);
 }
@@ -115,7 +120,10 @@ static okl_result recovery(uint64_t timeout) {
     okl_result result = okl_nxp_recover(&driver, time_us + timeout);
     CHECK(!locked && !in_flight); return result;
 }
-static void consumed(void) { CHECK(used == count && starts == count && !in_flight && !locked); }
+static void consumed(void) {
+    CHECK(used == count && starts == count && !in_flight && !locked);
+    CHECK(wire_starts == ends);
+}
 static void next_getter_works(void) { valid_getter(); CHECK(execute(10000) == OKL_OK && !driver.needs_recovery); consumed(); }
 
 static void test_normal_and_zero(void) {
@@ -196,18 +204,64 @@ static void test_deadline_after_consumed_body(void) {
     CHECK(execute(2000) == OKL_TIMEOUT && driver.needs_recovery && ends == 3);
     CHECK(recovery(1000) == OKL_OK && starts == 3); next_getter_works();
 }
+static void test_deadline_after_consumed_request(void) {
+    reset(); step(97, 1, 0); script[0].duration = 3000;
+    CHECK(execute(2000) == OKL_TIMEOUT && driver.needs_recovery && ends == 1 && time_us == 3000);
+    length_step(97, 0); step(97, 0, 1);
+    CHECK(recovery(1000) == OKL_OK && starts == 3 && time_us == 3200);
+    next_getter_works();
+}
 static void test_retry_length_after_start_rejected(void) {
     reset(); step(97, 1, 0); length_step(0, 0); script[1].start_result = ESP_ERR_TIMEOUT;
     CHECK(execute(10000) == OKL_TIMEOUT && driver.needs_recovery && ends == 1);
     length_step(0, 1);
     CHECK(recovery(10000) == OKL_OK && starts == 3 && ends == 2); next_getter_works();
 }
-static void test_spi_error_never_retries_implicitly(void) {
+static void test_end_error_keeps_unknown_phase(void) {
     for (unsigned at = 0; at < 3; ++at) {
-        reset(); valid_getter(); script[at].end_result = ESP_FAIL;
+        reset(); valid_getter(); script[at].end_result = ESP_ERR_INVALID_STATE;
         CHECK(execute(10000) == OKL_IO && driver.needs_recovery && starts == at + 1 && ends == at + 1);
+        CHECK(wire_starts == at + 1);
         CHECK(execute(10000) == OKL_NEEDS_RECOVERY && starts == at + 1);
+        /* A completed transaction may have consumed length or body. Neither
+         * READY level establishes the missing phase; do not read more bytes. */
+        unsigned reads = gpio_reads; uint64_t before = time_us;
+        for (unsigned level = 0; level <= 1; ++level) {
+            ready = (int)level;
+            CHECK(recovery(10000) == OKL_NEEDS_RECOVERY && driver.needs_recovery);
+            CHECK(time_us == before && gpio_reads == reads && starts == at + 1);
+        }
+        uint8_t tx[2] = {0}, rx[2] = {0};
+        CHECK(driver.transport.transfer(driver.transport.user, tx, rx, 2, time_us + 1000) == OKL_NEEDS_RECOVERY);
+        CHECK(starts == at + 1);
     }
+}
+static void test_start_error_has_not_clocked_wire(void) {
+    const esp_err_t errors[] = {ESP_ERR_TIMEOUT, ESP_ERR_NO_MEM, ESP_ERR_INVALID_ARG};
+    for (size_t i = 0; i < sizeof(errors) / sizeof(errors[0]); ++i) {
+        for (unsigned at = 0; at < 3; ++at) {
+            reset(); valid_getter(); script[at].start_result = errors[i];
+            okl_result expected = errors[i] == ESP_ERR_TIMEOUT ? OKL_TIMEOUT : OKL_IO;
+            CHECK(execute(10000) == expected && driver.needs_recovery);
+            CHECK(starts == at + 1 && wire_starts == at && ends == at);
+            CHECK(execute(10000) == OKL_NEEDS_RECOVERY && starts == at + 1);
+            /* Replace only the rejected operation; recovery drains an existing
+             * stale reply, never resends the failed command. */
+            count = used;
+            if (at == 1) length_step(97, 0);
+            if (at) step(97, 0, 1);
+            CHECK(recovery(10000) == OKL_OK && !driver.needs_recovery);
+            CHECK(wire_starts == (at ? 3u : 0u));
+            next_getter_works();
+        }
+    }
+}
+static void test_idf_rejects_finite_polling_start(void) {
+    reset(); uint8_t tx[2] = {0}, rx[2] = {0};
+    spi_transaction_t transaction = {.length = 16, .tx_buffer = tx, .rx_buffer = rx};
+    CHECK(spi_device_polling_start(&script, &transaction, 100) == ESP_ERR_INVALID_ARG);
+    CHECK(start_calls == 1 && !starts && !wire_starts && !ends && !in_flight);
+    next_getter_works(); CHECK(start_calls == 4);
 }
 static void test_deadline_and_mutex(void) {
     reset(); CHECK(execute(0) == OKL_TIMEOUT && !starts);
@@ -221,7 +275,8 @@ int main(void) {
     test_normal_and_zero(); test_zero_wait_preserves_boundary(); test_zero_length_crosses_deadline();
     test_startup_zero(); test_zero_completion_does_not_clock(); test_retained_stale_body();
     test_stock_delayed_reply(); test_expired_original_remains_ambiguous(); test_bad_length_never_drains_or_clears();
-    test_deadline_after_consumed_body(); test_retry_length_after_start_rejected();
-    test_spi_error_never_retries_implicitly(); test_deadline_and_mutex();
+    test_deadline_after_consumed_body(); test_deadline_after_consumed_request(); test_retry_length_after_start_rejected();
+    test_end_error_keeps_unknown_phase(); test_start_error_has_not_clocked_wire();
+    test_idf_rejects_finite_polling_start(); test_deadline_and_mutex();
     printf("native transport: %u checks across %u cases passed\n", checks, cases); return 0;
 }

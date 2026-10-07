@@ -8,7 +8,7 @@
 #include <string.h>
 
 enum { PIN_READY = 4, PIN_MOSI = 12, PIN_MISO = 13, PIN_CLOCK = 14, PIN_SELECT = 15 };
-enum { BUS_IDLE, LENGTH_PENDING, BODY_PENDING, ZERO_COMPLETE };
+enum { BUS_IDLE, LENGTH_PENDING, BODY_PENDING, ZERO_COMPLETE, BUS_UNKNOWN };
 typedef struct {
     spi_device_handle_t spi;
     SemaphoreHandle_t mutex;
@@ -44,14 +44,23 @@ static okl_result wait_ready(void *unused, uint64_t deadline) { (void)unused; re
 
 static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t size, uint64_t deadline) {
     nxp_bus *b = context;
-    if (b->phase == ZERO_COMPLETE) return OKL_NEEDS_RECOVERY;
+    if (b->phase == ZERO_COMPLETE || b->phase == BUS_UNKNOWN) return OKL_NEEDS_RECOVERY;
     if (!size || size > OKL_SPI_LIMIT || !ticks_left(deadline)) return OKL_TIMEOUT;
     spi_transaction_t transaction = {.length = size * 8, .tx_buffer = tx, .rx_buffer = rx};
-    esp_err_t result = spi_device_polling_start(b->spi, &transaction, ticks_left(deadline));
+    /* IDF 5.5 only accepts portMAX_DELAY here. This host has one device and
+     * every caller holds our deadline-bounded mutex; no other SPI user may
+     * acquire it. Check the application deadline before and after wire I/O. */
+    esp_err_t result = spi_device_polling_start(b->spi, &transaction, portMAX_DELAY);
     if (result != ESP_OK) return result == ESP_ERR_TIMEOUT ? OKL_TIMEOUT : OKL_IO;
-    /* A hardware transaction is at most 3.84ms. Never return live DMA buffers. */
+    /* At 1MHz the longest wire payload is 3.84ms. Scheduling or hardware
+     * failure can exceed that; never return while DMA owns these buffers. */
     result = spi_device_polling_end(b->spi, portMAX_DELAY);
-    if (result != ESP_OK) return OKL_IO;
+    if (result != ESP_OK) {
+        /* IDF can report a DMA error after completing the transaction. The
+         * received bytes cannot establish which peer phase was consumed. */
+        b->phase = BUS_UNKNOWN;
+        return OKL_IO;
+    }
     if (b->phase == BUS_IDLE) b->phase = LENGTH_PENDING;
     else if (b->phase == LENGTH_PENDING) {
         b->pending_length = (size_t)rx[0] * 256 + rx[1];
@@ -63,6 +72,7 @@ static okl_result transfer(void *context, const uint8_t *tx, uint8_t *rx, size_t
 static okl_result recover(void *context, uint64_t deadline) {
     nxp_bus *b = context;
     uint8_t tx[OKL_SPI_LIMIT] = {0}, rx[OKL_SPI_LIMIT];
+    if (b->phase == BUS_UNKNOWN) return OKL_NEEDS_RECOVERY;
     /* A response can predate ESP startup. READY-low means its length is pending. */
     if (b->phase == BUS_IDLE && gpio_get_level(PIN_READY) == 0) b->phase = LENGTH_PENDING;
     if (b->phase == LENGTH_PENDING) {

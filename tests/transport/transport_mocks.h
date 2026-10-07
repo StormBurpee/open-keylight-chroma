@@ -12,6 +12,8 @@ typedef void *spi_device_handle_t;
 #define ESP_FAIL -1
 #define ESP_ERR_NO_MEM 1
 #define ESP_ERR_TIMEOUT 2
+#define ESP_ERR_INVALID_ARG 3
+#define ESP_ERR_INVALID_STATE 4
 #define ESP_ERROR_CHECK(value) do { if ((value) != ESP_OK) abort(); } while (0)
 #define pdTRUE 1
 #define pdMS_TO_TICKS(value) (value)
