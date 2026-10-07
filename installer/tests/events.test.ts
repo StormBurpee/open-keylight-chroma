@@ -106,6 +106,17 @@ test('browser action must bind exact selected target and image with no credentia
   for (const bad of [{url: 'https://example.com/'}, {url: `http://user:secret@${summary.target_ip}/`}, {firmware: 'wrong'}, {elf_sha256: '0'.repeat(64)}]) assert.throws(() => event(s, {...a, ...bad}));
   event(s, a); assert.equal(s.progress.action?.remainingSeconds, 150);
 });
+
+test('a closed pairing action stays visible as the trial countdown advances', () => {
+  const s = state(); for (let i = 0; i < 6; i++) {stage(s, i); stage(s, i, 'completed');} stage(s, 6);
+  event(s, {event: 'action', kind: 'native_acceptance', url: `http://${summary.target_ip}/`, device_id: summary.device_id,
+    firmware: summary.esp.version, elf_sha256: summary.esp.elf_sha256, manifest_sha256: summary.manifest_sha256,
+    controller_version: summary.controller_version, pairing_open: false, remaining_ms: 150000});
+  event(s, {event: 'progress', stage_id: 'native', scope: 'trial', completed: 35, total: 175, unit: 'seconds', remaining_ms: 140000});
+  event(s, {event: 'status', code: 'message', message: 'Trial confirmation pending'});
+  assert.equal(s.progress.action?.pairingOpen, false); assert.equal(s.progress.remainingSeconds, 140);
+  assert.equal(s.progress.dashboardUrl, `http://${summary.target_ip}/`);
+});
 test('JSONL handles arbitrary UTF-8 byte boundaries and rejects partial, oversized, empty lines', () => {
   const values: unknown[] = [], lines = new EventLines(v => values.push(v));
   for (const b of Buffer.from(JSON.stringify({message: '🌈 éclair'}) + '\n')) lines.write(Buffer.from([b]));

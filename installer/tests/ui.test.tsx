@@ -90,6 +90,14 @@ test('closed pairing asks for one physical hold only before native acceptance st
   assert.match(renderToString(<ProgressView progress={p} />), /3 seconds/);
   for (const acceptanceState of ['running', 'complete'] as const) assert.doesNotMatch(renderToString(<ProgressView progress={{...p, acceptanceState}} />), /3 seconds/);
 });
+
+test('step seven keeps its required button hold visible without opening details', () => {
+  const output = renderToString(<ProgressView running progress={{stage: 6, state: 'running', label: 'Trial confirmation pending',
+    unit: 'seconds', completed: 35, total: 175, remainingSeconds: 140,
+    action: {url: 'http://192.168.1.25/', pairingOpen: false, remainingSeconds: 150, manifest: 'a'.repeat(64), controllerVersion: '0.1.1.0'}}} />);
+  assert.match(output, /Hold.*button.*3 seconds/); assert.match(output, /140s left/);
+  assert.doesNotMatch(output, /Finishing setup|100%|Trial confirmation pending/);
+});
 test('open plan validation cannot silently start installation; start requires explicit exclusive control', async () => {
   let validations = 0, starts = 0;
   const screen = render(<App initialPlan="fixture.json" run={async () => {validations++; return summary;}} start={() => {starts++; throw new Error('fixture start');}} />);

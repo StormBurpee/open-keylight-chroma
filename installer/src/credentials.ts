@@ -2,7 +2,7 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {mkdir, mkdtemp, open, chmod} from 'node:fs/promises';
 import {homedir} from 'node:os';
-import {join} from 'node:path';
+import {join, win32} from 'node:path';
 const execute = promisify(execFile);
 
 /** Restrict a new directory before it contains any credential. Fail closed if ACL setup fails. */
@@ -10,10 +10,14 @@ export async function privateDirectory(parent = join(homedir(), '.open-keylight'
   await mkdir(parent, {recursive: true, mode: 0o700});
   const directory = await mkdtemp(join(parent, 'install-'));
   if (process.platform === 'win32') {
-    const identity = await execute('whoami.exe', ['/user', '/fo', 'csv', '/nh'], {windowsHide: true});
+    const windows = process.env['SystemRoot'];
+    if (!windows || !win32.isAbsolute(windows)) throw new Error('Windows system directory is unavailable.');
+    const system = win32.join(windows, 'System32');
+    const options = {windowsHide: true, timeout: 5000, maxBuffer: 8192};
+    const identity = await execute(win32.join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], options);
     const sid = identity.stdout.match(/\bS-1-(?:\d+-)+\d+\b/)?.[0];
     if (!sid) throw new Error('Could not establish current-user credential permissions.');
-    await execute('icacls.exe', [directory, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], {windowsHide: true});
+    await execute(win32.join(system, 'icacls.exe'), [directory, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], options);
   } else {await chmod(directory, 0o700);}
   return directory;
 }

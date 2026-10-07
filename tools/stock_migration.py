@@ -255,6 +255,11 @@ class StockEntryError(MigrationError):
     code = "stock_loader_entry_unconfirmed"
 
 
+class NativePairingDeadlineError(MigrationError):
+    """The separate acceptance client cannot safely start within this trial."""
+    code = "native_pairing_deadline"
+
+
 class Audit:
     """Exclusive, append-only JSONL journal; flush intent before any mutation.
 
@@ -1345,13 +1350,33 @@ def await_native_confirmation(plan, audit, *, get_http=http_get, clock=time.mono
                          "human_dashboard_confirmation_observed", authenticated_controls_checked_by_installer=False)
             return value
         if events is not None and not action_sent:
-            if value.get("pairing_open") is True:
+            milliseconds = max(0, int((deadline - clock()) * 1000))
+            # The separate native client requires 30 seconds for its bounded
+            # checks. Do not dispatch an action it must reject immediately.
+            if milliseconds < 30000:
+                audit.record("native_acceptance_not_started", reason="pairing_deadline",
+                             remaining_ms=milliseconds, pairing_open=value.get("pairing_open") is True)
+                raise NativePairingDeadlineError(
+                    "Not enough trial time remains to start automatic pairing and verification (30 seconds required). "
+                    "No pairing or confirmation was sent by this backend; preserve the audit.")
+            is_open = value.get("pairing_open") is True
+            if is_open or not pairing_requested:
+                audit.record("native_acceptance_action_intent", pairing_open=is_open, remaining_ms=milliseconds,
+                             uptime_ms=value["uptime_ms"], authenticated_controls_checked=False)
+                require(clock() < deadline, "Acceptance action persistence exceeded the trial window")
+                milliseconds = max(0, int((deadline - clock()) * 1000))
+                if milliseconds < 30000:
+                    raise NativePairingDeadlineError(
+                        "Not enough trial time remains after saving acceptance evidence; no acceptance action was sent.")
+                # A closed-window action makes the physical pairing step
+                # persistent in the UI. Only a later fresh open-window action
+                # authorizes the native client to pair; neither is a command.
                 events.emit("action", kind="native_acceptance", url=f"http://{target.ip}/", device_id=value["id"],
                             firmware=value["firmware"], elf_sha256=value["firmware_elf_sha256"],
                             manifest_sha256=plan["manifest_sha256"], controller_version=expected_controller,
-                            pairing_open=True, remaining_ms=max(0, int((deadline - clock()) * 1000)))
-                action_sent = True
-            elif not pairing_requested:
+                            pairing_open=is_open, remaining_ms=milliseconds)
+                action_sent = is_open
+            if not is_open and not pairing_requested:
                 events.emit("status", code="pairing_required", message=
                             "Hold the light's button for three seconds to open pairing. "
                             "The trial countdown continues; no pairing request has been sent.")

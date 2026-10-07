@@ -182,14 +182,14 @@ class Tests(unittest.TestCase):
         finally:
             audit.close()
         actions = [event for event in self.events if event['event'] == 'action']
-        self.assertEqual(len(actions), 1)
-        self.assertIs(actions[0]['pairing_open'], True)
+        self.assertEqual([action['pairing_open'] for action in actions], [False, True])
         self.assertEqual(actions[0]['manifest_sha256'], plan['manifest_sha256'])
         self.assertEqual(actions[0]['elf_sha256'], plan['esp_metadata']['elf_sha256'])
         self.assertLess(actions[0]['remaining_ms'], 175000)
         waiting = [event for event in self.events if event.get('code') == 'pairing_required']
         self.assertEqual(len(waiting), 1)
-        self.assertLess(waiting[0]['seq'], actions[0]['seq'])
+        self.assertLess(actions[0]['seq'], waiting[0]['seq'])
+        self.assertLess(waiting[0]['seq'], actions[1]['seq'])
         records = [json.loads(line) for line in (self.folder / 'pairing.jsonl').read_text().splitlines()]
         self.assertIn('independent_client_confirmation_observed', [row['event'] for row in records])
         self.assertNotIn('human_dashboard_confirmation_observed', [row['event'] for row in records])
@@ -225,7 +225,7 @@ class Tests(unittest.TestCase):
                 finally:
                     audit.close()
                 rows = [json.loads(line) for line in output.getvalue().splitlines()]
-                self.assertFalse(any(row['event'] == 'action' for row in rows))
+                self.assertFalse(any(row['event'] == 'action' and row['pairing_open'] for row in rows))
 
     def test_closed_pairing_times_out_without_action_or_mutation(self):
         self.env.closed = True
@@ -241,15 +241,48 @@ class Tests(unittest.TestCase):
             return raw
         audit = m.Audit(self.folder / 'closed.jsonl', plan['target'].ip, clock=self.env.time.now)
         try:
-            with self.assertRaises(TimeoutError):
+            with self.assertRaises(m.NativePairingDeadlineError):
                 m.await_native_confirmation(plan, audit, get_http=closed, clock=self.env.time.now,
                     sleep=self.env.time.sleep, output_fn=lambda _: None, events=JsonEvents(self.output))
         finally:
             audit.close()
-        self.assertEqual(self.env.time.value, 175)
-        self.assertFalse(any(row['event'] == 'action' for row in self.events))
+        self.assertGreaterEqual(self.env.time.value, 145)
+        self.assertLess(self.env.time.value, 147)
+        actions = [row for row in self.events if row['event'] == 'action']
+        self.assertEqual([row['pairing_open'] for row in actions], [False])
         self.assertEqual(sum(row.get('code') == 'pairing_required' for row in self.events), 1)
         self.assertTrue(all(path == '/api/v1/device' or path in self.assets for _, path, _ in self.env.http_calls))
+
+    def test_late_open_or_slow_action_audit_never_starts_native_client(self):
+        plan = m.load_plan(self.path)
+        for slow_audit in (False, True):
+            env = Environment(self); env.closed = True
+            output = io.StringIO(); getter = env.http
+            def opening(ip, path, maximum):
+                raw = getter(ip, path, maximum)
+                if path == '/api/v1/device':
+                    value = json.loads(raw)
+                    value['pairing_open'] = env.native_reads >= 3
+                    value['trial_pending'] = True
+                    return json.dumps(value).encode()
+                return raw
+            audit = m.Audit(self.folder / f'late-open-{slow_audit}.jsonl', plan['target'].ip, clock=env.time.now)
+            record = audit.record
+            def save(event, **details):
+                record(event, **details)
+                if slow_audit and event == 'native_acceptance_action_intent' and details['pairing_open']:
+                    env.time.sleep(2)
+            audit.record = save
+            def sleep(_seconds): env.time.value = 144 if slow_audit else 146
+            try:
+                with self.subTest(slow_audit=slow_audit), self.assertRaises(m.NativePairingDeadlineError) as error:
+                    m.await_native_confirmation(plan, audit, get_http=opening, clock=env.time.now,
+                        sleep=sleep, output_fn=lambda _: None, events=JsonEvents(output))
+                self.assertEqual(error.exception.code, 'native_pairing_deadline')
+            finally:
+                audit.close()
+            rows = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual([row['pairing_open'] for row in rows if row['event'] == 'action'], [False])
 
 
 if __name__ == '__main__': unittest.main()
