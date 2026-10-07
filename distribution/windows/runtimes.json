@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "platform": "win-x64",
+  "node": {
+    "version": "22.23.3",
+    "url": "https://nodejs.org/dist/v22.23.3/node-v22.23.3-win-x64.zip",
+    "bytes": 35574076,
+    "sha256": "2b0ff57b049cda1bbcea2240eec20467018713c1efe1f7360c2681859b90ed71",
+    "prefix": "node-v22.23.3-win-x64/",
+    "source": "https://nodejs.org/dist/v22.23.3/SHASUMS256.txt"
+  },
+  "python": {
+    "version": "3.13.16",
+    "url": "https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip",
+    "bytes": 11439094,
+    "sha256": "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297",
+    "prefix": "",
+    "source": "https://www.python.org/downloads/release/python-31316/"
+  }
+}
