@@ -12,10 +12,17 @@ function status(text, error = false) {
   $("status").classList.toggle("error", error);
 }
 function fill() {
-  for (const key of ["url", "token", "step", "scene"])
-    $(key).value = String(
-      settings[key] ?? (key === "step" ? 5 : key === "scene" ? 1 : ""),
-    );
+  const defaults = {
+    url: "",
+    token: "",
+    step: 5,
+    scene: 1,
+    color: "#FF8844",
+    hueStep: 5,
+    fadeMs: 150,
+  };
+  for (const key of Object.keys(defaults))
+    $(key).value = String(settings[key] ?? defaults[key]);
 }
 function send(event, payload) {
   if (socket?.readyState !== 1)
@@ -43,6 +50,10 @@ window.connectElgatoStreamDeckSocket = (
   settings = action.payload?.settings ?? {};
   $("step-field").hidden = !actionId.endsWith(".brightness");
   $("scene-field").hidden = !actionId.endsWith(".scene");
+  $("color-field").hidden = !actionId.endsWith(".color");
+  $("fade-field").hidden = ![".color", ".brightness"].some((kind) =>
+    actionId.endsWith(kind),
+  );
   fill();
   socket = new WebSocket(`ws://127.0.0.1:${port}`);
   socket.onopen = () => {
@@ -71,7 +82,8 @@ window.connectElgatoStreamDeckSocket = (
       fill();
       if (pendingSave) {
         const matches = Object.keys(pendingSave).every(
-          (key) => settings[key] === pendingSave[key],
+          (key) =>
+            JSON.stringify(settings[key]) === JSON.stringify(pendingSave[key]),
         );
         clearTimeout(saveTimeout);
         pendingSave = undefined;
@@ -112,11 +124,21 @@ $("settings").addEventListener("submit", (event) => {
         "Use a full light origin, without a path, credentials or query.",
       );
     const next = {
+      ...settings,
       url: u.origin,
       token: $("token").value.trim(),
       step: Number($("step").value),
       scene: Number($("scene").value),
+      color: $("color").value.toUpperCase(),
+      hueStep: Number($("hueStep").value),
+      fadeMs: Number($("fadeMs").value),
     };
+    if (
+      !/^#[0-9A-F]{6}$/.test(next.color) ||
+      ![1, 5, 10, 15].includes(next.hueStep) ||
+      ![0, 100, 150, 200, 400].includes(next.fadeMs)
+    )
+      throw Error("Choose a valid colour, hue step and fade.");
     pendingSave = next;
     $("save").disabled = true;
     $("check").disabled = true;
@@ -127,7 +149,10 @@ $("settings").addEventListener("submit", (event) => {
       pendingSave = undefined;
       $("save").disabled = socket?.readyState !== 1;
       $("check").disabled = socket?.readyState !== 1;
-      status("Stream Deck has not confirmed the saved settings. Reopen this action to check them.", true);
+      status(
+        "Stream Deck has not confirmed the saved settings. Reopen this action to check them.",
+        true,
+      );
     }, 4000);
   } catch (error) {
     pendingSave = undefined;

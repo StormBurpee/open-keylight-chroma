@@ -26,7 +26,11 @@ async function page(kind = "brightness") {
     send(v: string) {
       const message = JSON.parse(v);
       if (message.event !== "registerPropertyInspector")
-        assert.equal(message.context, "pi-uuid", "Stream Deck rejects PI commands addressed to the action instance");
+        assert.equal(
+          message.context,
+          "pi-uuid",
+          "Stream Deck rejects PI commands addressed to the action instance",
+        );
       sent.push(message);
     }
   }
@@ -71,7 +75,15 @@ test("property inspector sends its registered UUID and action type, then verifie
     event: "setSettings",
     context: "pi-uuid",
     action: "org.openkeylight.chroma.brightness",
-    payload: { url: "http://light.local", token: "secret", step: 5, scene: 2 },
+    payload: {
+      url: "http://light.local",
+      token: "secret",
+      step: 5,
+      scene: 2,
+      color: "#FF8844",
+      hueStep: 5,
+      fadeMs: 150,
+    },
   });
   assert.deepEqual(sent[2], {
     event: "getSettings",
@@ -80,10 +92,13 @@ test("property inspector sends its registered UUID and action type, then verifie
   });
   assert.equal($("check").disabled, true);
   assert.equal($("status").textContent, "Saving settings…");
-  ws.onmessage({ data: JSON.stringify({
-    event: "didReceiveSettings", context: "key-context",
-    payload: { settings: sent[1].payload },
-  }) });
+  ws.onmessage({
+    data: JSON.stringify({
+      event: "didReceiveSettings",
+      context: "key-context",
+      payload: { settings: sent[1].payload },
+    }),
+  });
   assert.match($("status").textContent, /saved and read back/);
   assert.equal($("check").disabled, false);
   dom.window.close();
@@ -92,11 +107,17 @@ test("property inspector sends its registered UUID and action type, then verifie
 test("a valid IPv4 origin survives save/readback; a rejected save is not labelled successful", async () => {
   const { dom, sent, ws, $ } = await page();
   $("url").value = "http://192.168.86.248";
-  $("settings").dispatchEvent(new dom.window.Event("submit", { cancelable: true }));
+  $("settings").dispatchEvent(
+    new dom.window.Event("submit", { cancelable: true }),
+  );
   assert.equal((sent[1].payload as any).url, "http://192.168.86.248");
-  ws.onmessage({ data: JSON.stringify({
-    event: "didReceiveSettings", context: "key-context", payload: { settings: {} },
-  }) });
+  ws.onmessage({
+    data: JSON.stringify({
+      event: "didReceiveSettings",
+      context: "key-context",
+      payload: { settings: {} },
+    }),
+  });
   assert.match($("status").textContent, /returned different settings/);
   assert.equal($("status").classList.contains("error"), true);
   dom.window.close();
@@ -156,5 +177,65 @@ test("foreign-context replies and device HTML are never treated as markup", asyn
     }),
   });
   assert.equal($("status").children.length, 0);
+  dom.window.close();
+});
+
+test("colour picker, hue step and fade persist through the registered PI with exact readback", async () => {
+  const { dom, sent, ws, $ } = await page("color");
+  assert.equal($("color-field").hidden, false);
+  assert.equal($("fade-field").hidden, false);
+  assert.equal($("step-field").hidden, true);
+  $("color").value = "#22aaff";
+  $("hueStep").value = "15";
+  $("fadeMs").value = "200";
+  $("settings").dispatchEvent(
+    new dom.window.Event("submit", { cancelable: true }),
+  );
+  const settings = sent[1].payload as any;
+  assert.equal(settings.color, "#22AAFF");
+  assert.equal(settings.hueStep, 15);
+  assert.equal(settings.fadeMs, 200);
+  assert.equal(settings.token, "secret");
+  assert.equal(sent[1].context, "pi-uuid");
+  ws.onmessage({
+    data: JSON.stringify({
+      event: "didReceiveSettings",
+      context: "key-context",
+      payload: { settings },
+    }),
+  });
+  assert.match($("status").textContent, /saved and read back/);
+  assert.equal($("hueStep").value, "15");
+  dom.window.close();
+});
+
+test("future settings survive edits and changed fade is not falsely acknowledged", async () => {
+  const { dom, sent, ws, $ } = await page();
+  ws.onmessage({
+    data: JSON.stringify({
+      event: "didReceiveSettings",
+      context: "key-context",
+      payload: {
+        settings: {
+          url: "http://light.local",
+          token: "secret",
+          future: { enabled: true },
+        },
+      },
+    }),
+  });
+  $("settings").dispatchEvent(
+    new dom.window.Event("submit", { cancelable: true }),
+  );
+  const saved = sent[1].payload as any;
+  assert.deepEqual(saved.future, { enabled: true });
+  ws.onmessage({
+    data: JSON.stringify({
+      event: "didReceiveSettings",
+      context: "key-context",
+      payload: { settings: { ...saved, fadeMs: 0 } },
+    }),
+  });
+  assert.match($("status").textContent, /different settings/);
   dom.window.close();
 });

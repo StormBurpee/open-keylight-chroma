@@ -65,6 +65,11 @@ button:focus-visible {
   outline: 2px solid #d7b780;
   outline-offset: 2px;
 }
+input[type="color"] {
+  height: 44px;
+  padding: 5px;
+  cursor: pointer;
+}
 .hint,
 footer {
   color: #aaa79c;

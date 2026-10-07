@@ -5,22 +5,18 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
+import { fixture } from "./fixture.js";
 
 test(
   "compiled SDK plugin handles real key/dial/inspector events against loopback only",
   { timeout: 20000 },
   async (t) => {
-    const state = {
-      revision: 1,
-      desired: { power: true, brightness: 40, recording_lock: false },
-      reported: {
-        valid: true,
-        confirmed_fields: ["power", "brightness"],
-        power: true,
-        brightness: 40,
-      },
-      operation: { status: "idle" },
-    };
+    const state = fixture();
+    state.revision = 1;
+    let releaseResponse: (() => void) | undefined,
+      holdResponse = false,
+      activeWrites = 0,
+      maxWrites = 0;
     const mutations: Array<{
       path: string;
       body: Record<string, unknown>;
@@ -33,18 +29,35 @@ test(
           JSON.stringify({
             api_version: 1,
             name: "Loopback light",
-            capabilities: { scenes: true },
+            capabilities: {
+              scenes: true,
+              color: true,
+              transitions: true,
+              white_transitions: false,
+            },
           }),
         );
         return;
       }
       if (req.method === "GET") {
-        res.end(JSON.stringify(state));
+        res.end(
+          JSON.stringify(
+            req.url === "/api/v1/scenes"
+              ? {
+                  scenes: [
+                    { id: 2, state: { ...state.desired, brightness: 33 } },
+                  ],
+                }
+              : state,
+          ),
+        );
         return;
       }
       let body = "";
       for await (const chunk of req) body += chunk;
       const value = JSON.parse(body);
+      activeWrites++;
+      maxWrites = Math.max(maxWrites, activeWrites);
       mutations.push({
         path: req.url ?? "",
         body: value,
@@ -57,10 +70,14 @@ test(
         Object.assign(state.desired, patch);
       }
       state.revision++;
-      state.reported.power = state.desired.power;
-      state.reported.brightness = state.desired.brightness;
+      Object.assign(state.reported, state.desired);
+      if (holdResponse)
+        await new Promise<void>((resolve) => {
+          releaseResponse = resolve;
+        });
       res.statusCode = 202;
       res.end(JSON.stringify(state));
+      activeWrites--;
     });
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -79,18 +96,20 @@ test(
         const message = JSON.parse(data.toString());
         messages.push(message);
         if (message.event === "getSettings")
-          ws.send(JSON.stringify({
-            event: "didReceiveSettings",
-            action: "org.openkeylight.chroma." + message.context,
-            context: message.context,
-            device: "deck",
-            payload: {
-              controller: "Keypad",
-              coordinates: { column: 0, row: 0 },
-              isInMultiAction: false,
-              settings,
-            },
-          }));
+          ws.send(
+            JSON.stringify({
+              event: "didReceiveSettings",
+              action: "org.openkeylight.chroma." + message.context,
+              context: message.context,
+              device: "deck",
+              payload: {
+                controller: "Keypad",
+                coordinates: { column: 0, row: 0 },
+                isInMultiAction: false,
+                settings,
+              },
+            }),
+          );
       });
     });
     const info = {
@@ -165,6 +184,7 @@ test(
       token: "loopback-test-token",
       step: 5,
       scene: 2,
+      color: "#0080FF",
     };
     const send = (
       event: string,
@@ -263,10 +283,80 @@ test(
     );
     send("keyDown", "scene");
     await until(
-      () => mutations.some((m) => m.path === "/api/v1/scenes/2/activate"),
+      () => mutations.some((m) => m.body.brightness === 33),
       "scene recalled",
     );
     await new Promise((r) => setTimeout(r, 350));
+    send("willAppear", "color", "Encoder");
+    await until(
+      () =>
+        messages.some(
+          (m) => m.context === "color" && m.event === "setFeedback",
+        ),
+      "colour dial appeared",
+    );
+    send("dialRotate", "color", "Encoder", { ticks: 24 });
+    await until(
+      () => mutations.some((m) => (m.body.rgb as any)?.g === 255),
+      "hue rotates red to green",
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    send("willDisappear", "color", "Encoder");
+    send("willAppear", "color");
+    await new Promise((r) => setTimeout(r, 100));
+    send("keyDown", "color");
+    await until(
+      () =>
+        mutations.some(
+          (m) =>
+            (m.body.rgb as any)?.b === 255 && (m.body.rgb as any)?.g === 128,
+        ),
+      "saved key colour",
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    holdResponse = true;
+    const beforeBurst = mutations.length;
+    send("dialRotate", "brightness", "Encoder", { ticks: 1 });
+    await until(
+      () => mutations.length === beforeBurst + 1,
+      "slow first brightness write",
+    );
+    send("dialRotate", "brightness", "Encoder", { ticks: 20 });
+    send("dialRotate", "brightness", "Encoder", { ticks: -1 });
+    await until(
+      () =>
+        messages.some(
+          (m) => m.context === "brightness" && m.payload?.value === "95% *",
+        ),
+      "pending accumulated value visible while HTTP is blocked",
+    );
+    holdResponse = false;
+    releaseResponse!();
+    await until(
+      () => mutations.length === beforeBurst + 2,
+      "one accumulated continuation",
+    );
+    assert.equal(mutations.at(-1)?.body.brightness, 95);
+    await new Promise((r) => setTimeout(r, 200));
+    holdResponse = true;
+    const beforePower = mutations.length;
+    send("dialRotate", "brightness", "Encoder", { ticks: -1 });
+    await until(
+      () => mutations.length === beforePower + 1,
+      "active dial before power press",
+    );
+    send("dialRotate", "brightness", "Encoder", { ticks: -10 });
+    send("dialDown", "brightness", "Encoder");
+    holdResponse = false;
+    releaseResponse!();
+    await until(
+      () => mutations.length === beforePower + 2,
+      "power follows active write and cancels unsent dial",
+    );
+    assert.equal(mutations.at(-1)?.body.power, true);
+    assert.equal(mutations.at(-1)?.body.brightness, undefined);
+    assert.equal(maxWrites, 1);
+    await new Promise((r) => setTimeout(r, 200));
     const afterScene = mutations.length;
     send("propertyInspectorDidAppear", "power");
     send("sendToPlugin", "power", "Keypad", { event: "check" });

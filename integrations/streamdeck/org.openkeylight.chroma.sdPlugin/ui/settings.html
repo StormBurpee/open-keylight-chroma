@@ -61,6 +61,36 @@
           Press the dial to toggle power.
         </p>
       </div>
+      <div id="color-field" hidden>
+        <label for="color">Key colour</label
+        ><input id="color" type="color" value="#ff8844" />
+        <label for="hueStep">Dial hue step</label
+        ><select id="hueStep">
+          <option value="1">1° · fine</option>
+          <option value="5" selected>5°</option>
+          <option value="10">10°</option>
+          <option value="15">15°</option>
+        </select>
+        <p class="hint">
+          A key selects this colour. A dial rotates the current hue; press or
+          tap toggles power. Brightness and power are preserved.
+        </p>
+      </div>
+      <div id="fade-field" hidden>
+        <label for="fadeMs">Colour fade</label
+        ><select id="fadeMs">
+          <option value="0">Instant</option>
+          <option value="100">100 ms</option>
+          <option value="150" selected>150 ms · smooth</option>
+          <option value="200">200 ms</option>
+          <option value="400">400 ms</option>
+        </select>
+        <p class="hint">
+          Short fades follow colour changes and colour brightness. White
+          brightness uses direct steps unless the light advertises white
+          transitions.
+        </p>
+      </div>
       <div id="scene-field" hidden>
         <label for="scene">Saved scene</label
         ><select id="scene">
