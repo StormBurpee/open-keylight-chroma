@@ -277,3 +277,10 @@ Further investigation found an installer HTTP-reader defect rather than evidence
 A fresh HTTPS download of Razer's 02.03.13.00 archive matches the preserved reference archive. Decoding its NXP Intel HEX and supplying the reference profile's erased tail reproduces the complete reviewed recovery bank byte for byte. The public acquisition helper pins the archive, member sizes, version, HEX, decoded application and complete bank; it rejects redirects, changed files, malformed records and out-of-range or overlapping data. It publishes a fully written file without overwriting an existing destination. Proprietary bytes remain in the operator's local cache.
 
 Nine offline test groups use synthetic image contents and cover parsing, metadata, cache behavior, publication failures and redirect rejection. The helper also completed a real download and reproduced the expected bank digest. This removes the need for users to locate a private capture; the downloaded artifact is described as a stock recovery image, never a device backup.
+
+
+## Guided installer and release packaging
+
+The React / Ink installer now discovers named lights, reads a release bundle and acquires the pinned official recovery image before review. Advanced artifact paths remain available without placing them in the normal setup flow. An original-only bundle packager validates controller roles, ESP descriptor version and exact embedded dashboard assets, then publishes a new directory without replacement. Thirteen packaging tests pass on Windows and WSL; the full migration suite passes 107 tests plus the existing 17,388 differential cases.
+
+The next ESP-only attempt stopped on a stock HELLO timeout before any firmware write. Fill remains awaiting a new physical reset and the reviewed recovery/automatic acceptance sequence. That sequence reuses the proven controller transfer and fixes the HTTP observer; the native client saves its credential privately and checks exact identity, low white and Off before one confirmation. No completed second-light installation is claimed yet.
