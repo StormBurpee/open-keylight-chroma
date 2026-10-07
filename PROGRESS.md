@@ -247,3 +247,9 @@ The public installer now provides offline preparation, guided installation and s
 The plan helper validates every local artifact before publishing a complete, exclusive manifest. It neither contacts a device nor copies proprietary restore bytes. The owner's restore provenance remains explicit; a logical staging capture is not relabelled as an active-application backup. This is an experimental builder workflow, not a general release bundle.
 
 All 64 migration test groups pass on Windows and WSL, including 17,388 comparisons against the actual C diagnostic predicates. The integrated 28-suite sanitizer host run also passes. The second-light plan and artifacts are pinned privately. Installation is awaiting the owner's availability to observe that light; an identity preflight timed out before connecting to its last known address and issued no device command. No stock migration success is claimed.
+
+## Dashboard reconnection feedback
+
+The installed browser retained an old timeout banner and an earlier command-accepted heading while its current state already showed Connected and confirmed Off. Two regression tests reproduced the stale message and a related loss of an uncertain-write warning across a later read outage. The store now clears recovered read errors while separately retaining a failed mutation until the owner dismisses it or starts a new operation. It does not retry commands or treat a fresh read as proof that an uncertain write succeeded.
+
+All 85 dashboard tests and the production build pass; an independent review checked generation races and error persistence. ESP 0.1.9 includes this interface correction. Its installation is the next step; controller code and the blue-to-green update palette are unchanged.

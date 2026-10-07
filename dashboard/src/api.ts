@@ -212,6 +212,7 @@ export class StudioStore {
   private pending: Partial<Output> | null = null;
   private reading = false;
   private writeGeneration = 0;
+  private writeFailure: Pick<Snapshot, "error" | "notice"> | null = null;
   constructor(public transport: Transport) {}
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -244,10 +245,15 @@ export class StudioStore {
         throw Error("This dashboard needs API version 1.");
       assertState(state);
       if (generation === this.writeGeneration)
-        this.set({ device, state, stale: false, lastSync: Date.now() });
+        this.set({
+          device, state, stale: false, lastSync: Date.now(),
+          ...(this.writeFailure ?? { error: "", notice: "" }),
+        });
     } catch (error) {
       if (generation === this.writeGeneration)
-        this.set({ stale: true, error: message(error) });
+        this.set({
+          stale: true, error: message(error), notice: "Connection needs attention.",
+        });
     } finally {
       this.reading = false;
       if (this.pending && !this.snapshot.busy) void this.drain();
@@ -285,6 +291,7 @@ export class StudioStore {
     if (this.snapshot.busy)
       throw new ApiError("Another operation is still running.");
     this.writeGeneration++;
+    this.writeFailure = null;
     this.set({ busy: true, error: "", notice: "Sending request…" });
     try {
       const result = await this.transport.request<T>(
@@ -305,19 +312,21 @@ export class StudioStore {
       });
       return result;
     } catch (error) {
-      this.set({
+      this.writeFailure = {
         error: message(error),
         notice:
           error instanceof ApiError && error.status === 409
             ? "State changed elsewhere. Review it before retrying."
             : "Request not confirmed.",
-      });
+      };
+      this.set(this.writeFailure);
       throw error;
     } finally {
       this.set({ busy: false });
     }
   }
   clearError() {
+    this.writeFailure = null;
     this.set({ error: "" });
   }
 }

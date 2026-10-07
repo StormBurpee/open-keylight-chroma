@@ -2,6 +2,11 @@
 
 There is no qualified public installation release yet. These entries describe development builds; [the development record](PROGRESS.md) separates automated checks from device observations.
 
+## 0.1.9-dev
+
+- Clear a temporary dashboard connection error after fresh device and state reads succeed. Keep an uncertain command visible across a later outage; reconnecting never retries it.
+- Add an experimental guided stock-migration installer and offline plan preparation, with exact artifact checks, staged controller diagnostics and ESP installation last. Fresh-stock hardware qualification remains pending.
+
 ## 0.1.8-dev
 
 - Update progress changes from blue through cyan to green, with gentle breathing and a green completion point after verification. Failed uploads retain red pulses.

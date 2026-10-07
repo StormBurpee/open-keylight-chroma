@@ -147,6 +147,44 @@ describe("HTTP transport", () => {
   });
 });
 describe("state serialization", () => {
+  it("clears a transient poll failure after reconnection without replaying a write", async () => {
+    const api = new DemoTransport();
+    const request = vi.spyOn(api, "request");
+    const store = new StudioStore(api);
+    await store.connect();
+    await store.write("PATCH", "/state", { brightness: 25 },
+      "Change accepted; waiting for controller report.");
+    request.mockRejectedValueOnce(Error("The device did not respond."));
+    await store.refresh();
+    expect(store.snapshot.stale).toBe(true);
+    expect(store.snapshot.notice).toBe("Connection needs attention.");
+    await store.refresh();
+    expect(store.snapshot.stale).toBe(false);
+    expect(store.snapshot.error).toBe("");
+    expect(store.snapshot.notice).toBe("");
+    expect(request.mock.calls.filter(([method]) => method !== "GET")).toHaveLength(1);
+  });
+
+  it("retains an uncertain write through a later outage and reconnection", async () => {
+    const api = new DemoTransport();
+    const request = vi.spyOn(api, "request");
+    const store = new StudioStore(api);
+    await store.connect();
+    request.mockRejectedValueOnce(new ApiError("The change may have reached the light."));
+    await expect(store.write("PATCH", "/state", { power: true })).rejects.toThrow("may have reached");
+    request.mockRejectedValueOnce(Error("Offline"));
+    await store.refresh();
+    expect(store.snapshot.error).toBe("Offline");
+    await store.refresh();
+    expect(store.snapshot.stale).toBe(false);
+    expect(store.snapshot.error).toBe("The change may have reached the light.");
+    expect(store.snapshot.notice).toBe("Request not confirmed.");
+    expect(request.mock.calls.filter(([method]) => method !== "GET")).toHaveLength(1);
+    store.clearError();
+    await store.refresh();
+    expect(store.snapshot.error).toBe("");
+  });
+
   it("refreshes controller readiness without reconnecting or replaying output", async () => {
     const api = new DemoTransport(),
       store = new StudioStore(api);
