@@ -266,6 +266,7 @@ class Tests(unittest.TestCase):
     def test_public_guide_local_link_closure_is_explicit_and_complete(self):
         version = (ROOT / "VERSION").read_text().strip()
         included = {*p.GUIDE_FILES, *p.GUIDE_IMAGES, f"docs/releases/{version}.md"}
+        self.assertIn("installer/README.md", included)
         for name in sorted(included):
             source = ROOT / name
             self.assertTrue(source.is_file(), name)

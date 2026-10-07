@@ -28,7 +28,7 @@ INSTALLER = ("cli.js", "package.json", "THIRD_PARTY_NOTICES.txt", "build.json")
 STAGES = ("identity", "OFF1", "LOW1", "lighting")
 GUIDE_IMAGES = ("assets/brand/readme-hero.png", "assets/dashboard/light-live.jpg",
                 "assets/dashboard/scenes-live.jpg", "assets/installer/setup-preview.png")
-GUIDE_FILES = ("LICENSE", "README.md", "PROGRESS.md", "docs/getting-started.md",
+GUIDE_FILES = ("LICENSE", "README.md", "PROGRESS.md", "installer/README.md", "docs/getting-started.md",
                "docs/api-contract.md", "docs/architecture.md", "docs/color-rendering.md",
                "docs/controller-update-journal.md", "docs/controller-updates.md",
                "docs/home-assistant.md", "docs/openapi.json", "docs/releasing.md",
