@@ -7,10 +7,10 @@ export const palette = {ink: '#EDE9DF', muted: '#8B9798', accent: '#A4E6D5', lin
 export function Key({children}: {children: React.ReactNode}) {
   return <Text color={palette.accent}>{children}</Text>;
 }
-export function Frame({children, width = 96, mode = 'LOCAL PREPARATION', footer, compact = width <= 80}: {children: React.ReactNode; width?: number; mode?: string; footer?: string; compact?: boolean}) {
+export function Frame({children, width = 96, mode, footer, compact = width <= 80}: {children: React.ReactNode; width?: number; mode?: string; footer?: string; compact?: boolean}) {
   return <Box flexDirection="column" width={Math.max(36, Math.min(width, 104))} paddingX={1}>
-    <Box marginTop={compact ? 0 : 1} justifyContent="space-between"><Text bold color={palette.ink}>◉  OPEN KEYLIGHT <Text color={palette.accent}>CHROMA</Text></Text><Text color={palette.muted}>INSTALLER</Text></Box>
-    <Box marginTop={1} marginBottom={1}><Text color={palette.muted}>Your light. Your firmware. <Text color={palette.amber}>{mode}</Text></Text></Box>
+    <Box marginTop={compact ? 0 : 1} marginBottom={mode ? 0 : 1} justifyContent="space-between"><Text bold color={palette.ink}>◉  OPEN KEYLIGHT <Text color={palette.accent}>CHROMA</Text></Text><Text color={palette.muted}>INSTALLER</Text></Box>
+    {mode && <Box marginTop={1} marginBottom={1}><Text color={palette.muted}>{mode}</Text></Box>}
     <Box flexDirection="column" borderStyle="round" borderColor={palette.line} paddingX={2} paddingY={compact ? 0 : 1}>{children}</Box>
     <Box marginTop={1} marginBottom={compact ? 0 : 1}><Text color={palette.muted}>{footer ?? 'Tab / ↑↓ move   Enter continue   Esc back   Ctrl+C exit'}</Text></Box>
   </Box>;
@@ -38,13 +38,11 @@ export function Button({label, active = true, compact = false}: {label: string; 
 export function LightChoices({lights, selected}: {lights: Light[]; selected: number}) {
   const first = Math.max(0, Math.min(selected - 1, lights.length - 3));
   return <>
-    <Heading eyebrow="01 / FIND YOUR LIGHT" title="Which light are we making yours?" detail="Find lights on your local network. Nothing is changed." />
+    <Heading eyebrow="FIND YOUR LIGHT" title="Choose a light." />
     {lights.length === 0 && <Box flexDirection="column" marginBottom={1}>
-      <Text color={palette.ink}>Check that the light has power and has finished starting.</Text>
-      <Text color={palette.muted}>Use the same local network; guest isolation or a VPN can hide it.</Text>
-      <Text color={palette.muted}>Find its address in your router. For an installed light, open that address in a browser. For stock firmware, enter it below.</Text>
+      <Text color={palette.muted}>Keep your light powered and use the same local network.</Text>
     </Box>}
-    {lights.slice(first, first + 3).map((light, offset) => <Box key={`${light.ip}/${light.deviceId}`} flexDirection="column" marginBottom={1}><Button compact label={`${light.name}${light.installed ? ' · already installed' : ''}`} active={selected === first + offset} /><Text color={palette.muted}>  {light.ip} · {light.mac ?? light.deviceId}</Text></Box>)}
+    {lights.slice(first, first + 3).map((light, offset) => <Box key={`${light.ip}/${light.deviceId}`} flexDirection="column" marginBottom={1}><Button compact label={`${light.name}${light.installed ? ' · Open Keylight' : ''}`} active={selected === first + offset} /><Text color={palette.muted}>  {light.ip}</Text></Box>)}
     {lights.length > 3 && <Text color={palette.muted}>{first + 1}–{Math.min(first + 3, lights.length)} of {lights.length} · ↑↓ browse</Text>}
     <Button compact label="Look again" active={selected === lights.length} />
     <Button compact label="Enter stock address manually" active={selected === lights.length + 1} />
@@ -62,38 +60,38 @@ export function PlanCard({summary, details = false}: {summary: PlanSummary; deta
   return <Box flexDirection="column">
     <Heading eyebrow="READY TO REVIEW" title={display(summary.target_name)} detail={summary.target_ip} />
     <Text color={palette.ink}>Open Keylight {summary.esp.version}</Text>
-    <Box marginY={1} flexDirection="column"><Text color={palette.accent}>✓ Firmware for both chips + your local dashboard</Text><Text color={palette.accent}>✓ Verified recovery image available</Text></Box>
-    <Text color={palette.ink}>Two quick visual checks, with you watching the light.</Text>
-    <Text color={palette.muted}>First darkness, then five gentle colour pulses.</Text>
-    {details && <Box marginTop={1} flexDirection="column"><Text color={palette.muted}>{summary.device_id} · plan {summary.manifest_sha256}</Text><Text color={palette.muted}>{display(summary.restore_provenance, 1000)}</Text></Box>}
-    <Notice>Files checked. The light has not been contacted yet.</Notice>
+    <Box marginY={1}><Text color={palette.accent}>✓ Firmware and recovery files ready</Text></Box>
+    <Text color={palette.muted}>Watch for darkness, then five gentle colour pulses.</Text>
+    {details && <Box marginTop={1} flexDirection="column"><Text color={palette.muted}>{summary.device_id} · plan {summary.manifest_sha256}</Text><Text color={palette.muted}>{display(summary.restore_provenance, 1000)}</Text><Text color={palette.muted}>Files checked. The light has not been contacted yet.</Text></Box>}
   </Box>;
 }
-export function ProgressView({progress, preview = false, width = 96, yes = false, running = false, auditPath, canFinish = false}: {progress: Progress; preview?: boolean; width?: number; yes?: boolean; running?: boolean; auditPath?: string; canFinish?: boolean}) {
+export function ProgressView({progress, preview = false, width = 96, yes = false, running = false, auditPath, details = false, targetName}: {progress: Progress; preview?: boolean; width?: number; yes?: boolean; running?: boolean; auditPath?: string; details?: boolean; targetName?: string}) {
   const stages = stagesFor(progress.workflow);
   const count = progress.completed ?? 0, total = progress.total ?? 0;
-  const validCount = total > 0 && count >= 0 && count <= total;
+  const stopped = progress.state === 'stopped';
+  const timed = progress.state === 'quiet' || progress.unit === 'seconds';
+  const validCount = !stopped && !timed && total > 0 && count >= 0 && count <= total;
   const bars = 24, filled = validCount ? Math.floor(count / total * bars) : 0;
-  return <Frame width={width} mode={preview ? 'INTERFACE PREVIEW · NO DEVICE ACTIVITY' : progress.workflow === 'finish' ? 'FINISH YOUR INSTALLATION' : 'GUIDED INSTALLATION'} footer={preview ? 'Esc back   Ctrl+C exit' : running ? '↑↓ choose observation   Enter answer   Ctrl+C stop after this stage' : `${canFinish ? 'F finish a previous installation   ' : ''}Esc review   Ctrl+C exit`}>
+  const footer = preview ? 'Esc back · Ctrl+C exit' : stopped && running ? 'D details · Waiting for a safe stop' : progress.prompt && !stopped ? '↑↓ choose · Enter confirm · Ctrl+C stop' : running ? 'D details · Ctrl+C stop safely' : 'Esc back · D details · Ctrl+C exit';
+  const headline = stopped ? running ? 'Stopping safely' : 'Installation stopped' : progress.state === 'complete' ? 'Ready to use' : stages[progress.stage]?.[1] ?? 'Installing';
+  return <Frame width={width} mode={preview ? 'INTERFACE PREVIEW · NO DEVICE ACTIVITY' : targetName ?? (progress.workflow === 'finish' ? 'FINISH YOUR INSTALLATION' : 'INSTALLING')} footer={footer}>
     <Box flexDirection={width < 76 ? 'column' : 'row'} gap={2}>
       <Box flexDirection="column" width={width < 76 ? undefined : 29} flexShrink={0}>
         {stages.map(([id, title], i) => <Box key={id}><Text color={i === progress.stage ? palette.accent : palette.muted}>{progress.finishedStages?.includes(i) ? '✓' : String(i + 1).padStart(2, '0')}  {title}</Text></Box>)}
       </Box>
       <Box flexDirection="column" flexGrow={1}>
-        <Heading eyebrow={`STEP ${progress.stage + 1} / ${stages.length}`} title={stages[progress.stage]?.[1] ?? 'Installer status'} detail={stages[progress.stage]?.[2]} />
-        <Text color={palette.ink}>{display(progress.label)}</Text>
-        {progress.state === 'stopped' && !running && <Box marginTop={1} flexDirection="column">
-          <Text color={palette.amber}>Installation stopped. Nothing will retry automatically.</Text>
-          {canFinish && <Text color={palette.muted}>Already installed the Open Keylight light engine? Press F to verify it and finish the dashboard installation.</Text>}
-          {auditPath && <Text color={palette.muted} wrap="truncate-middle">Audit: {display(auditPath, 1000)}</Text>}
-        </Box>}
-        {validCount && <Box marginTop={1} flexDirection="column"><Text color={palette.accent}>{'━'.repeat(filled)}<Text color={palette.line}>{'─'.repeat(bars - filled)}</Text></Text><Text color={palette.muted}>{count} / {total} · {Math.floor(count / total * 100)}%</Text></Box>}
-        {progress.state === 'quiet' && <Notice>{`Letting the controller finish and restart${progress.remainingSeconds === undefined ? '' : ` · ${progress.remainingSeconds}s remaining`}. Keep the light powered.`}</Notice>}
-        {progress.prompt && <Box marginTop={1} flexDirection="column"><Text bold color={palette.amber}>{display(progress.prompt.question)}</Text><Text color={palette.muted}>Choose only what you observed. No answer is assumed.</Text><Button label="No / unsure — stop" active={!yes} /><Button label="Yes — the observation matches" active={yes} /></Box>}
-        {progress.action && <Box marginTop={1} flexDirection="column"><Text bold color={palette.accent}>Your new dashboard is ready</Text><Text>{progress.action.url}</Text><Text color={palette.muted}>{progress.acceptanceState === 'complete' ? 'Access saved and application confirmed. Finishing independent checks.' : progress.acceptanceState === 'running' || progress.action.pairingOpen ? 'Verifying pairing, a brief 5% white check, Off and application acceptance.' : 'Hold the light’s button for 3 seconds to open pairing. Waiting for a fresh device check.'}</Text><Text color={palette.amber}>Trial: {progress.remainingSeconds ?? progress.action.remainingSeconds}s remaining at last check</Text></Box>}
+        <Heading eyebrow={`STEP ${progress.stage + 1} / ${stages.length}`} title={headline} />
+        {stopped ? <Box flexDirection="column"><Text color={palette.amber}>{/timed? ?out|deadline|Peer closed|ConnectionReset/i.test(progress.label) ? 'The light stopped responding.' : 'A setup check did not pass.'}</Text><Text color={palette.muted}>{running ? 'Keep this window open and the light powered.' : progress.stage === 0 && progress.workflow !== 'finish' && progress.failureCode === 'stock_loader_entry_unconfirmed' ? 'No firmware was uploaded.' : 'Open details before continuing.'}</Text></Box> :
+          timed && !progress.action ? <Text color={palette.ink}>{progress.state === 'quiet' ? 'Waiting for the controller to restart…' : progress.stage === stages.length - 1 ? 'Finishing setup…' : 'Waiting for the dashboard…'}</Text> :
+          !progress.prompt && !progress.action && progress.state !== 'complete' && <Text color={palette.ink}>{details || validCount ? display(progress.label) : 'Checking and preparing this step…'}</Text>}
+        {validCount && <Box marginTop={1} flexDirection="column"><Text color={palette.accent}>{'━'.repeat(filled)}<Text color={palette.line}>{'─'.repeat(bars - filled)}</Text></Text><Text color={palette.muted}>{Math.floor(count / total * 100)}%{details || preview ? ` · ${count} / ${total}` : ''}</Text></Box>}
+        {timed && !stopped && <Text color={palette.muted}>Keep the light powered.</Text>}
+        {!stopped && progress.prompt && <Box flexDirection="column"><Text bold color={palette.amber}>{display(progress.prompt.question)}</Text><Button label="No / unsure" active={!yes} /><Button label="Yes" active={yes} /></Box>}
+        {!stopped && progress.action && <Box marginTop={1} flexDirection="column"><Text bold color={palette.accent}>Your new dashboard is ready</Text><Text>{progress.action.url}</Text><Text color={palette.muted}>{progress.acceptanceState === 'complete' ? 'Connection saved. Finishing checks…' : progress.acceptanceState === 'running' || progress.action.pairingOpen ? 'Connecting and checking the light…' : 'Hold the light’s button for 3 seconds to pair.'}</Text><Text color={palette.amber}>{progress.remainingSeconds ?? progress.action.remainingSeconds}s left to finish setup</Text></Box>}
         {progress.state === 'complete' && progress.dashboardUrl && <Box marginTop={1} flexDirection="column"><Text bold color={palette.accent}>Your light is ready.</Text><Text color={palette.ink}>{progress.dashboardUrl}</Text><Text color={palette.muted}>Open your dashboard for colours, scenes and settings.</Text></Box>}
-        {progress.credentialPath && <Box marginTop={1} flexDirection="column"><Text color={palette.accent}>Your access token is saved privately</Text><Text color={palette.muted} wrap="truncate-middle">{display(progress.credentialPath, 1000)}</Text><Text color={palette.muted}>Use it in dashboard Connect access or Stream Deck.</Text></Box>}
-        {progress.cancelRequested && <Notice>Stop requested. Finishing the current safe stage; keep power and this window open.</Notice>}
+        {!stopped && progress.credentialPath && <Box marginTop={1} flexDirection="column"><Text color={palette.accent}>Connection saved on this computer.</Text>{details && <Text color={palette.muted} wrap="truncate-middle">{display(progress.credentialPath, 1000)}</Text>}</Box>}
+        {!stopped && progress.cancelRequested && <Notice>Stopping after this step. Keep power connected.</Notice>}
+        {details && <Box marginTop={1} flexDirection="column"><Text color={palette.muted}>{display(progress.label, 1000)}</Text>{auditPath && <Text color={palette.muted} wrap="truncate-middle">Audit: {display(auditPath, 1000)}</Text>}</Box>}
         {preview && <Notice>Illustrative progress only. These values do not describe a connected light.</Notice>}
       </Box>
     </Box>

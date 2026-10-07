@@ -12,7 +12,7 @@ The initial stock profile is **ESP 1.0.13.0 with NXP 1.3.0.0**, using the review
 
 Initial Wi-Fi provisioning of a factory-new light is outside this installer. Once Open Keylight is installed, its dashboard handles Wi-Fi configuration without Razer software.
 
-If an earlier installation already put Open Keylight on the lighting controller but left the stock ESP, select **Finish a previous installation** with **F** at the installer's review screen. This verifies and retains the installed light engine while finishing the dashboard application. A stopped initial check also offers this option. It cannot recover an unresponsive controller or resume an incomplete flash.
+If an earlier installation already put Open Keylight on the lighting controller but left the stock ESP, open its prepared plan and press **D** at review to reveal **F · Finish a previous installation**. This verifies and retains the installed light engine while finishing the dashboard application. It cannot recover an unresponsive controller or resume an incomplete flash; a connection timeout alone is not a reason to choose it.
 
 ## Install with the guided Windows setup
 
@@ -21,12 +21,12 @@ The release package is designed for **Windows 10/11 x64**. It includes original 
 1. Download the Windows installer ZIP from the project's [Releases](https://github.com/StormBurpee/open-keylight-chroma/releases) page. Read that release's supported hardware and qualification record.
 2. Choose **Extract all**. Open **start-open-keylight.cmd** from the extracted folder.
 3. Choose **Find my light**, then select it by name and address. If discovery finds nothing, check that the computer and light are on the same network; guest-network isolation or a VPN can prevent discovery.
-4. Review the selected light and release. The installer downloads the exact stock recovery image from Razer's official HTTPS server and verifies it locally. You do not need to find or extract a firmware backup.
+4. Let the installer prepare the release files and exact stock recovery image automatically, then review the selected light and release. The recovery image comes from Razer's official HTTPS server and is verified locally. You do not need to find or extract a firmware backup.
 5. Start installation and keep both the terminal and light powered. Follow the two visual checks: complete darkness, then red, green, blue, warm white and cool white with darkness between them. Choose **No / unsure** if the observation does not match.
 6. The installer replaces the ESP application last, checks the actual image and dashboard assets, pairs its client, briefly checks 5% white and Off, and confirms the new application. If pairing is already closed, it asks for a three-second button hold.
 7. Open the dashboard address shown at completion. Pair your browser as described below.
 
-The installer saves an audit and a private client credential on your computer. Its recovery download stays in your local cache; it is not uploaded to GitHub or redistributed in our releases. That file is a known stock recovery image, **not a backup of your device's settings or complete flash**.
+The installer saves an audit and a private client credential on your computer. Press **D** for technical details and file paths. Its recovery download stays in your local cache; it is not uploaded to GitHub or redistributed in our releases. That file is a known stock recovery image, **not a backup of your device's settings or complete flash**.
 
 Advanced mode supports prepared plans and explicit artifact paths for developers. Normal setup does not require typing hashes, commits or firmware paths. See [the stock migration reference](stock-migration.md) for those details.
 

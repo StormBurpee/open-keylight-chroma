@@ -35,7 +35,7 @@ export class EventState {
         } else {
           requireValue(e.phase === 'completed' && index === this.active && !this.finished.has(index) && !this.progress.prompt);
           this.finished.add(index);
-          this.progress = {...this.progress, state: 'waiting', label: e.message, completed: undefined, total: undefined, finishedStages: [...this.finished]};
+          this.progress = {...this.progress, state: 'waiting', label: e.message, completed: undefined, total: undefined, unit: undefined, remainingSeconds: undefined, finishedStages: [...this.finished]};
         }
         break;
       }
@@ -47,8 +47,8 @@ export class EventState {
           && typeof e.completed === 'number' && Number.isFinite(e.completed) && e.completed >= 0 && e.completed <= e.total);
         if (e.remaining_ms !== undefined) requireValue(integer(e.remaining_ms, 0, 180000));
         const labels: Record<string, string> = {controller_program: 'Writing the controller bank', controller_verify: 'Reading back every byte', esp_upload: 'Sending the dashboard application', esp_processing: 'Device processing the application', quiet: 'Allowing the controller to finish safely', startup_wait: 'Waiting for the new dashboard', trial: 'Completing automatic setup and checking acceptance'};
-        this.progress = {...this.progress, state: e.scope === 'quiet' ? 'quiet' : 'running', label: labels[String(e.scope)]!, completed: e.completed, total: e.total,
-          remainingSeconds: e.remaining_ms === undefined ? undefined : Math.ceil(Number(e.remaining_ms) / 1000)};
+        this.progress = {...this.progress, state: e.scope === 'quiet' ? 'quiet' : 'running', label: labels[String(e.scope)]!, completed: e.completed, total: e.total, unit: e.unit as Progress['unit'],
+          remainingSeconds: e.remaining_ms === undefined ? e.unit === 'seconds' ? Math.ceil(e.total - e.completed) : undefined : Math.ceil(Number(e.remaining_ms) / 1000)};
         break;
       }
       case 'prompt':
@@ -56,7 +56,7 @@ export class EventState {
           && ['off1_observation', 'low1_observation'].includes(String(e.kind)) && text(e.message)
           && Array.isArray(e.choices) && e.choices.length === 2 && e.choices[0] === 'yes' && e.choices[1] === 'no');
         this.promptIds.add(e.id);
-        this.progress = {...this.progress, state: 'prompt', prompt: {id: e.id, question: e.message}};
+        this.progress = {...this.progress, state: 'prompt', prompt: {id: e.id, question: e.message}, completed: undefined, total: undefined, unit: undefined, remainingSeconds: undefined};
         break;
       case 'action': {
         requireValue(this.active === stages.length - 1 && e.kind === 'native_acceptance' && e.device_id === this.target.deviceId
@@ -72,15 +72,16 @@ export class EventState {
       case 'status':
         requireValue(text(e.code, 80) && text(e.message));
         if (e.code === 'installation_workflow') requireValue(this.active === -1 && e.workflow === (this.target.workflow ?? 'install'));
-        this.progress = {...this.progress, label: e.message};
+        this.progress = {...this.progress, state: this.progress.prompt ? 'prompt' : 'running', label: e.message, completed: undefined, total: undefined, unit: undefined};
         break;
       case 'completed':
         requireValue(e.outcome === 'installed' && this.finished.size === stages.length && !this.progress.prompt);
-        this.terminal = 'installed'; this.progress = {...this.progress, state: 'complete', label: 'Installation verified and dashboard confirmed.', action: undefined};
+        this.terminal = 'installed'; this.progress = {...this.progress, state: 'complete', label: 'Installation verified and dashboard confirmed.', action: undefined, completed: undefined, total: undefined, unit: undefined, remainingSeconds: undefined};
         break;
       case 'stopped':
         requireValue(text(e.message) && text(e.error_type, 100) && e.automatic_retry === false && e.automatic_restore === false);
-        this.terminal = 'stopped'; this.progress = {...this.progress, state: 'stopped', label: e.message, prompt: undefined};
+        if (e.code === 'stock_loader_entry_unconfirmed') requireValue(this.active === 0 && this.finished.size === 0 && this.target.workflow !== 'finish');
+        this.terminal = 'stopped'; this.progress = {...this.progress, state: 'stopped', label: e.message, failureCode: e.code === 'stock_loader_entry_unconfirmed' ? e.code : undefined, prompt: undefined, completed: undefined, total: undefined, unit: undefined, remainingSeconds: undefined, action: undefined, cancelRequested: undefined};
         break;
       default: requireValue(false);
     }

@@ -102,6 +102,16 @@ test('finish after an early stop needs a fresh explicit review, audit and exclus
     assert.equal(calls.length, 1); assert.equal(calls[0]!.mode, 'install');
     await key('f'); assert.equal(calls.length, 1); assert.doesNotMatch(screen.lastFrame()!, /FINISH YOUR INSTALLATION/);
     update({workflow: 'install', stage: 0, state: 'stopped', label: 'Controller already original'}); stop('stopped'); await pause(40);
+    assert.match(screen.lastFrame()!, /Installation stopped/);
+    assert.doesNotMatch(screen.lastFrame()!, /No firmware was uploaded/);
+    assert.doesNotMatch(screen.lastFrame()!, /Controller already original|Audit:|Finish a previous|F ·/);
+    await key('f'); assert.equal(calls.length, 1); assert.match(screen.lastFrame()!, /Installation stopped/);
+    await key('d'); assert.match(screen.lastFrame()!, /Controller already original/); assert.match(screen.lastFrame()!, /Audit:/);
+    assert.doesNotMatch(screen.lastFrame()!, /Finish a previous|F ·/);
+    await key('f'); assert.equal(calls.length, 1); assert.match(screen.lastFrame()!, /Installation stopped/);
+    await key('d'); assert.doesNotMatch(screen.lastFrame()!, /Controller already original|Audit:/);
+    await key('\x1b'); assert.match(screen.lastFrame()!, /READY TO REVIEW/);
+    await key('d'); assert.match(screen.lastFrame()!, /F · Finish a previous installation/);
     await key('f'); assert.match(screen.lastFrame()!, /FINISH YOUR INSTALLATION/);
     assert.match(screen.lastFrame()!, /light engine is retained/); await key('\r'); assert.equal(calls.length, 1);
     await key(' '); await key('\r'); assert.equal(calls.length, 2); assert.equal(calls[1]!.mode, 'finish');

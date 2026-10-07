@@ -27,7 +27,7 @@ export function installationRunner(python = process.env['OKL_PYTHON'] ?? (proces
       if (fault) return;
       fault = error instanceof Error ? error : new Error('Installer event stream failed.');
       // Never kill a flashing child. Ask it to stop only after its safe stage.
-      cancel(); state.progress = {...state.progress, state: 'stopped', label: `${fault.message} Waiting for the current safe stage; keep this window open.`}; publish();
+      cancel(); state.progress = {...state.progress, state: 'stopped', label: `${fault.message} Waiting for the current safe stage; keep this window open.`, failureCode: undefined, prompt: undefined, action: undefined, completed: undefined, total: undefined, unit: undefined, remainingSeconds: undefined}; publish();
     };
     child.stdin.on('error', fail);
     const lines = new EventLines(value => {if (!fault) {

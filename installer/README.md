@@ -5,7 +5,7 @@ A React Ink interface for the reviewed Python migration engine. In a packaged Wi
 ```text
 cd installer
 npm ci
-node --import tsx src/cli.tsx
+npm run start
 ```
 
 These commands work in PowerShell and POSIX shells. Set `OKL_PYTHON` to a Python executable if it is not on `PATH`. Prefer a terminal at least 80 columns wide.
@@ -17,19 +17,19 @@ node --import tsx src/cli.tsx --plan "/path/to/migration.json"
 node --import tsx src/cli.tsx --artifacts "/path/to/artifacts"
 ```
 
-The default flow finds lights with a bounded, read-only local mDNS query. Choose a name, review the bundled release, and install. Already installed lights link to their dashboard. Discovery supplies selection hints; the backend independently verifies the exact target before writing. Advanced setup accepts explicit targets, builds and existing plans.
+Choose **Find my light**, select your light, then review and install. The installer finds the release files and prepares recovery automatically. Already installed lights link to their dashboard. Discovery is read-only; the backend independently verifies the exact target before writing. Advanced setup accepts explicit targets, builds and existing plans. Press **D** during review or installation for technical details and the audit path.
 
 The six artifacts in `bundle.json` are checked against their declared hashes and confined relative paths. The Python backend then validates the actual package contents, image and embedded dashboard assets. The verified plan digest is passed back when you explicitly start, preventing an unnoticed plan change between review and execution. A hash establishes integrity, not authorship or electrical qualification; use a reviewed release for the supported hardware.
 
-Automatic lookup checks `bundle.json`, `firmware/bundle.json` (the packaged release layout), `../bundle.json`, then `release/bundle.json`, relative to the repository or selected `--root`. The first existing bundle must validate; a malformed candidate is never skipped. Build directories are not scanned or selected by age. In a source checkout, select the intended prepared bundle explicitly when none is in those locations. Explicit paths are relative to the running process's working directory. Since npm runs scripts from the package directory, prefer an absolute path with `npm --prefix installer start -- --bundle "/absolute/path/to/bundle.json"`.
+Automatic lookup checks `bundle.json`, `firmware/bundle.json` (the packaged release layout), `../bundle.json`, then `release/bundle.json`, relative to the repository or selected `--root`. A source checkout also checks the immediate `build/release/*/firmware/bundle.json` paths. Local builds are ranked by semantic version, newest manifest timestamp, then path. The selected bundle and every artifact must validate; a corrupt selection does not silently fall back to an older build. No bundle argument is needed for these layouts. Use `npm run start -- --bundle "/absolute/path/to/bundle.json"` only to select a particular build.
 
 The recovery step downloads the pinned official Razer archive through `tools/vendor_restore.py`, checks it and derives the complete reviewed recovery bank. An exact existing cache is reused. This is a **vendor-derived restore image, not a backup of your device**. Advanced users can supply a complete reviewed local bank and its real provenance.
 
 During installation, progress comes only from versioned JSONL events. You must observe and answer both physical checks. No answer defaults to Yes. After the backend verifies the exact new application, controller and dashboard assets, the installer pairs once, checks a brief 5% white output and Off through authenticated readbacks, then confirms the exact application once. It binds every command to the current revision and checks that the ESP has not restarted. These are protocol checks, not optical measurements.
 
-If a previous installation left the Open Keylight light engine running behind the stock ESP, press **F** at review to **Finish a previous installation**. The same option appears after a stopped initial connection check. Review and start it explicitly: it verifies that exact existing controller, its ownership and Off state, uploads only the ESP, then runs the normal dashboard acceptance checks. Its three stages do not repeat or claim fresh darkness/channel qualification. It refuses unknown firmware, a recovery loader, an expired controller trial or an unverified state. Each attempt creates a new audit; no failed transfer resumes automatically.
+If a previous installation left the Open Keylight light engine running behind the stock ESP, open its prepared plan and press **D** at review for the advanced **F · Finish a previous installation** option. Review and start it explicitly: it verifies that exact existing controller, its ownership and Off state, uploads only the ESP, then runs the normal dashboard acceptance checks. Its three stages do not repeat or claim fresh darkness/channel qualification. It refuses unknown firmware, a recovery loader, an expired controller trial or an unverified state. A generic connection failure does not offer this as a recovery shortcut. Each attempt creates a new audit; no failed transfer resumes automatically.
 
-Pairing credentials are stored in a new private local directory: owner-only permissions on POSIX, or an explicit current-user ACL on Windows. Tokens never appear in progress events, URLs or audit records. The final screen shows the credential file path and dashboard URL, so you can connect the dashboard after installation without rushing the first-boot trial. A lost pairing or confirmation response is never retried automatically.
+Pairing credentials are stored in a new private local directory: owner-only permissions on POSIX, or an explicit current-user ACL on Windows. Tokens never appear in progress events, URLs or audit records. The final screen shows the dashboard URL; press **D** for the credential file path. A lost pairing or confirmation response is never retried automatically.
 
 **Ctrl+C requests a stop after the current safe stage.** It does not kill the Python process during a write, commit, quiet interval or diagnostic return. Keep the terminal and power connected until the backend reports its result. A failed or ambiguous operation is never retried automatically. Keep the exclusive audit file for diagnosis and follow [the recovery matrix](../docs/stock-migration.md).
 

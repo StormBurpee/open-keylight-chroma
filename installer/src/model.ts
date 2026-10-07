@@ -80,7 +80,9 @@ export const finishStages = [
 ] as const;
 export const stagesFor = (mode: InstallationMode = 'install') => mode === 'finish' ? finishStages : stages;
 export type Progress = {
+  failureCode?: 'stock_loader_entry_unconfirmed';
   workflow?: InstallationMode;
+  unit?: 'blocks' | 'bytes' | 'seconds' | 'percent';
   stage: number; state: 'waiting' | 'running' | 'quiet' | 'prompt' | 'stopped' | 'complete';
   label: string; completed?: number; total?: number; remainingSeconds?: number;
   prompt?: {id: string; question: string};

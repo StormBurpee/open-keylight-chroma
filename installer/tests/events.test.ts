@@ -54,6 +54,43 @@ test('strict sequence, stage order, counts and unknown events fail closed', () =
   for (const bad of [{stage_id: 'esp'}, {completed: 449}, {completed: -1}, {total: 0}, {unit: 'guessed'}]) assert.throws(() => event(s, {...p, ...bad}));
   event(s, p); assert.equal(s.progress.completed, 1); assert.equal(s.terminal, undefined);
 });
+
+test('restart waits retain time units, never imply stage completion and clear on failure', () => {
+  const s = state(); stage(s, 0);
+  event(s, {event: 'progress', stage_id: 'stock', scope: 'quiet', completed: 0.1, total: 3, unit: 'seconds'});
+  assert.equal(s.progress.unit, 'seconds'); assert.equal(s.progress.remainingSeconds, 3);
+  event(s, {event: 'progress', stage_id: 'stock', scope: 'quiet', completed: 3, total: 3, unit: 'seconds'});
+  assert.equal(s.progress.state, 'quiet'); assert.equal(s.progress.remainingSeconds, 0);
+  assert.deepEqual(s.progress.finishedStages, []); assert.equal(s.terminal, undefined);
+  s.cancel();
+  event(s, {event: 'stopped', message: 'Controller did not respond after restart', error_type: 'TimeoutError', automatic_retry: false, automatic_restore: false});
+  assert.equal(s.progress.state, 'stopped');
+  for (const key of ['completed', 'total', 'unit', 'remainingSeconds', 'prompt', 'action', 'cancelRequested'] as const) assert.equal(s.progress[key], undefined);
+  assert.deepEqual(s.progress.finishedStages, []);
+});
+
+test('a new status cannot retain the preceding transfer bar or quiet state', () => {
+  const s = state(); stage(s, 0);
+  event(s, {event: 'progress', stage_id: 'stock', scope: 'quiet', completed: 3, total: 3, unit: 'seconds'});
+  event(s, {event: 'status', code: 'checking', message: 'Checking the controller identity'});
+  assert.equal(s.progress.state, 'running'); assert.equal(s.progress.unit, undefined);
+  assert.equal(s.progress.completed, undefined); assert.equal(s.progress.total, undefined);
+  assert.deepEqual(s.progress.finishedStages, []);
+});
+
+test('only a correlated stock entry stop establishes that no image operation began', () => {
+  const stop = {event: 'stopped', message: 'Entry was not confirmed', error_type: 'StockEntryError', code: 'stock_loader_entry_unconfirmed', automatic_retry: false, automatic_restore: false};
+  const s = state(); stage(s, 0); event(s, stop);
+  assert.equal(s.progress.failureCode, 'stock_loader_entry_unconfirmed');
+  const unknown = state(); stage(unknown, 0); event(unknown, {...stop, code: 'installer_stopped'});
+  assert.equal(unknown.progress.failureCode, undefined);
+  assert.throws(() => event(state(), stop));
+  const late = state(); stage(late, 0); stage(late, 0, 'completed'); stage(late, 1);
+  assert.throws(() => event(late, stop));
+  const finish = new EventState({...state().target, workflow: 'finish'});
+  event(finish, {event: 'stage', id: finishStages[0]![0], index: 1, total: 3, phase: 'started', message: 'Checking'});
+  assert.throws(() => event(finish, stop));
+});
 test('optical prompts require exact pending id and explicit answer; cancellation is single', () => {
   const s = state(); stage(s, 0);
   event(s, {event: 'prompt', id: 'random-1', kind: 'off1_observation', message: 'Was it dark?', choices: ['yes', 'no']});
@@ -90,6 +127,21 @@ test('live launcher has one argv-only process; malformed stream requests safe ca
   await assert.rejects(job.done, /malformed/);
   assert.equal(launches, 1); assert.equal(args.at(-1), '--events-jsonl'); assert.ok(args.includes(summary.manifest_sha256));
   assert.deepEqual(writes.map(w => JSON.parse(w)), [{v: 1, command: 'cancel'}]);
+});
+
+test('a lost event stream clears stale interactions without claiming no firmware was uploaded', async () => {
+  const child = fake(), writes: string[] = []; child.stdin.on('data', b => writes.push(b.toString()));
+  let latest: import('../src/model.js').Progress | undefined;
+  const job = installationRunner('python', '.', () => child)('p', 'a', summary, p => {latest = p;});
+  child.stdout.write(JSON.stringify({v: 1, seq: 0, event: 'stage', id: 'stock', index: 1, total: 7, phase: 'started', message: 'Checking'}) + '\n');
+  child.stdout.write(JSON.stringify({v: 1, seq: 1, event: 'prompt', id: 'old', kind: 'off1_observation', message: 'Old prompt', choices: ['yes', 'no']}) + '\n');
+  child.stdout.write('lost event\n');
+  assert.equal(latest?.state, 'stopped'); assert.equal(latest?.cancelRequested, true);
+  for (const key of ['prompt', 'action', 'completed', 'total', 'unit', 'failureCode'] as const) assert.equal(latest?.[key], undefined);
+  assert.deepEqual(writes.map(w => JSON.parse(w)), [{v: 1, command: 'cancel'}]);
+  let done = false; void job.done.catch(() => {done = true;}); await Promise.resolve();
+  assert.equal(done, false);
+  child.emit('close', 1); await assert.rejects(job.done, /malformed/);
 });
 test('process exit zero without terminal event is not success; stop propagates without retry', async () => {
   const child = fake(); const job = installationRunner('python', '.', () => child)('p', 'a', summary, () => {});

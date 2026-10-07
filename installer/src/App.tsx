@@ -14,7 +14,7 @@ import {ArtifactList, Button, Field, Frame, Heading, LightChoices, Notice, PlanC
 import {draftErrors, emptyDraft, previewProgress, type Draft, type InstallationMode, type PlanSummary, type Progress} from './model.js';
 import {edit} from './input.js';
 
-type Page = 'home' | 'discover' | 'installed' | 'bundle' | 'target' | 'files' | 'restore' | 'review' | 'open' | 'ready' | 'preview' | 'confirm' | 'live';
+type Page = 'home' | 'discover' | 'installed' | 'target' | 'files' | 'restore' | 'review' | 'open' | 'ready' | 'preview' | 'confirm' | 'live';
 const groups: Partial<Record<Page, {key: keyof Draft; label: string; hint?: string}[]>> = {
   target: [
     {key: 'ip', label: 'Light IP address', hint: 'From your router. One selected light; no network scanning.'},
@@ -52,7 +52,7 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
   const [live, setLive] = useState(false), [yes, setYes] = useState(false), [exclusive, setExclusive] = useState(false);
   const [mode, setMode] = useState<InstallationMode>('install');
   const [audit, setAudit] = useState(''), [manualRestore, setManualRestore] = useState(false), [details, setDetails] = useState(false);
-  const [lights, setLights] = useState<Light[]>([]), [bundle, setBundle] = useState<Bundle>();
+  const [lights, setLights] = useState<Light[]>([]);
   const [installedLight, setInstalledLight] = useState<Light>(), [installedDetails, setInstalledDetails] = useState<InstalledDetails>();
   useEffect(() => () => {operation.current?.abort(); execution.current?.cancel();}, []);
   const fields = page === 'restore' && !manualRestore ? [{key: 'output' as const, label: 'New plan path', hint: 'The parent folder must exist. Existing files are preserved.'}] : groups[page] ?? [], field = fields[selected];
@@ -79,25 +79,27 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
   const discoverNearby = () => {go('discover'); setLights([]); void task(async signal => {
     setNotice('Listening for Keylight announcements on your local network…');
     const found = await discover({signal}); signal.throwIfAborted(); setLights(found); setSelected(0);
-    setNotice(found.length ? 'Discovery is a selection hint. The installer checks the exact device before any write.' : 'No light answered. Discovery can be blocked on guest or isolated networks.');
+    setNotice(found.length ? '' : 'No lights found. Check power and use the same Wi-Fi network.');
   });};
   const selectLight = (light: Light) => void task(async signal => {
     if (light.installed) {
       setInstalledLight(light); setInstalledDetails(undefined); go('installed'); setNotice('Reading device details. No settings or firmware will change…');
       const details = await nativeReader(light, signal); signal.throwIfAborted(); setInstalledDetails(details); setNotice(''); return;
     }
-    setDraft(d => ({...d, ip: light.ip, name: light.name, deviceId: light.deviceId}));
-    const selectedBundle = await bundleLoader(initialBundle, initialFolder || root); signal.throwIfAborted(); setBundle(selectedBundle); go('bundle');
+    const target = {...draft, ip: light.ip, name: light.name, deviceId: light.deviceId};
+    setDraft(target); setNotice('Preparing your installation…');
+    const selectedBundle = await bundleLoader(initialBundle, initialFolder || root); signal.throwIfAborted();
+    await prepareGuided(selectedBundle, target, signal);
   });
-  const prepareGuided = () => void task(async signal => {
-    if (!bundle) throw new Error('Select the release bundle first.');
-    setNotice('Obtaining the pinned official recovery image…');
+  const prepareGuided = async (selectedBundle: Bundle, target: Draft, signal: AbortSignal) => {
+    setNotice('Preparing your installation…');
     const restore = await acquireRestore(resolve(homedir(), '.cache/open-keylight/stock-nxp-1.3.0.bin'), run, signal);
     const plans = resolve(homedir(), '.open-keylight/plans'); await mkdir(plans, {recursive: true, mode: 0o700});
-    const output = resolve(plans, `${draft.deviceId}-${randomUUID()}.json`);
-    const complete = {...draft, ...bundle.files, commit: bundle.commit, restore: restore.path, restoreVersion: '1.3.0.0', provenance: restore.provenance, output};
-    const result = await createPlan(complete, run, signal); setDraft(complete); setSummary(result); setPlan(output); go('ready');
-  });
+    const output = resolve(plans, `${target.deviceId}-${randomUUID()}.json`);
+    const complete = {...target, ...selectedBundle.files, commit: selectedBundle.commit, restore: restore.path, restoreVersion: '1.3.0.0', provenance: restore.provenance, output};
+    const result = await createPlan(complete, run, signal); setDraft(complete); setSummary(result); setPlan(output);
+    setMode('install'); setAudit(`${output}.install-${randomUUID()}.jsonl`); setExclusive(false); setDetails(false); go('confirm');
+  };
   const change = (input: string, key = {}) => {
     const value = page === 'open' ? plan : field ? draft[field.key] : undefined;
     if (value === undefined) return;
@@ -113,13 +115,15 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
   });
   const install = () => {
     if (!start || !summary || !exclusive || execution.current) return;
+    const stopped = (caught: unknown) => setProgress(p => ({...p, state: 'stopped', label: caught instanceof Error ? caught.message : 'Installer stopped.', failureCode: undefined, prompt: undefined, action: undefined, completed: undefined, total: undefined, unit: undefined, remainingSeconds: undefined, cancelRequested: undefined}));
     try {
+      setProgress({workflow: mode, stage: 0, state: 'waiting', label: 'Connecting to your light…', finishedStages: []});
       setYes(false); setLive(true); setPage('live');
       const active = start(plan, audit, summary, p => {setProgress(p); if (p.prompt?.id !== promptId.current) setYes(false); promptId.current = p.prompt?.id;}, mode);
       execution.current = active;
-      void active.done.catch(caught => setProgress(p => ({...p, state: 'stopped', label: caught instanceof Error ? caught.message : 'Installer stopped.'})))
+      void active.done.catch(stopped)
         .finally(() => {setLive(false); execution.current = undefined;});
-    } catch (caught) {setLive(false); setProgress(p => ({...p, state: 'stopped', label: caught instanceof Error ? caught.message : 'Could not start installer.'}));}
+    } catch (caught) {setLive(false); stopped(caught);}
   };
   const reviewInstallation = (selectedMode: InstallationMode) => {
     if (!start || !summary || live || execution.current) return;
@@ -131,8 +135,8 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
     if (busy) return;
     if (page === 'live') {
       if (!live && key.escape) go('ready');
-      if (!live && progress.state === 'stopped' && progress.stage === 0 && mode === 'install' && input === 'f') reviewInstallation('finish');
-      if (live && progress.prompt && !progress.cancelRequested) {
+      if (input === 'd') setDetails(v => !v);
+      if (live && progress.state !== 'stopped' && progress.prompt && !progress.cancelRequested) {
         if (key.upArrow || key.downArrow || key.tab) setYes(v => !v);
         else if (key.return) {execution.current?.answer(progress.prompt.id, yes ? 'yes' : 'no'); setYes(false);}
       }
@@ -155,10 +159,9 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
       else if (key.return) {if (selected === 0) go('discover'); else discoverNearby();}
       return;
     }
-    if (page === 'bundle') {if (key.return) prepareGuided(); return;}
     if (page === 'preview') return;
     if (page === 'ready') {if (input === 'd') setDetails(v => !v); else if (input === 'f') reviewInstallation('finish'); else if (key.return) reviewInstallation('install'); return;}
-    if (page === 'confirm') {if (input === ' ') setExclusive(v => !v); else if (key.return && exclusive) install(); return;}
+    if (page === 'confirm') {if (input === 'd') setDetails(v => !v); else if (input === ' ') setExclusive(v => !v); else if (key.return && exclusive) install(); return;}
     if (page === 'open') {
       if (key.return) void task(async signal => {const value = await validatePlan(plan, run, signal); setSummary(value); go('ready');});
       else change(input, key);
@@ -181,14 +184,13 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
   });
 
   if (page === 'preview') return <ProgressView progress={previewProgress} preview width={columns} />;
-  if (page === 'live') return <ProgressView progress={progress} width={columns} yes={yes} running={live} auditPath={audit} canFinish={!live && progress.state === 'stopped' && progress.stage === 0 && mode === 'install'} />;
+  if (page === 'live') return <ProgressView progress={progress} width={columns} yes={yes} running={live} auditPath={audit} details={details} targetName={summary?.target_name} />;
   return <Frame width={columns} compact={rows < 30 || columns <= 80}>
     {page === 'home' && <>
-      <Heading eyebrow="A LIGHT THAT BELONGS TO YOU" title="Beautiful light. Entirely yours." detail="A guided path from stock firmware to your own local dashboard." />
+      <Heading eyebrow="SETUP" title="Let's set up your light." detail="Firmware, controls and a dashboard. All on your light." />
       <Box flexDirection="column" marginY={1}>
         {['Find my light · guided setup', 'Advanced · choose builds and target', 'Open a prepared plan', 'Preview the installation'].map((label, index) => <Button key={label} label={label} active={selected === index} />)}
       </Box>
-      <Text color={palette.muted}>We find your light and prepare the right files. You watch two short checks; we handle the installation.</Text>
     </>}
     {page === 'discover' && <LightChoices lights={lights} selected={selected} />}
     {page === 'installed' && installedLight && <>
@@ -203,14 +205,6 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
       {installedDetails?.trialPending && <Notice>A firmware trial is pending. Use the dashboard to check your controls and confirm the trial.</Notice>}
       <Button label="Back to discovered lights" active={selected === 0} />
       <Button label="Find lights again" active={selected === 1} />
-    </>}
-    {page === 'bundle' && bundle && <>
-      <Heading eyebrow="02 / YOUR RELEASE" title={`Open Keylight ${bundle.version}`} detail={`Selected for ${draft.name} · ${draft.ip}`} />
-      <Text color={palette.accent}>✓ Firmware and dashboard files verified</Text>
-      <Text color={palette.muted}>Replaces both controller applications and installs the dashboard on your light.</Text>
-      <Box marginY={1} flexDirection="column"><Text color={palette.ink}>Recovery is prepared for you</Text><Text color={palette.muted}>A stock recovery image is downloaded directly from Razer and checked before installation.</Text></Box>
-      <Text color={palette.muted}>{bundle.version.includes('-') ? 'Early-access release' : 'Selected release'} · Stay beside the light for its two visual checks.</Text>
-      <Button label="Prepare and review this installation" />
     </>}
     {fields.length > 0 && <>
       <Heading eyebrow={page === 'target' ? '01 / YOUR LIGHT' : page === 'files' ? '02 / ORIGINAL FIRMWARE' : '03 / RECOVERY + PLAN'}
@@ -243,18 +237,17 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
       {details && <Box marginTop={1}><Text color={palette.muted}>Saved plan: {plan}</Text></Box>}
       <Text color={palette.muted}>D {details ? 'hide' : 'show'} technical details</Text>
       <Button label="Review installation and start" active={!!start} />
-      {start && <Text color={palette.accent}>F · Finish a previous installation — keep its Open Keylight light engine</Text>}
+      {start && details && <Text color={palette.muted}>F · Finish a previous installation</Text>}
       {!start && <Notice>This build has no live backend adapter. The plan is ready; no installation has started.</Notice>}
     </>}
     {page === 'confirm' && summary && <>
-      <Heading eyebrow={mode === 'finish' ? 'FINISH YOUR INSTALLATION' : 'READY WHEN YOU ARE'} title={`${mode === 'finish' ? 'Finish setup on' : 'Install on'} ${summary.target_name}`} detail={`${summary.target_ip} · ${summary.device_id}`} />
-      <Text color={palette.ink}>{mode === 'finish' ? 'Verify the installed Open Keylight light engine, then install the dashboard application. The light engine is retained.' : 'Watch this light for the darkness check and five low colour pulses.'}</Text>
-      {mode === 'finish' && <Text color={palette.muted}>Requires a running Open Keylight controller. An unknown controller or recovery loader will stop the check. Setup ends with a brief 5% white check and Off.</Text>}
-      <Text color={palette.muted}>Keep power connected. Close other light controls. We stop on a failed check and never retry or restore automatically.</Text>
-      <Box marginY={1}><Text color={exclusive ? palette.accent : palette.amber}>{exclusive ? '☑' : '☐'} I have exclusive control and can observe this light. <Text dimColor>[Space]</Text></Text></Box>
-      <Text color={palette.muted}>New audit: {audit}</Text>
-      <Button label={mode === 'finish' ? 'Verify the light engine and finish setup' : 'Start the guided installation'} active={exclusive} />
-      <Notice>Ctrl+C during installation requests a stop after the current safe stage. Do not close the terminal during a write or quiet interval.</Notice>
+      <Heading eyebrow={mode === 'finish' ? 'FINISH YOUR INSTALLATION' : 'READY TO INSTALL'} title={summary.target_name} detail={`${summary.target_ip} · Open Keylight ${summary.esp.version}`} />
+      <Text color={palette.ink}>{mode === 'finish' ? 'The installed light engine is retained. Only the dashboard application is replaced.' : 'The light will go dark, then show five gentle colour pulses.'}</Text>
+      <Text color={palette.muted}>Keep power connected and close other light controls.</Text>
+      <Box marginY={1}><Text color={exclusive ? palette.accent : palette.ink}>{exclusive ? '☑' : '☐'} {mode === 'finish' ? 'Other light controls are closed.' : 'I can watch the light. Other controls are closed.'} <Text dimColor>[Space]</Text></Text></Box>
+      <Button label={mode === 'finish' ? 'Finish installation' : 'Install Open Keylight'} active={exclusive} />
+      <Box marginTop={1}><Text color={palette.muted}>D · {details ? 'Hide' : 'Show'} technical details</Text></Box>
+      {details && <Box flexDirection="column" marginTop={1}><Text color={palette.muted}>{summary.device_id} · {summary.source_commit}</Text><Text color={palette.muted} wrap="truncate-middle">Audit: {audit}</Text><Text color={palette.muted}>Ctrl+C requests a stop after the current write or restart finishes.</Text></Box>}
     </>}
     {notice && <Notice error={error}>{notice}</Notice>}
   </Frame>;

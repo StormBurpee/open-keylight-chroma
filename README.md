@@ -103,7 +103,7 @@ cd ../firmware
 idf.py build
 ```
 
-The dashboard build supplies the assets embedded by the ESP build. For interface development, run `npm run dev` in `dashboard` and use `?demo=1`; the labelled demo sends no device requests. In `installer`, `npm ci`, `npm test` and `npm run bundle` build the guided setup tool.
+The dashboard build supplies the assets embedded by the ESP build. For interface development, run `npm run dev` in `dashboard` and use `?demo=1`; the labelled demo sends no device requests. In `installer`, run `npm ci` once, then `npm run start` for guided setup. It automatically selects a prepared local release from `build/release`; see the [installer guide](installer/README.md) for build selection and development checks.
 
 **Use application-only OTA on an existing light.** `idf.py flash` also writes bootloader and partition data and is not the migration procedure. The default NXP qualification build is inert; the installer uses separately reviewed diagnostic and lighting packages.
 
