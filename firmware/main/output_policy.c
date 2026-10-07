@@ -31,9 +31,9 @@ okl_result kl_output_park(const kl_state *target, uint8_t *effect, kl_output_exc
     if (result == OKL_OK) *effect = 1;
     return result;
 }
-okl_result kl_output_prepare(const kl_state *target, bool animated, uint8_t *effect,
+okl_result kl_output_prepare(const kl_state *target, bool animated, const kl_frame *initial, uint8_t *effect,
                             kl_output_exchange exchange, void *user) {
-    if (!target || !effect || !exchange || !kl_state_valid(target)) return OKL_INVALID;
+    if (!target || !effect || !exchange || !kl_state_valid(target) || (animated && !initial)) return OKL_INVALID;
     okl_result result;
     if (!target->power) {
         /* Off never depends on temperature or a colour-setting transaction. */
@@ -50,12 +50,20 @@ okl_result kl_output_prepare(const kl_state *target, bool animated, uint8_t *eff
     }
     if ((result = white(0, *effect, exchange, user)) != OKL_OK) return result;
     if (!animated) return kl_output_park(target, effect, exchange, user);
-    if ((result = color_level(255, exchange, user)) != OKL_OK) return result;
+    /* Native static RGB and an old custom framebuffer may both be unscaled.
+     * Hide them before mode setup, and expose only an ACKed scaled frame. A
+     * setup failure leaves the master dark instead of replaying a command. */
+    if ((result = color_level(0, exchange, user)) != OKL_OK) return result;
     okl_request request;
     result = okl_request_custom(&request);
     if (result == OKL_OK) result = exchange(user, &request);
-    if (result == OKL_OK) *effect = 8;
-    return result;
+    if (result != OKL_OK) return result;
+    *effect = 8;
+    uint8_t rgb[] = {kl_byte(initial->r), kl_byte(initial->g), kl_byte(initial->b)};
+    result = okl_request_frame(&request, rgb);
+    if (result == OKL_OK) result = exchange(user, &request);
+    if (result != OKL_OK) return result;
+    return color_level(255, exchange, user);
 }
 
 bool kl_native_matches(const kl_state *target, const okl_light_state *s) {

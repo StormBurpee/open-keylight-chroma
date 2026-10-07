@@ -44,43 +44,71 @@ static void fault(okl_result result, bool fresh_mismatch) {
     app_unlock();
 }
 
-static okl_result read_and_publish(bool adopt, const kl_state *expected, uint32_t revision, bool *mismatch) {
+static kl_frame observed_frame(const okl_light_state *state) {
+    kl_frame value = {.white = state->white_brightness, .temperature_k = state->temperature_kelvin};
+    /* Native custom/effect modes have no RGB framebuffer getter. Starting dark
+     * is honest there; preference RGB and rounded public percentages are not
+     * a measurement of the physical starting colour. */
+    if (state->effect == 1 && state->color_count == 1) {
+        float level = state->color_brightness / 255.0f;
+        value.r = state->colors[0] * level;
+        value.g = state->colors[1] * level;
+        value.b = state->colors[2] * level;
+    }
+    return value;
+}
+
+static okl_result read_and_publish(bool adopt, const kl_state *expected, uint32_t revision,
+                                   bool *mismatch, kl_frame *observed) {
     *mismatch = false;
     okl_light_state state;
     okl_result result = okl_nxp_read_state(&nxp, &state, nxp.transport.now_us(NULL) + 800000);
     if (result == OKL_OK) {
         native_effect = state.effect;
+        if (observed) *observed = observed_frame(&state);
         publish_native(&state, adopt, revision);
         if (expected && !kl_native_matches(expected, &state)) { *mismatch = true; result = OKL_VERIFY; }
     }
     return result;
 }
 
-static okl_result prepare(const kl_state *target, bool animated) {
+static okl_result prepare(const kl_state *target, bool animated, const kl_frame *initial) {
     okl_result result = okl_nxp_claim(&nxp, (const uint8_t *)"Open Keylight", 13, nxp.transport.now_us(NULL) + 600000);
     if (result != OKL_OK) return result;
-    return kl_output_prepare(target, animated, &native_effect, execute, NULL);
+    return kl_output_prepare(target, animated, initial, &native_effect, execute, NULL);
+}
+
+static okl_result release_if_synchronized(okl_result result) {
+    if (nxp.needs_recovery) return result;
+    /* release checks the current owner before writing; it cannot release a
+     * different client. Preserve a prior failure instead of reporting success. */
+    okl_result released = okl_nxp_release(&nxp, nxp.transport.now_us(NULL) + 600000);
+    return result == OKL_OK ? released : result;
 }
 
 static void worker_task(void *unused) {
     (void)unused;
     okl_request request; okl_reply reply; okl_firmware_version version;
+    /* The migration connection may leave its previous owner installed. */
+    okl_result result = okl_nxp_claim(&nxp, (const uint8_t *)"Open Keylight", 13,
+        nxp.transport.now_us(NULL) + 600000);
     okl_request_get(&request, OKL_GET_FIRMWARE);
-    okl_result result = okl_nxp_execute(&nxp, &request, &reply, okl_nxp_default_deadline(&nxp));
+    if (result == OKL_OK) result = okl_nxp_execute(&nxp, &request, &reply, okl_nxp_default_deadline(&nxp));
     bool mismatch = false;
+    kl_frame current = {0};
     if (result == OKL_OK) result = okl_reply_decode_firmware(&version, &reply);
     if (result == OKL_OK) {
         app_lock(); snprintf(app.controller_version, sizeof(app.controller_version), "%u.%u.%u.%u",
             version.component[0], version.component[1], version.component[2], version.component[3]); app_unlock();
-        result = read_and_publish(true, NULL, 0, &mismatch);
+        result = read_and_publish(true, NULL, 0, &mismatch, &current);
     }
+    result = release_if_synchronized(result);
     if (result != OKL_OK) fault(result, false);
     else {
         app_lock(); if (app.output_revision == 0) snprintf(app.operation, sizeof(app.operation), "idle"); app_unlock();
         app_mqtt_publish();
     }
-    app_lock(); kl_state initial = app.desired; app_unlock();
-    kl_frame current = kl_state_frame(&initial, 0);
+    /* A queued command cannot replace the physical starting frame read above. */
     kl_transition transition = {0};
     uint32_t seen_revision = 0;
     bool rendering = false;
@@ -93,15 +121,16 @@ static void worker_task(void *unused) {
                 if (result != OKL_OK) { fault(result, false); rendering = false; vTaskDelay(10); continue; }
             }
             bool animate = target.power && target.mode == KL_COLOR && (target.transition_ms || target.effect != KL_EFFECT_NONE);
-            result = prepare(&target, animate);
-            if (result != OKL_OK) { fault(result, false); rendering = false; vTaskDelay(10); continue; }
+            result = prepare(&target, animate, &current);
+            if (result != OKL_OK) {
+                result = release_if_synchronized(result);
+                fault(result, false); rendering = false; vTaskDelay(10); continue;
+            }
             kl_transition_begin(&transition, &current, &target, app_now_ms());
             rendering = animate;
             if (!animate) {
-                current = kl_state_frame(&target, 0);
-                result = read_and_publish(false, &target, revision, &mismatch);
-                okl_result release = okl_nxp_release(&nxp, nxp.transport.now_us(NULL) + 600000);
-                if (result == OKL_OK) result = release;
+                result = read_and_publish(false, &target, revision, &mismatch, &current);
+                result = release_if_synchronized(result);
                 if (result != OKL_OK) fault(result, mismatch);
                 else {
                     app_lock(); if (revision == app.output_revision) snprintf(app.operation, sizeof(app.operation), "idle");
@@ -111,27 +140,32 @@ static void worker_task(void *unused) {
             } else { app_lock(); app.reported_valid = false; app.rgb_confirmed = false; app.reported_fields = 0; app_unlock(); }
         }
         if (rendering) {
-            current = kl_transition_sample(&transition, app_now_ms());
-            result = frame(&current);
-            if (result != OKL_OK) { fault(result, false); rendering = false; }
-            else if (kl_transition_done(&transition, app_now_ms()) && transition.target.effect == KL_EFFECT_NONE) {
-                /* Restore the original RGB and separate master brightness after frame rendering. */
-                mismatch = false;
-                result = kl_output_park(&transition.target, &native_effect, execute, NULL);
-                if (result == OKL_OK) result = read_and_publish(false, &transition.target, seen_revision, &mismatch);
-                okl_result release = okl_nxp_release(&nxp, nxp.transport.now_us(NULL) + 600000);
-                if (result == OKL_OK) result = release;
-                rendering = false;
-                if (result != OKL_OK) fault(result, mismatch);
-                else {
-                    app_lock();
-                    if (seen_revision == app.output_revision) snprintf(app.operation, sizeof(app.operation), "idle");
-                    app.completed_revision = seen_revision;
-                    app_event_locked("controller", "transition.finished", "RGB and master brightness confirmed by getters"); app_unlock();
-                    app_mqtt_publish();
+            kl_frame sample = kl_transition_sample(&transition, app_now_ms());
+            result = frame(&sample);
+            if (result != OKL_OK) {
+                result = release_if_synchronized(result);
+                fault(result, false); rendering = false;
+            }
+            else {
+                current = sample; /* Keep the last ACKed frame if a later exchange fails. */
+                if (kl_transition_done(&transition, app_now_ms()) && transition.target.effect == KL_EFFECT_NONE) {
+                    /* Restore original RGB and separate master brightness after rendering. */
+                    mismatch = false;
+                    result = kl_output_park(&transition.target, &native_effect, execute, NULL);
+                    if (result == OKL_OK) result = read_and_publish(false, &transition.target, seen_revision, &mismatch, &current);
+                    result = release_if_synchronized(result);
+                    rendering = false;
+                    if (result != OKL_OK) fault(result, mismatch);
+                    else {
+                        app_lock();
+                        if (seen_revision == app.output_revision) snprintf(app.operation, sizeof(app.operation), "idle");
+                        app.completed_revision = seen_revision;
+                        app_event_locked("controller", "transition.finished", "RGB and master brightness confirmed by getters"); app_unlock();
+                        app_mqtt_publish();
+                    }
+                } else if (kl_transition_done(&transition, app_now_ms())) {
+                    app_lock(); if (seen_revision == app.output_revision) snprintf(app.operation, sizeof(app.operation), "idle"); app_unlock();
                 }
-            } else if (kl_transition_done(&transition, app_now_ms())) {
-                app_lock(); if (seen_revision == app.output_revision) snprintf(app.operation, sizeof(app.operation), "idle"); app_unlock();
             }
         }
         vTaskDelay(pdMS_TO_TICKS(rendering ? 5 : 10));
