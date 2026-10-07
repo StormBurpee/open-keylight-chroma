@@ -118,6 +118,65 @@ describe("HTTP transport", () => {
   });
 });
 describe("state serialization", () => {
+  it("refreshes controller readiness without reconnecting or replaying output", async () => {
+    const api = new DemoTransport(),
+      store = new StudioStore(api);
+    await store.connect();
+    const revision = store.snapshot.state?.revision;
+    api.device.controller = {
+      ...api.device.controller,
+      ready: false,
+      status: "fault",
+    };
+    await store.refresh();
+    expect(store.snapshot.device?.controller).toMatchObject({
+      ready: false,
+      status: "fault",
+    });
+    api.device.controller = {
+      ...api.device.controller,
+      ready: true,
+      status: "ready",
+    };
+    await store.refresh();
+    expect(store.snapshot.device?.controller.ready).toBe(true);
+    expect(store.snapshot.state?.revision).toBe(revision);
+  });
+
+  it("waits for both poll responses before releasing queued controls after a read failure", async () => {
+    const data = fixture(),
+      gate = deferred<LightState>();
+    let delayed = false,
+      writes = 0;
+    const transport: Transport = {
+      demo: false,
+      token: "token",
+      request: async <T>(method: string, path: string) => {
+        if (method !== "GET") {
+          writes++;
+          return data.state as T;
+        }
+        if (delayed && path === "/device") throw Error("Identity unavailable");
+        if (delayed && path === "/state") return gate.promise as Promise<T>;
+        return structuredClone(
+          path === "/device" ? data.device : data.state,
+        ) as T;
+      },
+    };
+    const store = new StudioStore(transport);
+    await store.connect();
+    delayed = true;
+    const reading = store.refresh();
+    await tick();
+    store.patch({ brightness: 10 });
+    expect(writes).toBe(0);
+    delayed = false;
+    gate.resolve(data.state);
+    await reading;
+    await tick();
+    expect(writes).toBe(1);
+  });
+
   it("discards a poll begun before a scene mutation instead of rolling its response backward", async () => {
     const data = fixture(),
       gate = deferred<LightState>();
@@ -216,7 +275,7 @@ describe("state serialization", () => {
     gate.reject(new ApiError("Stale revision", 409));
     await tick();
     expect(writes).toBe(1);
-    expect(reads).toBe(3);
+    expect(reads).toBe(4);
     expect(store.snapshot.notice).toContain("Review");
     expect(store.snapshot.error).toBe("Stale revision");
   });

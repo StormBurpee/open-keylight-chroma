@@ -8,7 +8,7 @@ During bring-up, the independently written ESP application can also communicate 
 
 `firmware/components/keylight_core` is portable C: state validation, arbitration, transition sampling and button gestures. It knows nothing about Wi-Fi, JSON or FreeRTOS.
 
-`firmware/components/keylight_nxp` is an independently written protocol codec and transport driver. A single worker owns every complete SPI exchange. A finite command queue handles intent; animation uses the most recent frame. A request timeout is an uncertain outcome, never an instruction to replay a mutation blindly.
+`firmware/components/keylight_nxp` is an independently written protocol codec and transport driver. A single worker owns every complete SPI exchange. Desired-state revisions carry the latest accepted intent; animation uses the most recent frame. A request timeout is an uncertain outcome, never an instruction to replay a mutation blindly.
 
 `firmware/main` adapts those modules to ESP-IDF. HTTP and MQTT commands share validation and arbitration. They never call SPI directly. NVS writes are explicit or delayed configuration commits; animation frames never touch flash.
 

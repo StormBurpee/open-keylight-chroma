@@ -26,7 +26,16 @@ export type Device = {
   trial_pending?: boolean;
   uptime_ms: number;
   network: { connected: boolean; rssi: number; ip: string };
-  controller: { connected: boolean; version: string };
+  controller: {
+    connected: boolean;
+    version: string;
+    backend?: "unknown" | "legacy" | "original";
+    status?: "starting" | "ready" | "diagnostic" | "unsupported" | "fault";
+    ready?: boolean;
+    part_id?: number;
+    trial_confirmed?: boolean;
+    last_health_ms?: number;
+  };
   capabilities: {
     white?: boolean;
     color?: boolean;
@@ -206,29 +215,26 @@ export class StudioStore {
     this.listeners.forEach((fn) => fn());
   }
   async connect() {
-    try {
-      const device = await this.transport.request<Device>("GET", "/device");
-      if (device.api_version !== 1)
-        throw Error("This dashboard needs API version 1.");
-      this.set({ device });
-      await this.refresh();
-    } catch (error) {
-      this.set({
-        stale: true,
-        error: message(error),
-        notice: "Device unavailable",
-      });
-    }
+    await this.refresh();
   }
   async refresh() {
     if (this.reading || this.snapshot.busy) return;
     this.reading = true;
     const generation = this.writeGeneration;
     try {
-      const state = await this.transport.request<LightState>("GET", "/state");
+      const [deviceResult, stateResult] = await Promise.allSettled([
+        this.transport.request<Device>("GET", "/device"),
+        this.transport.request<LightState>("GET", "/state"),
+      ]);
+      if (deviceResult.status === "rejected") throw deviceResult.reason;
+      if (stateResult.status === "rejected") throw stateResult.reason;
+      const device = deviceResult.value,
+        state = stateResult.value;
+      if (device.api_version !== 1)
+        throw Error("This dashboard needs API version 1.");
       assertState(state);
       if (generation === this.writeGeneration)
-        this.set({ state, stale: false, lastSync: Date.now() });
+        this.set({ device, state, stale: false, lastSync: Date.now() });
     } catch (error) {
       if (generation === this.writeGeneration)
         this.set({ stale: true, error: message(error) });

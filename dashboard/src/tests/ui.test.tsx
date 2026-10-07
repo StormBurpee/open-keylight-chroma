@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 import { Studio } from "../App";
@@ -18,6 +18,44 @@ async function setup(change?: (api: DemoTransport) => void) {
   return { api, store, user: userEvent.setup() };
 }
 describe("studio controls", () => {
+  it("blocks output for diagnostic firmware while keeping system controls available", async () => {
+    const { api, store, user } = await setup();
+    await act(async () => {
+      api.device.controller = {
+        ...api.device.controller,
+        ready: false,
+        status: "diagnostic",
+      };
+      await store.refresh();
+    });
+    expect(
+      screen.getByRole("button", { name: "Turn light off" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("slider", { name: "Brightness" })).toHaveAttribute(
+      "data-disabled",
+    );
+    await user.click(screen.getByRole("tab", { name: "System" }));
+    expect(await screen.findByText("Open Keylight")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Refresh details" }),
+    ).toBeEnabled();
+    await act(async () => {
+      api.device.controller = {
+        ...api.device.controller,
+        backend: "legacy",
+        ready: true,
+        status: "ready",
+      };
+      await store.refresh();
+    });
+    expect(screen.getByText("Razer compatibility")).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: "Light" }));
+    expect(
+      screen.getByRole("button", { name: "Turn light off" }),
+    ).toBeEnabled();
+    expect(api.state.revision).toBe(12);
+  });
+
   it("requires an explicit click to confirm trial firmware", async () => {
     const { user, api } = await setup((api) => {
       api.device.trial_pending = true;

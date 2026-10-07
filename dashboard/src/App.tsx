@@ -64,6 +64,14 @@ const initial: Output = {
 const effectLabel = (name: string) =>
   ({ none: "Still light", aurora: "Aurora", breathe: "Slow breathe" })[name] ||
   name;
+const controllerLabel = (status?: string) =>
+  ({
+    starting: "Starting",
+    ready: "Ready",
+    diagnostic: "Diagnostic firmware",
+    unsupported: "Unsupported firmware",
+    fault: "Controller unavailable",
+  })[status || ""] || "Not reported";
 const duration = (ms: number) => {
   const h = Math.floor(ms / 3600000),
     m = Math.floor(ms / 60000) % 60;
@@ -194,11 +202,22 @@ export function Studio({ store }: { store: StudioStore }) {
   };
   useEffect(() => {
     void readResources();
-  }, [tab, device]); // Resources load on entry, never on each state poll.
+  }, [
+    tab,
+    device?.id,
+    device?.capabilities.scenes,
+    device?.capabilities.settings,
+  ]);
   const supported = device?.capabilities || {},
     authorized = !!token || store.transport.demo;
+  const controllerBlocked = device?.controller.ready === false;
   const outputDisabled =
-    !state || !authorized || stale || draft.recording_lock || updating;
+    !state ||
+    !authorized ||
+    stale ||
+    controllerBlocked ||
+    draft.recording_lock ||
+    updating;
   const commit = (patch: Partial<Output>) => {
     editing.current = false;
     store.patch(patch);
@@ -354,15 +373,17 @@ export function Studio({ store }: { store: StudioStore }) {
     proof = report?.valid ? "Controller report" : "No valid controller report";
   const operation = stale
     ? "Last known state"
-    : state?.operation.status === "error"
-      ? "Controller error"
-      : state?.operation.status === "pending"
-        ? "Applying your change"
-        : busy
-          ? "Sending request"
-          : report?.valid
-            ? "Controller connected"
-            : "Waiting for controller";
+    : controllerBlocked
+      ? controllerLabel(device?.controller.status)
+      : state?.operation.status === "error"
+        ? "Controller error"
+        : state?.operation.status === "pending"
+          ? "Applying your change"
+          : busy
+            ? "Sending request"
+            : report?.valid
+              ? "Controller connected"
+              : "Waiting for controller";
   return (
     <div className="app-shell">
       {store.transport.demo && (
@@ -595,6 +616,7 @@ export function Studio({ store }: { store: StudioStore }) {
                     !authorized ||
                     busy ||
                     stale ||
+                    controllerBlocked ||
                     (!draft.power && draft.recording_lock)
                   }
                   onClick={() => commit({ power: !draft.power })}
@@ -1014,9 +1036,21 @@ export function Studio({ store }: { store: StudioStore }) {
                   <div>
                     <dt>Controller</dt>
                     <dd>
-                      {device?.controller.connected
-                        ? "Connected"
-                        : "Unavailable"}
+                      {device?.controller.status
+                        ? controllerLabel(device.controller.status)
+                        : device?.controller.connected
+                          ? "Connected"
+                          : "Unavailable"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Controller firmware</dt>
+                    <dd>
+                      {device?.controller.backend === "original"
+                        ? "Open Keylight"
+                        : device?.controller.backend === "legacy"
+                          ? "Razer compatibility"
+                          : "Not identified"}
                     </dd>
                   </div>
                   <div>

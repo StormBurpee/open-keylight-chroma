@@ -3,7 +3,7 @@
   "info": {
     "title": "Open Keylight Chroma local API",
     "version": "1.0.0",
-    "description": "Contract for the original ESP application, reviewed against the handlers. This is not a hardware qualification or release claim. HTTP uses port 80 on a trusted LAN; no TLS listener or cross-origin API. Host must be the device IP, hostname, hostname.local, or setup IP 192.168.4.1, optionally followed by :80. If supplied, Origin must equal http:// plus the exact Host value. API routes accept no query parameters. Public reads expose metadata; mutations and client listing require a paired bearer token, except POST /pair. JSON bodies are 1–2048 bytes, read within 10 seconds; malformed, duplicate or unknown fields and NUL are rejected. String limits are UTF-8 byte limits, recorded by x-maxUtf8Bytes and x-minUtf8Bytes. JSON replies use Cache-Control: no-store and Connection: close. Errors can follow partial hardware/update work; do not infer that a failed command restored the previous state."
+    "description": "Contract for the original ESP application, reviewed against the handlers. This is not a hardware qualification or release claim. HTTP uses port 80 on a trusted LAN; no TLS listener or cross-origin API. Host must be the device IP, hostname, hostname.local, or setup IP 192.168.4.1, optionally followed by :80. If supplied, Origin must equal http:// plus the exact Host value. API routes accept no query parameters. Public reads expose metadata; mutations and client listing require a paired bearer token, except POST /pair. JSON bodies are 1â€“2048 bytes, read within 10 seconds; malformed, duplicate or unknown fields and NUL are rejected. String limits are UTF-8 byte limits, recorded by x-maxUtf8Bytes and x-minUtf8Bytes. JSON replies use Cache-Control: no-store and Connection: close. Errors can follow partial hardware/update work; do not infer that a failed command restored the previous state."
   },
   "servers": [
     {
@@ -70,7 +70,7 @@
       "patch": {
         "operationId": "patchState",
         "summary": "Accept a partial lighting command",
-        "description": "202 accepts intent; it does not confirm output. expected_revision must match the global revision from GET /state, or 409 is returned without applying that patch. Every accepted patch increments revision, including lock-only changes. Recording Lock rejects output changes except Off; unlock in a separate request. OTA in progress returns 503 except for exactly {power:false}. Never blindly retry a timed-out mutation. White-mode transitions are not rendered even though transition_ms is stored.",
+        "description": "202 accepts intent; it does not confirm output. expected_revision must match the global revision from GET /state, or 409 is returned without applying that patch. Every accepted patch increments revision, including lock-only changes. Recording Lock rejects output changes except Off; unlock in a separate request. OTA in progress returns 503 except for exactly {power:false}. Never blindly retry a timed-out mutation. White-mode transitions are not rendered even though transition_ms is stored. Output changes return 503 while controller.ready is false; lock-only changes remain available.",
         "responses": {
           "202": {
             "description": "Accept a partial lighting command",
@@ -831,7 +831,7 @@
       "post": {
         "operationId": "uploadApplication",
         "summary": "Verify an application image and schedule reboot",
-        "description": "Application-only OTA into the existing inactive ESP slot. Requires a confirmed current trial and no concurrent upload, otherwise 409. Exact Content-Type application/octet-stream, known Content-Length of 288–1572864 bytes (also within the actual slot), lowercase X-SHA256 matching the full body, and ESP image validation are required. The total upload budget is 120 seconds. Failure schedules no reboot; the inactive slot may have been modified. Never upload a bootloader, partition table, NXP image or merged flash image. 202 schedules reboot; it does not prove the new image booted. Reconnect, verify identity and operation, then confirm its 180-second trial. Do not automatically retry an ambiguous response.",
+        "description": "Application-only OTA into the existing inactive ESP slot. Requires a confirmed current trial and no concurrent upload, otherwise 409. Exact Content-Type application/octet-stream, known Content-Length of 288â€“1572864 bytes (also within the actual slot), lowercase X-SHA256 matching the full body, and ESP image validation are required. The total upload budget is 120 seconds. Failure schedules no reboot; the inactive slot may have been modified. Never upload a bootloader, partition table, NXP image or merged flash image. 202 schedules reboot; it does not prove the new image booted. Reconnect, verify identity and operation, then confirm its 180-second trial. Do not automatically retry an ambiguous response.",
         "responses": {
           "202": {
             "description": "Verify an application image and schedule reboot",
@@ -1363,7 +1363,7 @@
                 "x-minUtf8Bytes": 8
               }
             ],
-            "description": "Empty for an open network, otherwise 8–64 UTF-8 bytes; control characters are rejected."
+            "description": "Empty for an open network, otherwise 8â€“64 UTF-8 bytes; control characters are rejected."
           },
           "mqtt": {
             "type": "object",
@@ -1377,7 +1377,7 @@
                 "maxLength": 128,
                 "x-maxUtf8Bytes": 128,
                 "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
-                "description": "mqtt:// or mqtts:// with a DNS/IPv4 host and optional port 1–65535. No embedded credentials, path, query or IPv6 literal. Empty is allowed only when the resulting configuration is disabled. enabled and URI are validated together."
+                "description": "mqtt:// or mqtts:// with a DNS/IPv4 host and optional port 1â€“65535. No embedded credentials, path, query or IPv6 literal. Empty is allowed only when the resulting configuration is disabled. enabled and URI are validated together."
               },
               "username": {
                 "type": "string",
@@ -1761,12 +1761,56 @@
               },
               "version": {
                 "type": "string"
+              },
+              "ready": {
+                "type": "boolean",
+                "description": "Verified readiness for output commands; independent of basic controller connectivity."
+              },
+              "backend": {
+                "type": "string",
+                "enum": [
+                  "unknown",
+                  "legacy",
+                  "original"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "starting",
+                  "ready",
+                  "diagnostic",
+                  "unsupported",
+                  "fault"
+                ]
+              },
+              "part_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "description": "Observed original-controller part ID; zero when unknown or using the legacy backend."
+              },
+              "trial_confirmed": {
+                "type": "boolean",
+                "description": "Original NXP startup trial state; not the separate ESP application trial."
+              },
+              "last_health_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "ESP uptime at the last validated lifecycle response; zero before validation."
               }
             },
             "required": [
               "connected",
-              "version"
-            ]
+              "version",
+              "ready",
+              "backend",
+              "status",
+              "part_id",
+              "trial_confirmed",
+              "last_health_ms"
+            ],
+            "description": "connected records communication; ready gates output. Only the supported original lighting role or explicitly supported legacy controller can be ready. Diagnostic and unsupported images do not permit lighting changes."
           },
           "capabilities": {
             "type": "object",

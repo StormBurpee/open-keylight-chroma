@@ -21,7 +21,16 @@ export class DemoTransport implements Transport {
     api_version: 1,
     uptime_ms: 86453000,
     network: { connected: true, rssi: -48, ip: "Preview only" },
-    controller: { connected: true, version: "Simulated" },
+    controller: {
+      connected: true,
+      version: "Simulated",
+      backend: "original",
+      status: "ready",
+      ready: true,
+      part_id: 0,
+      trial_confirmed: true,
+      last_health_ms: 86453000,
+    },
     capabilities: {
       white: true,
       color: true,
