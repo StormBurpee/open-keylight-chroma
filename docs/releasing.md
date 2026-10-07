@@ -10,7 +10,7 @@ An ESP application, an NXP application and a Stream Deck plugin can change indep
 
 ESP development builds use `-dev`. Published versions use semantic versioning; protocol compatibility is separate from the product version. API v1 additions must preserve existing fields and behavior. A breaking public API needs a new API version and a migration path. NXP protocol changes must negotiate their own capability or descriptor; older clients cannot be expected to accept unknown status bits.
 
-The first guided-installer candidate is **0.2.0-alpha.1**. `alpha.1` is a SemVer prerelease, not a stable support promise. The release ZIP's product version, root `VERSION`, installer package version and ESP descriptor must agree; NXP and Stream Deck keep their independent component versions.
+The first public release is being prepared as **0.2.0**. Hardware support is defined by the release's tested board and starting firmware, independently of its SemVer label. The release ZIP's product version, root `VERSION`, installer package version and ESP descriptor must agree; NXP and Stream Deck keep their independent component versions.
 
 ## Assemble the guided installer
 

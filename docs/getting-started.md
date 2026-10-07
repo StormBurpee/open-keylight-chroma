@@ -2,7 +2,7 @@
 
 Open Keylight runs on the light itself. You use a computer for the initial installation; afterward, a browser is enough.
 
-**Current status:** the packaged guided installer and first alpha release are still being qualified and are not published for installation. Both reference lights have passed checks with original ESP and NXP applications, but that does not qualify this release's complete installation path. The [development record](../PROGRESS.md) tracks the current recovery investigation. Do not treat a development artifact as a completed installation release.
+**Installation status:** the first release is still being qualified. Both original applications have run on the reference lights, but the complete public installer path has not yet passed its final live check. Use the [release record](../PROGRESS.md) to distinguish a tested release from a development build.
 
 ## Before you begin
 
@@ -20,17 +20,19 @@ The release package is designed for **Windows 10/11 x64**. It includes original 
 
 1. Download the Windows installer ZIP from the project's [Releases](https://github.com/StormBurpee/open-keylight-chroma/releases) page. Read that release's supported hardware and qualification record.
 2. Choose **Extract all**. Open **start-open-keylight.cmd** from the extracted folder.
-3. Choose **Find my light**, then select it by name and address. If discovery finds nothing, check that the computer and light are on the same network; guest-network isolation or a VPN can prevent discovery.
+3. Choose **Find my light**, then select it by name and address. If discovery finds nothing, check power and the local network, then choose **Look again**. Guest-network isolation or a VPN can prevent discovery. **Enter stock address manually** opens advanced setup; your router can supply the address.
 4. Let the installer prepare the release files and exact stock recovery image automatically, then review the selected light and release. The recovery image comes from Razer's official HTTPS server and is verified locally. You do not need to find or extract a firmware backup.
-5. Start installation and keep both the terminal and light powered. Follow the two visual checks: complete darkness, then red, green, blue, warm white and cool white with darkness between them. Choose **No / unsure** if the observation does not match.
-6. The installer replaces the ESP application last, checks the actual image and dashboard assets, pairs its client, briefly checks 5% white and Off, and confirms the new application. If pairing is already closed, it asks for a three-second button hold.
+5. Close other light controls. Press **Space** to acknowledge that you can watch the light, then **Enter** to start. Keep the terminal and light powered. Follow the two visual checks: complete darkness, then red, green, blue, warm white and cool white with darkness between them. Use the arrow keys to choose **Yes** only when the observation matches, then press **Enter**.
+6. The installer replaces the ESP application last, checks the actual image and dashboard assets, pairs its client, briefly checks 5% white and Off, and confirms the new application. If it asks you to pair, hold the light's button continuously for **three seconds**, then release. Setup continues automatically; you do not need to copy a token or confirm in the browser during this step.
 7. Open the dashboard address shown at completion. Pair your browser as described below.
 
 The installer saves an audit and a private client credential on your computer. Press **D** for technical details and file paths. Its recovery download stays in your local cache; it is not uploaded to GitHub or redistributed in our releases. That file is a known stock recovery image, **not a backup of your device's settings or complete flash**.
 
 Advanced mode supports prepared plans and explicit artifact paths for developers. Normal setup does not require typing hashes, commits or firmware paths. See [the stock migration reference](stock-migration.md) for those details.
 
-If a stage stops, keep the audit and follow the displayed recovery instruction. Starting the installer again is not a general resume procedure. A timeout can occur after a write succeeded; the tool does not blindly repeat a mutation.
+If you need to stop, press **Ctrl+C once** and wait for **Installation stopped**. **Stopping safely** means the backend is still finishing a write or restart; leave the window and power connected. Keep the audit and follow the displayed recovery instruction. A timeout can occur after a write succeeded, so restarting the installer is not a general resume procedure.
+
+If discovery identifies an existing Open Keylight installation, the installer reads its identity and shows its dashboard address. Use **System** there for updates; no stock reinstall is needed.
 
 ## Pair your browser
 
@@ -44,7 +46,7 @@ The window lasts up to 180 seconds and closes after one successful pairing. An e
 
 An accepted three-second hold gives one soft green pulse, then restores the previous lighting, including Off. This acknowledges the button hold and open pairing window; it does not mean a client has connected. Recording Lock, an update, an unavailable controller or a newer lighting command suppresses the pulse without preventing pairing. Feedback is never queued to flash later. Your running effect resumes after the pulse; saved scenes and desired settings stay unchanged.
 
-Browser access is stored in the current tab session. Closing that session may require pairing again. System lets you view and revoke clients independently.
+Browser access is stored in the current tab session. Closing that session may require pairing again. System lets you view and revoke clients independently. There is no fixed four-client limit; new pairings are limited by available device storage.
 
 If every token is lost, a continuous button hold starting at power-on and lasting ten seconds revokes existing clients and reopens pairing. It preserves Wi-Fi and scenes.
 
@@ -91,7 +93,7 @@ Current evidence covers bounded functional checks on the reference hardware. Bro
 
 The [README](../README.md#build-and-test) covers the toolchain. For a dashboard demo, run `npm run dev` inside `dashboard` and add `?demo=1` to the displayed address. It is visibly labelled and sends no device requests.
 
-The installer has its own labelled interface preview. It does not discover or change lights.
+The [installer guide](../installer/README.md#offline-inspection-and-development) covers its labelled interface preview and source development. Preview mode does not discover or change lights.
 
 GitHub Actions development artifacts are tied to their workflow commit and are not hardware-qualified releases. The ESP archive includes the application, matching ELF, source and asset metadata, and `SHA256SUMS`. Check those hashes and retain the ELF for diagnosis; never upload the ELF.
 

@@ -24,11 +24,11 @@ Open Keylight replaces the applications on **both the ESP32 and the NXP lighting
 
 ## Make it yours
 
-**Light that follows your controls.** Warm and cool white, RGB with sRGB decoding by default, instant changes, adjustable smooth colour transitions and effects. All five output channels use one state model.
+**Light that follows your controls.** Warm and cool white, RGB with sRGB decoding by default, instant changes, adjustable colour fades and effects. White changes and Off are immediate.
 
 **Scenes worth keeping.** Four starting scenes, eight saved slots, and a physical double press to move through them. Your scenes stay on the light.
 
-**A button with a job.** Press to toggle power, double press for the next scene, hold for three seconds to open pairing. Recording Lock protects your lighting during a take; Off remains available.
+**A button with a job.** Press to toggle power, double press for the next scene, hold for three seconds to open pairing. A brief green pulse acknowledges the hold when feedback is available. Recording Lock protects your lighting during a take; Off remains available.
 
 **Made to connect.** A versioned local HTTP API, MQTT discovery for Home Assistant, and a Stream Deck plugin for keys and dials. Requests, reported controller state and rejected commands are distinct, so integrations can tell you what happened.
 
@@ -46,10 +46,10 @@ The guided installer is built with React and Ink. It finds your light, prepares 
 
 *Actual Ink output in demonstration mode; the example progress does not describe a live installation.*
 
-1. Connect your Key Light Chroma to your local network and close other lighting controllers.
-2. Follow the [installation guide](docs/getting-started.md) for the current release status and supported starting firmware.
-3. Stay with the light for the dark and five-colour checks. The installer explains each observation before continuing.
-4. Open the light's local address. Pair the browser and start using it.
+1. Check the [supported starting firmware and installation status](docs/getting-started.md#before-you-begin).
+2. Extract the Windows release ZIP and open **start-open-keylight.cmd**. Choose **Find my light**.
+3. Stay beside the light for the dark and five-colour checks. Keep power connected while installation finishes.
+4. Open the dashboard address shown at completion. Pair your browser and start using it.
 
 The Windows launcher prepares its own portable Node and Python runtimes. It does not change your PATH or require a compiler. Those runtimes and the stock recovery image are downloaded during setup; everyday control stays local.
 
@@ -109,7 +109,7 @@ The dashboard build supplies the assets embedded by the ESP build. For interface
 
 ## Compatibility and care
 
-The panel is one RGB light with two white channels, not individually addressable pixels. Colour and brightness values are control levels, not calibrated optical measurements. Existing output limits stay in place pending electrical and thermal measurements.
+The panel is one RGB light with two white channels, not individually addressable pixels. Colour and brightness values are control levels, not calibrated optical measurements. RGB frames currently use 8-bit channels, so very dim fades have visible steps. Existing output limits stay in place pending electrical and thermal measurements.
 
 The retained ESP bootloader does not provide automatic crash rollback. Application fallback needs the new application to run; an early boot failure can require physical serial recovery. Use the documented [installation and recovery procedure](docs/getting-started.md), and keep the previous known-good image.
 

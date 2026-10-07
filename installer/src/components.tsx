@@ -72,9 +72,9 @@ export function ProgressView({progress, preview = false, width = 96, yes = false
   const timed = progress.state === 'quiet' || progress.unit === 'seconds';
   const validCount = !stopped && !timed && total > 0 && count >= 0 && count <= total;
   const bars = 24, filled = validCount ? Math.floor(count / total * bars) : 0;
-  const footer = preview ? 'Esc back · Ctrl+C exit' : stopped && running ? 'D details · Waiting for a safe stop' : progress.prompt && !stopped ? '↑↓ choose · Enter confirm · Ctrl+C stop' : running ? 'D details · Ctrl+C stop safely' : 'Esc back · D details · Ctrl+C exit';
+  const footer = preview ? 'Illustrative progress · Esc back · Ctrl+C exit' : stopped && running ? 'D details · Waiting for a safe stop' : progress.prompt && !stopped ? '↑↓ choose · Enter confirm · Ctrl+C stop' : running ? 'D details · Ctrl+C stop safely' : 'Esc back · D details · Ctrl+C exit';
   const headline = stopped ? running ? 'Stopping safely' : 'Installation stopped' : progress.state === 'complete' ? 'Ready to use' : stages[progress.stage]?.[1] ?? 'Installing';
-  return <Frame width={width} mode={preview ? 'INTERFACE PREVIEW · NO DEVICE ACTIVITY' : targetName ?? (progress.workflow === 'finish' ? 'FINISH YOUR INSTALLATION' : 'INSTALLING')} footer={footer}>
+  return <Frame width={width} mode={preview ? 'DEMO · NO DEVICE ACTIVITY' : targetName ?? (progress.workflow === 'finish' ? 'FINISH YOUR INSTALLATION' : 'INSTALLING')} footer={footer}>
     <Box flexDirection={width < 76 ? 'column' : 'row'} gap={2}>
       <Box flexDirection="column" width={width < 76 ? undefined : 29} flexShrink={0}>
         {stages.map(([id, title], i) => <Box key={id}><Text color={i === progress.stage ? palette.accent : palette.muted}>{progress.finishedStages?.includes(i) ? '✓' : String(i + 1).padStart(2, '0')}  {title}</Text></Box>)}
@@ -92,7 +92,6 @@ export function ProgressView({progress, preview = false, width = 96, yes = false
         {!stopped && progress.credentialPath && <Box marginTop={1} flexDirection="column"><Text color={palette.accent}>Connection saved on this computer.</Text>{details && <Text color={palette.muted} wrap="truncate-middle">{display(progress.credentialPath, 1000)}</Text>}</Box>}
         {!stopped && progress.cancelRequested && <Notice>Stopping after this step. Keep power connected.</Notice>}
         {details && <Box marginTop={1} flexDirection="column"><Text color={palette.muted}>{display(progress.label, 1000)}</Text>{auditPath && <Text color={palette.muted} wrap="truncate-middle">Audit: {display(auditPath, 1000)}</Text>}</Box>}
-        {preview && <Notice>Illustrative progress only. These values do not describe a connected light.</Notice>}
       </Box>
     </Box>
   </Frame>;

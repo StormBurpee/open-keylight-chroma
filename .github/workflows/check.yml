@@ -36,6 +36,7 @@ jobs:
         working-directory: integrations/streamdeck
       - run: npm ci && npm test && npm run check && npm run bundle && npm run test:bundle
         working-directory: installer
+      - run: python3 installer/tests/test_capture_demo.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dashboard-assets
