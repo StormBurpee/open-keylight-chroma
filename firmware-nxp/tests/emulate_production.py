@@ -1,4 +1,4 @@
-"""Execute the fixed low-output candidate's compiled startup and SysTick cleanup offline.
+"""Execute the production candidate's compiled startup, output and recovery offline.
 MMIO, ROM IAP54 and IRQ delivery are modeled; this is not electrical evidence.
 """
 from pathlib import Path
@@ -31,8 +31,8 @@ for off in range(symtab[4],symtab[4]+symtab[5],symtab[9]):
     name=strings[name:].split(b'\0',1)[0].decode()
     assert not name or index,'Undefined symbol '+name
     if name:symbols[name]=value
-for forbidden in ['nxp_board_start_pwm','nxp_board_apply_pwm','nxp_board_force_off']:
-    assert forbidden in symbols
+for required in ['nxp_board_start_pwm','nxp_board_apply_pwm','nxp_board_force_off']:
+    assert required in symbols
 for s in sections:
     assert not(s[1] in (4,9) and s[5])
     if s[2]&2 and s[5]:

@@ -179,3 +179,18 @@ ESP 0.1.5-dev has now been installed and explicitly confirmed on Storm Rim. The 
 After an acknowledged whole-light power cycle, native recovery established the resident loader from the retained OFF1 job. The LOW1 installation then verified all 448 blocks, booted the expected original application, and completed its single fixed sequence. Both the ESP validator and a separate host validator accepted all 256 recorded words, including five 100 ms pulses, dark handoffs, the complete channel mask and zero reported errors. The protected return to the resident loader also passed without another physical reset.
 
 The owner observed red, green, blue, warm-white and cool-white flashes in order and explicitly confirmed darkness between them. This supports channel mapping and low-duty output on the reference board. It does not measure current, temperature or calibrated colour. Full lighting will retain the existing duty envelope; its first installation and API control checks are next.
+
+## Original lighting application installed; load-change fault under investigation
+
+The full original NXP lighting application was installed through the native ESP updater, with all 448 staging blocks acknowledged and read back. Typed role-2 startup confirmation succeeded, the journal cleared durably, and the device reported the original controller ready. Seven live API checks passed with fresh getter-confirmed fields: blue, an instant purple change, a timed blue fade, warm and cool white, Off, and a final blue setting. These checks used 5–15% brightness; the owner confirmed the visible sequence and steady blue.
+
+Subsequent owner testing at 100% colour while changing controls exposed repeated ESP brownout resets. Reset reason 9 was verified against ESP-IDF, and Off restored stable network access and confirmed dark output. This is an unresolved load-change failure, so the successful bounded checks are not a production-readiness claim. Offline comparison finds identical stock/original RGB output arithmetic at the canonical master of 255 and the same timer periods; intermediate electrical behaviour and the ESP power configuration are being investigated. Brownout protection remains enabled.
+
+
+## Truthful MQTT availability and physical scene selection
+
+MQTT availability now follows controller readiness, connectivity and update/recovery gates. Lifecycle changes post coalesced notifications to the existing MQTT event loop; only that callback publishes. This also removes a lock inversion between the application mutex and the MQTT client's callback/API lock. Reconnect and Home Assistant birth republish current availability, enqueue failures remain retryable, and stale confirmed state is suppressed.
+
+Physical double-click scene selection now advances only after an accepted activation. Recording Lock and busy refusals retain the selection, while empty slots remain skippable. GPIO configuration and task creation errors are returned and recorded without preventing dashboard or MQTT startup.
+
+Actual-source sanitizer tests cover broker events, queue/enqueue failure, publication races, sampled button gestures and startup failures. The worker, controller-job and ESP-update suites verify representative lifecycle notifications outside the application mutex. These are offline changes; MQTT delivery and physical-button behavior have not been requalified on the lamp in this slice.

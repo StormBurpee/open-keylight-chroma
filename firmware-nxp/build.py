@@ -114,8 +114,10 @@ manifest = {"name": "Open Keylight Chroma NXP " + ("reference-board lighting can
             "source_sha256": {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
                               for p in sources + [root / "platform/application.ld", root / "platform/qualification.h", root / "include/nxp_app.h", root / "include/nxp_board.h", root / ("include/" + trial_module + ".h"), Path(__file__)]},
             "reference_part_id": "0x0000bc40", "reference_variant": "LPC11U35/501",
-            "limitations": ["Package and PCB nets not physically confirmed", "This build has not been physically qualified as a complete PWM diagnostic",
-                            "PWM polarity/current/thermal limits unqualified", "Recovery relies on the established resident loader and a running CPU",
+            "limitations": [("Reference-board observations do not qualify other units or replace candidate acceptance" if lighting else "Package and PCB nets not physically confirmed"),
+                            ("The build itself does not establish physical qualification; first-use acceptance is required" if lighting else "This build has not been physically qualified as a complete PWM diagnostic"),
+                            ("Output limits preserve the observed stock duty envelope; no new current or thermal rating is established" if lighting else "PWM polarity/current/thermal limits unqualified"),
+                            "Recovery relies on the established resident loader and a running CPU",
                             ("Reference lighting requires recorded OFF1/LOW1 observations and independent target review; no scene replay" if lighting else
                              "Experimental build permits five fixed 100 ms low-duty pulses, 1500 ms dark gaps, no adjustable output or FD" if args.pwm_low_trial else
                              "Experimental build permits one400ms all-low timer/mux test, fixed snapshot pages, no nonzero output or FD" if args.pwm_off_trial else
