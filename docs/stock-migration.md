@@ -2,7 +2,7 @@
 
 `tools/stock_migration.py` provides a guided installer for the reviewed **Razer Key Light Chroma / ESP 1.0.13.0 / NXP 1.3.0.0** profile. It keeps the stock ESP network bridge until the original NXP controller has been installed and confirmed, then installs the original ESP application. The installer is experimental; passing its offline tests does not qualify another physical light.
 
-This is currently a builder/operator workflow. Preparing reviewed original images and a legitimate owner-local restore bank is still required; a generally distributable stock-migration bundle and restore-source acquisition workflow are not yet provided.
+This is currently a builder/operator workflow. Preparing reviewed original images is still required. The recovery helper can acquire the exact reviewed stock controller image directly from Razer; vendor binaries are not distributed in this repository.
 
 Use one explicitly selected private IPv4 address. Close Razer software, integration clients, light-control browser tabs and every other updater first. Another connection to the stock bridge can generate controller traffic even without a command. In particular, traffic during the controller's flash commit can disrupt recovery.
 
@@ -59,7 +59,15 @@ cd ..
 
 The matching migration inputs are `firmware/build/open_keylight.bin` and `dashboard/dist/asset-manifest.json`. A [development artifact archive](getting-started.md#development-artifacts) from the intended commit can supply that pair instead. Use only the application image, never `idf.py flash`, a merged image, bootloader or partition table. Keep the matching ELF and metadata for diagnosis.
 
-The remaining input is an owner-local, independently reviewed 28 KiB restore bank. Vendor binaries are not distributed here. A logical Read83 staging capture is **not** an independent active-application backup. Preserve the restore bank's origin, exact digest, known modifications and any live restore evidence; do not label a patched bank “factory.” There is no general restore-bank acquisition procedure in this guide. Do not start installation without that reviewed input.
+Acquire the reviewed stock recovery image:
+
+```text
+python tools/vendor_restore.py --output private/migration/stock-nxp-1.3.0.bin
+```
+
+The helper downloads one pinned HTTPS archive from Razer, validates its version and Intel HEX checksums, and reconstructs the reviewed 28 KiB bank. Its erased tail and complete digest match the reference staging capture exactly. An existing matching cache is reused; a different file is never overwritten. Use the returned `path`, `version` and `provenance` in the plan below. This is a recovery image, **not a backup of your light** or proof that restoration works on another board. No light is contacted by this helper.
+
+An independently reviewed owner-local bank remains usable instead. Preserve its origin, exact digest, modifications and live restore evidence. A logical Read83 staging capture is not an independent active-application backup; a patched bank must not be labelled “factory.”
 
 Create the plan with the offline helper. Replace the uppercase placeholders below; quote paths containing spaces. This PowerShell example uses an argument array, so it does not depend on fragile line-continuation characters:
 
