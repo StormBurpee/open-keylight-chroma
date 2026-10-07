@@ -20,6 +20,8 @@ Open Keylight Chroma is being built to replace **both** applications inside the 
 
 > **Development preview.** Original source and automated tests are available; public installation is not yet qualified. A successful build is not a claim of hardware safety, measured colour accuracy or production readiness. See the development record for exactly what has run on a device.
 
+The original ESP application and its embedded dashboard are running on the development light. Native OTA has also installed the original NXP all-off diagnostic, verified its complete application bank and register record, and returned it to the resident recovery loader. Physical darkness was confirmed during that test. Full NXP lighting output is the next qualification step.
+
 ## A small instrument, carefully made
 
 - **A dashboard on the light.** React, TypeScript and local shadcn/ui components, compressed into the ESP application. No cloud account, CDN or desktop control service.

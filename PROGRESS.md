@@ -171,3 +171,5 @@ The subsequent original NXP OFF1 installation acknowledged and read back all 448
 The next build adds the separate LOW1 procedure to verify red, green, blue, warm-white and cool-white output with fixed brief pulses. Full lighting remains gated on those observations and subsequent qualification.
 
 The complete 21-suite host run passes with AddressSanitizer and UndefinedBehaviorSanitizer, including the new LOW1 suite. The fixed diagnostic schema boundary tests pass, and ESP 0.1.5-dev builds with 23% application-slot space free. Independent compiled-controller tests reproduce the exact OFF1 and LOW1 banks; live LOW1 qualification is next.
+
+ESP 0.1.5-dev has now been installed and explicitly confirmed on Storm Rim. The running ELF, all four served dashboard assets and saved settings/scenes match the pinned candidate. The completed OFF1 journal survived the restart, retaining its target and 448 verified blocks while discarding volatile recovery proof as designed. An independent manager test also reproduces the full OFF1 → ESP restart → cold recovery → LOW1 → production-upload admission sequence without granting diagnostic images production confirmation.
