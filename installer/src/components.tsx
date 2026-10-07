@@ -39,10 +39,15 @@ export function LightChoices({lights, selected}: {lights: Light[]; selected: num
   const first = Math.max(0, Math.min(selected - 1, lights.length - 3));
   return <>
     <Heading eyebrow="01 / FIND YOUR LIGHT" title="Which light are we making yours?" detail="Find lights on your local network. Nothing is changed." />
-    {lights.length === 0 && <Text color={palette.muted}>Keep the light and computer on the same network. Look again, or use Advanced with its router address.</Text>}
+    {lights.length === 0 && <Box flexDirection="column" marginBottom={1}>
+      <Text color={palette.ink}>Check that the light has power and has finished starting.</Text>
+      <Text color={palette.muted}>Use the same local network; guest isolation or a VPN can hide it.</Text>
+      <Text color={palette.muted}>Find its address in your router. For an installed light, open that address in a browser. For stock firmware, enter it below.</Text>
+    </Box>}
     {lights.slice(first, first + 3).map((light, offset) => <Box key={`${light.ip}/${light.deviceId}`} flexDirection="column" marginBottom={1}><Button compact label={`${light.name}${light.installed ? ' · already installed' : ''}`} active={selected === first + offset} /><Text color={palette.muted}>  {light.ip} · {light.mac ?? light.deviceId}</Text></Box>)}
     {lights.length > 3 && <Text color={palette.muted}>{first + 1}–{Math.min(first + 3, lights.length)} of {lights.length} · ↑↓ browse</Text>}
     <Button compact label="Look again" active={selected === lights.length} />
+    <Button compact label="Enter stock address manually" active={selected === lights.length + 1} />
   </>;
 }
 export function Notice({children, error = false}: {children: string; error?: boolean}) {

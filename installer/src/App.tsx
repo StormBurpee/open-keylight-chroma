@@ -9,11 +9,12 @@ import {acquireRestore, createPlan, validatePlan, repository, type Run} from './
 import type {Execution, Start} from './execution.js';
 import {discoverLights, type Light} from './discovery.js';
 import {findBundle, type Bundle} from './bundle.js';
+import {readInstalled, type ReadInstalled, type InstalledDetails} from './installed.js';
 import {ArtifactList, Button, Field, Frame, Heading, LightChoices, Notice, PlanCard, ProgressView, palette} from './components.js';
 import {draftErrors, emptyDraft, previewProgress, type Draft, type PlanSummary, type Progress} from './model.js';
 import {edit} from './input.js';
 
-type Page = 'home' | 'discover' | 'bundle' | 'target' | 'files' | 'restore' | 'review' | 'open' | 'ready' | 'preview' | 'confirm' | 'live';
+type Page = 'home' | 'discover' | 'installed' | 'bundle' | 'target' | 'files' | 'restore' | 'review' | 'open' | 'ready' | 'preview' | 'confirm' | 'live';
 const groups: Partial<Record<Page, {key: keyof Draft; label: string; hint?: string}[]>> = {
   target: [
     {key: 'ip', label: 'Light IP address', hint: 'From your router. One selected light; no network scanning.'},
@@ -35,9 +36,9 @@ const groups: Partial<Record<Page, {key: keyof Draft; label: string; hint?: stri
   ],
 };
 const next: Partial<Record<Page, Page>> = {target: 'files', files: 'restore', restore: 'review'};
-const previous: Partial<Record<Page, Page>> = {target: 'home', files: 'target', restore: 'files', review: 'restore', open: 'home', ready: 'home', preview: 'home'};
+const previous: Partial<Record<Page, Page>> = {installed: 'discover', target: 'home', files: 'target', restore: 'files', review: 'restore', open: 'home', ready: 'home', preview: 'home'};
 
-export function App({run, start, initialPlan = '', initialFolder = '', initialBundle, root = repository, preview = false, discover = discoverLights, bundleLoader = findBundle}: {run: Run; start?: Start; initialPlan?: string; initialFolder?: string; initialBundle?: string; root?: string; preview?: boolean; discover?: typeof discoverLights; bundleLoader?: typeof findBundle}) {
+export function App({run, start, initialPlan = '', initialFolder = '', initialBundle, root = repository, preview = false, discover = discoverLights, bundleLoader = findBundle, nativeReader = readInstalled}: {run: Run; start?: Start; initialPlan?: string; initialFolder?: string; initialBundle?: string; root?: string; preview?: boolean; discover?: typeof discoverLights; bundleLoader?: typeof findBundle; nativeReader?: ReadInstalled}) {
   const {exit} = useApp(), {columns, rows} = useWindowSize();
   const [page, setPage] = useState<Page>(preview ? 'preview' : initialPlan ? 'open' : 'home');
   const [draft, setDraft] = useState<Draft>(() => ({...emptyDraft(), folder: initialFolder, output: initialFolder ? resolve(initialFolder, 'migration.json') : ''}));
@@ -51,12 +52,13 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
   const [live, setLive] = useState(false), [yes, setYes] = useState(false), [exclusive, setExclusive] = useState(false);
   const [audit, setAudit] = useState(''), [manualRestore, setManualRestore] = useState(false), [details, setDetails] = useState(false);
   const [lights, setLights] = useState<Light[]>([]), [bundle, setBundle] = useState<Bundle>();
+  const [installedLight, setInstalledLight] = useState<Light>(), [installedDetails, setInstalledDetails] = useState<InstalledDetails>();
   useEffect(() => () => {operation.current?.abort(); execution.current?.cancel();}, []);
   const fields = page === 'restore' && !manualRestore ? [{key: 'output' as const, label: 'New plan path', hint: 'The parent folder must exist. Existing files are preserved.'}] : groups[page] ?? [], field = fields[selected];
   const visibleCount = rows < 32 ? 2 : 3, firstField = Math.max(0, Math.min(selected - 1, fields.length - visibleCount));
   const go = (to: Page) => {setPage(to); setSelected(0); setCursor(to === 'open' ? Array.from(plan).length : 0); setNotice(''); setError(false);};
   const select = (value: number) => {
-    const count = page === 'home' ? 4 : page === 'discover' ? lights.length + 1 : fields.length + 1;
+    const count = page === 'home' ? 4 : page === 'discover' ? lights.length + 2 : page === 'installed' ? 2 : fields.length + 1;
     const index = (value + count) % count;
     setSelected(index); setCursor(Array.from(draft[fields[index]?.key ?? 'name']).length);
   };
@@ -73,13 +75,16 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
     setDraft(d => ({...d, ...Object.fromEntries(Object.entries(result.suggested).filter(([key]) => !d[key as keyof Draft]))}));
     setNotice(`${Object.keys(result.suggested).length} file suggestions found. ${result.ambiguous.length ? 'Multiple matches: choose each path explicitly.' : 'Names are suggestions; full validation follows.'}`);
   });
-  const discoverNearby = () => {go('discover'); void task(async signal => {
+  const discoverNearby = () => {go('discover'); setLights([]); void task(async signal => {
     setNotice('Listening for Keylight announcements on your local network…');
     const found = await discover({signal}); signal.throwIfAborted(); setLights(found); setSelected(0);
-    setNotice('Discovery is a selection hint. The installer checks the exact device before any write.');
+    setNotice(found.length ? 'Discovery is a selection hint. The installer checks the exact device before any write.' : 'No light answered. Discovery can be blocked on guest or isolated networks.');
   });};
   const selectLight = (light: Light) => void task(async signal => {
-    if (light.installed) {setNotice(`Already running Open Keylight. Open http://${light.ip}/ for controls and updates.`); return;}
+    if (light.installed) {
+      setInstalledLight(light); setInstalledDetails(undefined); go('installed'); setNotice('Reading device details. No settings or firmware will change…');
+      const details = await nativeReader(light, signal); signal.throwIfAborted(); setInstalledDetails(details); setNotice(''); return;
+    }
     setDraft(d => ({...d, ip: light.ip, name: light.name, deviceId: light.deviceId}));
     const selectedBundle = await bundleLoader(initialBundle, initialFolder || root); signal.throwIfAborted(); setBundle(selectedBundle); go('bundle');
   });
@@ -136,7 +141,12 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
     }
     if (page === 'discover') {
       if (key.tab || key.downArrow) select(selected + 1); else if (key.upArrow) select(selected - 1);
-      else if (key.return) {if (selected === lights.length) discoverNearby(); else selectLight(lights[selected]!);}
+      else if (key.return) {if (selected === lights.length) discoverNearby(); else if (selected === lights.length + 1) go('target'); else selectLight(lights[selected]!);}
+      return;
+    }
+    if (page === 'installed') {
+      if (key.tab || key.downArrow) select(selected + 1); else if (key.upArrow) select(selected - 1);
+      else if (key.return) {if (selected === 0) go('discover'); else discoverNearby();}
       return;
     }
     if (page === 'bundle') {if (key.return) prepareGuided(); return;}
@@ -175,6 +185,19 @@ export function App({run, start, initialPlan = '', initialFolder = '', initialBu
       <Text color={palette.muted}>We find your light and prepare the right files. You watch two short checks; we handle the installation.</Text>
     </>}
     {page === 'discover' && <LightChoices lights={lights} selected={selected} />}
+    {page === 'installed' && installedLight && <>
+      <Heading eyebrow={installedDetails ? 'YOUR EXISTING INSTALLATION' : 'DISCOVERED DASHBOARD'} title="Open your light." detail={installedLight.name} />
+      <Text bold color={palette.accent}>{`http://${installedLight.ip}/`}</Text>
+      {installedDetails ? <Box flexDirection="column" marginY={1}>
+        <Text color={palette.ink}>Open Keylight {installedDetails.firmware}</Text>
+        <Text color={palette.muted}>{installedDetails.deviceId} · identity checked just now</Text>
+      </Box> : <Text color={palette.muted}>Open Keylight was announced at this address. Version is not verified yet.</Text>}
+      <Text color={palette.ink}>{installedDetails ? 'No reinstall needed. Your dashboard has controls and updates.' : 'Verify this light in its dashboard before choosing an update.'}</Text>
+      <Text color={palette.muted}>For updates, open System in the dashboard and choose an application image.</Text>
+      {installedDetails?.trialPending && <Notice>A firmware trial is pending. Use the dashboard to check your controls and confirm the trial.</Notice>}
+      <Button label="Back to discovered lights" active={selected === 0} />
+      <Button label="Find lights again" active={selected === 1} />
+    </>}
     {page === 'bundle' && bundle && <>
       <Heading eyebrow="02 / YOUR RELEASE" title={`Open Keylight ${bundle.version}`} detail={`Selected for ${draft.name} · ${draft.ip}`} />
       <Text color={palette.accent}>✓ Firmware and dashboard files verified</Text>

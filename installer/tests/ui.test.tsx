@@ -47,12 +47,57 @@ test('default flow discovers only after selection, derives target and loads the 
   screen.unmount();
 });
 
-test('already installed discovery result directs to dashboard without selecting firmware or starting backend', async () => {
-  let calls = 0;
+test('already installed light gets a dedicated verified dashboard view and back navigation without mutations', async () => {
+  let calls = 0, reads = 0, discoveries = 0;
   const unexpected = async () => {calls++; throw new Error('Unexpected operation');};
-  const screen = render(<App run={unexpected} bundleLoader={unexpected} discover={async () => [{name: 'Desk', ip: '192.168.1.26', deviceId: 'keylight-ddeeff', installed: true}]} />);
+  const screen = render(<App run={unexpected} bundleLoader={unexpected}
+    nativeReader={async light => {reads++; return {deviceId: light.deviceId, firmware: '0.1.9-dev', trialPending: false};}}
+    discover={async () => {discoveries++; return [{name: 'Desk', ip: '192.168.1.26', deviceId: 'keylight-ddeeff', installed: true}];}} />);
   await pause(30); screen.stdin.write('\r'); await pause(50); screen.stdin.write('\r'); await pause(50);
-  assert.equal(calls, 0); assert.match(screen.lastFrame()!, /Already running Open Keylight/); screen.unmount();
+  assert.equal(calls, 0); assert.equal(reads, 1); assert.equal(discoveries, 1);
+  assert.match(screen.lastFrame()!, /YOUR EXISTING INSTALLATION/); assert.match(screen.lastFrame()!, /http:\/\/192\.168\.1\.26\//);
+  assert.match(screen.lastFrame()!, /0\.1\.9-dev/); assert.match(screen.lastFrame()!, /keylight-ddeeff/);
+  assert.match(screen.lastFrame()!, /No reinstall needed/); assert.match(screen.lastFrame()!, /System/);
+  screen.stdin.write('\r'); await pause(30); assert.match(screen.lastFrame()!, /FIND YOUR LIGHT/);
+  assert.equal(discoveries, 1); assert.equal(reads, 1);
+  screen.stdin.write('\x1b'); await pause(30); assert.match(screen.lastFrame()!, /Find my light/); screen.unmount();
+});
+
+test('empty discovery offers power/network guidance, retry and an explicit manual stock path', async () => {
+  let queries = 0, other = 0;
+  const unexpected = async () => {other++; throw new Error('Unexpected operation');};
+  const screen = render(<App run={unexpected} bundleLoader={unexpected} nativeReader={unexpected}
+    discover={async () => {queries++; return [];}} />);
+  await pause(30); screen.stdin.write('\r'); await pause(40);
+  assert.match(screen.lastFrame()!, /light has power/); assert.match(screen.lastFrame()!, /same local network/);
+  assert.match(screen.lastFrame()!, /router/); assert.match(screen.lastFrame()!, /Enter stock address manually/);
+  screen.stdin.write('\r'); await pause(40); assert.equal(queries, 2);
+  screen.stdin.write('\t'); await pause(30); screen.stdin.write('\r'); await pause(30);
+  assert.match(screen.lastFrame()!, /Light IP address/); assert.match(screen.lastFrame()!, /Exact stock name/);
+  assert.equal(other, 0); screen.unmount();
+});
+
+test('failed native detail read keeps a useful unverified view without retry or preparation', async () => {
+  let reads = 0;
+  const unexpected = async () => {throw new Error('No preparation expected');};
+  const screen = render(<App run={unexpected} bundleLoader={unexpected}
+    nativeReader={async () => {reads++; throw new Error('Device details unavailable');}}
+    discover={async () => [{name: 'Desk', ip: '192.168.1.26', deviceId: 'keylight-ddeeff', installed: true}]} />);
+  await pause(30); screen.stdin.write('\r'); await pause(40); screen.stdin.write('\r'); await pause(40);
+  assert.equal(reads, 1); assert.match(screen.lastFrame()!, /Version is not verified/);
+  assert.match(screen.lastFrame()!, /Device details unavailable/); assert.match(screen.lastFrame()!, /http:\/\/192\.168\.1\.26\//);
+  assert.match(screen.lastFrame()!, /Verify this light/);
+  assert.doesNotMatch(screen.lastFrame()!, /identity checked|No reinstall needed|YOUR EXISTING INSTALLATION/); screen.unmount();
+});
+
+test('native pending trial directs to dashboard confirmation without confirming it', async () => {
+  let reads = 0;
+  const screen = render(<App run={async () => {throw new Error('No backend expected');}}
+    nativeReader={async light => {reads++; return {deviceId: light.deviceId, firmware: '0.2.0-alpha.1', trialPending: true};}}
+    discover={async () => [{name: 'Desk', ip: '192.168.1.26', deviceId: 'keylight-ddeeff', installed: true}]} />);
+  await pause(30); screen.stdin.write('\r'); await pause(40); screen.stdin.write('\r'); await pause(40);
+  assert.equal(reads, 1); assert.match(screen.lastFrame()!, /firmware trial is pending/);
+  assert.match(screen.lastFrame()!, /confirm the trial/); screen.unmount();
 });
 test('offline cancellation sends AbortSignal and never retries preparation', async () => {
   let calls = 0, aborted = false;
