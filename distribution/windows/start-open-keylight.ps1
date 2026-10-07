@@ -9,7 +9,20 @@ function Assert-Archive([string]$Path, $Spec) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
     $file = Get-Item -LiteralPath $Path
     if ($file.Length -ne $Spec.bytes) { return $false }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $Spec.sha256
+    # Get-FileHash is not reliably available when PS 7 launches this PS 5.1
+    # script through CMD with an inherited Core module path. Hash via .NET
+    # without rewriting the user's module search path.
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        $hash = [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        return $hash -ceq $Spec.sha256
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        $algorithm.Dispose()
+    }
 }
 
 function Get-VerifiedArchive([string]$Cache, $Spec) {
