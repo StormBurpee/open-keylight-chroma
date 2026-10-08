@@ -4,6 +4,8 @@ Local controls for the independent Open Keylight API v1. This plugin does not co
 
 ## Install
 
+Plugin 0.2.1 adds the Temperature action and upgrades existing 0.2.0 installations. Its version is independent of the firmware version.
+
 1. Install Stream Deck 7.0 or later on Windows 10+ or macOS 12+. The manifest selects Stream Deck's bundled Node 20 runtime.
 2. Open the built `dist/org.openkeylight.chroma.streamDeckPlugin` package to install it. Building this project does **not** install it or modify Stream Deck profiles.
 3. Drag an action from **Open Keylight Chroma** onto a key or compatible dial.
